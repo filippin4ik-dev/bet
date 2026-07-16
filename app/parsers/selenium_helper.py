@@ -65,6 +65,10 @@ def _make_driver():
                 "--disable-gpu", "--lang=ru-RU",
                 f"--window-size={random.choice(['1920,1080', '1366,768'])}"):
         options.add_argument(arg)
+    # Живые страницы БК грузятся «бесконечно» (websocket, лента ставок) —
+    # не ждём полной загрузки, забираем DOM после паузы. Иначе на слабом
+    # VPS driver.get() падает с «Timed out receiving message from renderer».
+    options.page_load_strategy = "none"
     browser = _first_existing(BROWSER_CANDIDATES)
     if browser:
         options.binary_location = browser
@@ -96,13 +100,50 @@ class SeleniumSession:
             return None
         import time
         try:
-            self.driver.set_page_load_timeout(40)
-            self.driver.get(url)
-            time.sleep(wait_seconds)
-            return self.driver.page_source
+            self.driver.set_page_load_timeout(60)
+            try:
+                self.driver.get(url)
+            except Exception as exc:  # noqa: BLE001
+                # Даже если загрузка «не завершилась» (у live-страниц она не
+                # завершается никогда) — DOM уже отрисован, работаем с ним.
+                log.info("Selenium: %s грузится дольше таймаута (%s) — "
+                         "останавливаю и беру текущий DOM",
+                         url, exc.__class__.__name__)
+                try:
+                    self.driver.execute_script("window.stop();")
+                except Exception:  # noqa: BLE001
+                    pass
+            # Ждём, пока SPA дорисует линию: опрашиваем размер DOM и выходим,
+            # когда он перестал расти (или вышло время).
+            deadline = time.monotonic() + max(wait_seconds, 6.0)
+            html, prev_len, stable = "", -1, 0
+            while time.monotonic() < deadline:
+                time.sleep(2.0)
+                try:
+                    html = self.driver.page_source
+                except Exception:  # noqa: BLE001
+                    continue
+                if len(html) == prev_len and len(html) > 50_000:
+                    stable += 1
+                    if stable >= 2:      # ~4 секунды без изменений — готово
+                        break
+                else:
+                    stable, prev_len = 0, len(html)
+            return html or None
         except Exception as exc:  # noqa: BLE001
             log.warning("Selenium: ошибка загрузки %s: %s", url, exc)
+            self._restart()
             return None
+
+    def _restart(self) -> None:
+        """После краха рендерера сессия может быть неработоспособна —
+        пересоздаём браузер, чтобы следующие страницы не пропали."""
+        try:
+            if self.driver is not None:
+                self.driver.quit()
+        except Exception:  # noqa: BLE001
+            pass
+        self.driver = _make_driver()
 
     def close(self) -> None:
         if self.driver is not None:

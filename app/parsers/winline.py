@@ -36,7 +36,7 @@ class WinlineParser(BaseParser):
                 return []
             for url, kind in PAGES:
                 self._delay()
-                html = s.render(url, wait_seconds=12)
+                html = s.render(url, wait_seconds=25)
                 if html:
                     odds.extend(self._parse_html(html, kind))
         return odds

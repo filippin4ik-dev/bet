@@ -58,7 +58,7 @@ class BetBoomParser(BaseParser):
             for tmpl, kind in SECTIONS:
                 for slug, sport in SPORTS:
                     self._delay()
-                    html = s.render(tmpl.format(slug=slug), wait_seconds=9)
+                    html = s.render(tmpl.format(slug=slug), wait_seconds=15)
                     if html:
                         odds.extend(self._parse_html(html, kind, sport))
         return odds
