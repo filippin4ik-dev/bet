@@ -6,6 +6,10 @@ const POLL_INTERVAL_MS = 10_000;
 
 const els = {
   body: document.getElementById("arbs-body"),
+  oddsBody: document.getElementById("odds-body"),
+  arbsTable: document.getElementById("arbs-table"),
+  oddsTable: document.getElementById("odds-table"),
+  viewTabs: document.getElementById("view-tabs"),
   kindTabs: document.getElementById("kind-tabs"),
   minProfit: document.getElementById("min-profit"),
   bank: document.getElementById("bank"),
@@ -14,7 +18,9 @@ const els = {
   testSound: document.getElementById("test-sound"),
   modeBadge: document.getElementById("mode-badge"),
   lastScan: document.getElementById("last-scan"),
+  scanningBadge: document.getElementById("scanning-badge"),
   coverage: document.getElementById("coverage"),
+  bkCounts: document.getElementById("bk-counts"),
   arbCount: document.getElementById("arb-count"),
   interval: document.getElementById("interval"),
 };
@@ -22,6 +28,7 @@ const els = {
 let soundAlertProfit = 2.5;
 let alertedKeys = new Set(); // вилки, о которых уже «пропищали»
 let currentKind = "all";     // all | live | prematch
+let currentView = "arbs";    // arbs | odds
 
 /* ---------- звук (Web Audio, без файлов) ---------- */
 
@@ -58,6 +65,29 @@ function kindCell(a) {
     return `<span class="kind prematch">Прематч</span> ${when}`;
   }
   return '<span class="kind live">LIVE</span>';
+}
+
+function renderOdds(odds) {
+  if (!odds.length) {
+    els.oddsBody.innerHTML =
+      '<tr><td colspan="7" class="empty">Пока ни одного матча — ждём окончания обхода БК…</td></tr>';
+    return;
+  }
+  els.oddsBody.innerHTML = odds.map((o) => `<tr>
+      <td><span class="bk-name">${o.bookmaker}</span></td>
+      <td>${kindCell(o)}</td>
+      <td>${o.sport}</td>
+      <td>${o.match}</td>
+      <td>${o.market}</td>
+      <td><span class="out">${o.outcome1}</span> <span class="coef">${o.k1.toFixed(2)}</span></td>
+      <td><span class="out">${o.outcome2}</span> <span class="coef">${o.k2.toFixed(2)}</span></td>
+    </tr>`).join("");
+}
+
+function renderBkCounts(bookmakers) {
+  const parts = Object.entries(bookmakers || {})
+    .map(([bk, n]) => `${bk}: ${n}`);
+  els.bkCounts.textContent = parts.length ? parts.join(" · ") : "";
 }
 
 function render(arbs) {
@@ -102,6 +132,7 @@ async function poll() {
 
     els.modeBadge.textContent = data.mode === "live" ? "LIVE" : "ДЕМО";
     els.modeBadge.className = "badge " + data.mode;
+    els.scanningBadge.hidden = !data.scanning;
 
     if (data.last_scan) {
       els.lastScan.textContent = "Обновлено: " +
@@ -112,6 +143,7 @@ async function poll() {
       els.coverage.textContent =
         `Проверено: ${data.events_checked} событий / ${data.quotes_checked} котировок`;
     }
+    renderBkCounts(data.bookmakers);
 
     render(data.arbs);
 
@@ -123,10 +155,29 @@ async function poll() {
   } catch (err) {
     els.lastScan.textContent = "Ошибка связи с сервером…";
   }
+
+  if (currentView === "odds") {
+    try {
+      const resp = await fetch(`/api/odds?kind=${currentKind}`);
+      const data = await resp.json();
+      renderOdds(data.odds);
+    } catch (err) { /* статус уже показан выше */ }
+  }
 }
 
 els.minProfit.addEventListener("change", poll);
 els.bank.addEventListener("change", poll);
+
+els.viewTabs.addEventListener("click", (e) => {
+  const btn = e.target.closest("button[data-view]");
+  if (!btn) return;
+  currentView = btn.dataset.view;
+  els.viewTabs.querySelectorAll("button").forEach(
+    (b) => b.classList.toggle("active", b === btn));
+  els.arbsTable.hidden = currentView !== "arbs";
+  els.oddsTable.hidden = currentView !== "odds";
+  poll();
+});
 
 els.kindTabs.addEventListener("click", (e) => {
   const btn = e.target.closest("button[data-kind]");

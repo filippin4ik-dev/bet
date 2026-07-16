@@ -8,12 +8,18 @@ import logging
 import os
 import random
 import shutil
+import threading
 
 from ..config import USE_SELENIUM
 
 log = logging.getLogger("parsers.selenium")
 
 _warned = False
+
+# Парсеры разных БК работают в параллельных потоках, но рендерим страницы
+# СТРОГО по одной: несколько Chrome, рендерящих одновременно на слабом VPS
+# (1–2 vCPU), душат друг друга и всё встаёт на десятки минут.
+_render_lock = threading.Lock()
 
 # Типичные расположения браузера и chromedriver, включая snap-версию
 # Chromium на Ubuntu (пакет chromium-browser -> snap).
@@ -104,7 +110,12 @@ class SeleniumSession:
     def render(self, url: str, wait_seconds: float = 8.0) -> str | None:
         if self.driver is None:
             return None
+        with _render_lock:
+            return self._render_locked(url, wait_seconds)
+
+    def _render_locked(self, url: str, wait_seconds: float) -> str | None:
         import time
+        t0 = time.monotonic()
         try:
             self.driver.set_page_load_timeout(60)
             self.driver.set_script_timeout(25)
@@ -150,6 +161,8 @@ class SeleniumSession:
                     "return document.documentElement.outerHTML;")
             except Exception:  # noqa: BLE001
                 html = self.driver.page_source
+            log.info("Selenium: %s отрендерен за %.0f c (%d байт)",
+                     url, time.monotonic() - t0, len(html or ""))
             return html or None
         except Exception as exc:  # noqa: BLE001
             log.warning("Selenium: ошибка загрузки %s: %s", url, exc)

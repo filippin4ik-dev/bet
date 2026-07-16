@@ -44,6 +44,20 @@ class MarketOdds:
         БК сопоставляются между собой (одинаковый матч И одинаковый рынок)."""
         return f"{self.event_key}|{self.market_key}"
 
+    def to_dict(self) -> dict:
+        return {
+            "bookmaker": self.bookmaker,
+            "sport": self.sport,
+            "match": f"{self.team1} — {self.team2}",
+            "market": self.market,
+            "outcome1": self.outcome1,
+            "outcome2": self.outcome2,
+            "k1": self.k1,
+            "k2": self.k2,
+            "kind": self.kind,
+            "start_time": self.start_time,
+        }
+
 
 def _norm(name: str) -> str:
     return " ".join(name.lower().replace("ё", "е").split())

@@ -53,6 +53,25 @@ def get_arbs(
     return snap
 
 
+@app.get("/api/odds")
+def get_odds(
+    kind: str = Query("all", pattern="^(all|live|prematch)$",
+                      description="Тип рынка: all | live | prematch"),
+):
+    """Все найденные матчи/котировки последнего обхода (по всем БК)."""
+    snap = scanner.snapshot()
+    odds = scanner.odds_snapshot()
+    if kind != "all":
+        odds = [o for o in odds if o["kind"] == kind]
+    odds.sort(key=lambda o: (o["bookmaker"], o["sport"], o["match"]))
+    return {
+        "scanning": snap["scanning"],
+        "last_scan": snap["last_scan"],
+        "bookmakers": snap["bookmakers"],
+        "odds": odds,
+    }
+
+
 @app.get("/api/history")
 def get_history(limit: int = Query(100, ge=1, le=1000)):
     """История найденных вилок из SQLite."""
