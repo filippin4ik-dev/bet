@@ -1,0 +1,25 @@
+# Systemd-юнит для автозапуска сканера вилок на VPS.
+# Установка (пути поправьте под себя):
+#   sudo cp deploy/arb-scanner.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now arb-scanner
+
+[Unit]
+Description=Сканер вилок П1/П2 (FastAPI)
+After=network.target
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+WorkingDirectory=/opt/arb-scanner
+Environment=SCANNER_MODE=live
+Environment=SCAN_INTERVAL=10
+Environment=SOUND_ALERT_PROFIT=2.5
+Environment=DB_PATH=/opt/arb-scanner/arbs.sqlite3
+ExecStart=/opt/arb-scanner/venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

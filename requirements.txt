@@ -1,0 +1,9 @@
+fastapi>=0.111
+uvicorn[standard]>=0.30
+requests>=2.32
+beautifulsoup4>=4.12
+
+# Опционально: для динамических страниц БК (JS-рендеринг).
+# Раскомментируйте при необходимости:
+# selenium>=4.21
+# webdriver-manager>=4.0
