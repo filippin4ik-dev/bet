@@ -28,6 +28,9 @@ def init_db() -> None:
                 sport         TEXT NOT NULL,
                 team1         TEXT NOT NULL,
                 team2         TEXT NOT NULL,
+                market        TEXT NOT NULL DEFAULT 'Победитель',
+                outcome1      TEXT NOT NULL DEFAULT 'П1',
+                outcome2      TEXT NOT NULL DEFAULT 'П2',
                 k1_max        REAL NOT NULL,
                 k1_bookmaker  TEXT NOT NULL,
                 k2_max        REAL NOT NULL,
@@ -36,13 +39,18 @@ def init_db() -> None:
                 stakes_json   TEXT NOT NULL
             )
         """)
-        # Миграция баз, созданных до появления прематча
+        # Миграция старых баз (добавление появившихся позже колонок)
         cols = {r["name"] for r in conn.execute("PRAGMA table_info(arbs_history)")}
-        if "kind" not in cols:
-            conn.execute("ALTER TABLE arbs_history "
-                         "ADD COLUMN kind TEXT NOT NULL DEFAULT 'live'")
-        if "start_time" not in cols:
-            conn.execute("ALTER TABLE arbs_history ADD COLUMN start_time TEXT")
+        migrations = {
+            "kind": "ALTER TABLE arbs_history ADD COLUMN kind TEXT NOT NULL DEFAULT 'live'",
+            "start_time": "ALTER TABLE arbs_history ADD COLUMN start_time TEXT",
+            "market": "ALTER TABLE arbs_history ADD COLUMN market TEXT NOT NULL DEFAULT 'Победитель'",
+            "outcome1": "ALTER TABLE arbs_history ADD COLUMN outcome1 TEXT NOT NULL DEFAULT 'П1'",
+            "outcome2": "ALTER TABLE arbs_history ADD COLUMN outcome2 TEXT NOT NULL DEFAULT 'П2'",
+        }
+        for col, ddl in migrations.items():
+            if col not in cols:
+                conn.execute(ddl)
 
 
 def save_arbs(arbs: list[Arb]) -> None:
@@ -51,6 +59,7 @@ def save_arbs(arbs: list[Arb]) -> None:
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     rows = [
         (now, a.kind, a.start_time, a.match_key, a.sport, a.team1, a.team2,
+         a.market, a.outcome1, a.outcome2,
          a.k1_max, a.k1_bookmaker, a.k2_max, a.k2_bookmaker,
          round(a.profit_pct, 2), json.dumps(a.stakes, ensure_ascii=False))
         for a in arbs
@@ -59,9 +68,10 @@ def save_arbs(arbs: list[Arb]) -> None:
         conn.executemany(
             """INSERT INTO arbs_history
                (found_at, kind, start_time, match_key, sport, team1, team2,
+                market, outcome1, outcome2,
                 k1_max, k1_bookmaker, k2_max, k2_bookmaker,
                 profit_pct, stakes_json)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             rows,
         )
 

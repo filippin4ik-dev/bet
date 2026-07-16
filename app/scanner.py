@@ -57,7 +57,7 @@ class Scanner:
             self._arbs = arbs
             self._last_scan = time.time()
             self._scan_count += 1
-            self._events_checked = len({o.match_key for o in all_odds})
+            self._events_checked = len({o.event_key for o in all_odds})
             self._quotes_checked = len(all_odds)
 
         db.save_arbs(new)

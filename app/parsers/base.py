@@ -7,7 +7,7 @@ import time
 import requests
 
 from ..config import HTTP_TIMEOUT, REQUEST_DELAY_MIN, REQUEST_DELAY_MAX
-from ..models import MatchOdds
+from ..models import MarketOdds
 
 log = logging.getLogger("parsers")
 
@@ -31,7 +31,7 @@ USER_AGENTS = [
 
 
 class BaseParser:
-    """Каждый наследник реализует fetch_odds() -> list[MatchOdds]."""
+    """Каждый наследник реализует fetch_odds() -> list[MarketOdds]."""
 
     name: str = "base"
 
@@ -71,14 +71,14 @@ class BaseParser:
 
     # ---------- интерфейс ----------
 
-    def fetch_odds(self) -> list[MatchOdds]:
+    def fetch_odds(self) -> list[MarketOdds]:
         raise NotImplementedError
 
-    def safe_fetch(self) -> list[MatchOdds]:
+    def safe_fetch(self) -> list[MarketOdds]:
         """Обёртка: ошибки одной БК не должны ронять весь цикл сканера."""
         try:
             odds = self.fetch_odds()
-            log.info("%s: получено %d матчей", self.name, len(odds))
+            log.info("%s: получено %d котировок", self.name, len(odds))
             return odds
         except Exception as exc:  # noqa: BLE001 — любые сбои сети/разметки
             log.warning("%s: ошибка парсинга: %s", self.name, exc)
