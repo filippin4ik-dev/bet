@@ -131,7 +131,25 @@ class FonbetParser(BaseParser):
         if not data:
             return []
 
-        sports = {s["id"]: s.get("name", "") for s in data.get("sports", [])}
+        # У Fonbet «спорт» события — это лига/сегмент (напр. «США. MLS»),
+        # у сегмента есть parentId до корневого вида спорта («Футбол»).
+        # Показываем «Вид спорта · Лига», чтобы работал фильтр по спорту.
+        raw_sports = {s["id"]: s for s in data.get("sports", [])}
+
+        def sport_name(sport_id) -> str:
+            seg = raw_sports.get(sport_id)
+            if not seg:
+                return "Спорт"
+            root, hops = seg, 0
+            while root.get("parentId") in raw_sports and hops < 5:
+                root = raw_sports[root["parentId"]]
+                hops += 1
+            root_name = root.get("name", "Спорт")
+            seg_name = seg.get("name", "")
+            if seg_name and seg_name != root_name:
+                return f"{root_name} · {seg_name}"
+            return root_name
+
         events = {e["id"]: e for e in data.get("events", [])}
 
         result: list[MarketOdds] = []
@@ -155,7 +173,7 @@ class FonbetParser(BaseParser):
             if event.get("place") != "line" or root.get("place") != "line":
                 continue
 
-            sport = sports.get(root.get("sportId"), "Спорт")
+            sport = sport_name(root.get("sportId"))
             market_name = event.get("name") if event is not root else None
             if market_name:
                 sport = f"{sport} · {market_name}"

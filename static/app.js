@@ -105,10 +105,13 @@ function cmp(a, b, key) {
   return String(va).localeCompare(String(vb), "ru");
 }
 
+// Корневой вид спорта: «Футбол · США. MLS» -> «Футбол»
+const rootSport = (s) => String(s).split(" · ")[0].trim();
+
 function applyFilters(rows) {
   const q = state.search.trim().toLowerCase();
   return rows.filter((r) => {
-    if (state.sport && r.sport !== state.sport) return false;
+    if (state.sport && rootSport(r.sport) !== state.sport) return false;
     if (state.view === "odds" && state.bookmaker && r.bookmaker !== state.bookmaker) return false;
     if (q) {
       const hay = `${r.match} ${r.sport} ${r.market} ${r.bookmaker || ""} ${r.k1_bookmaker || ""} ${r.k2_bookmaker || ""}`.toLowerCase();
@@ -134,8 +137,8 @@ function updateSortIndicators() {
 
 function refreshFilterOptions() {
   const rows = state.view === "arbs" ? lastArbs : lastOdds;
-  // Вид спорта без дочерней росписи («Теннис · 2сет» -> «Теннис»)
-  const sports = [...new Set(rows.map((r) => r.sport))].sort((a, b) => a.localeCompare(b, "ru"));
+  // В фильтре — только корневые виды спорта, без лиг и росписей
+  const sports = [...new Set(rows.map((r) => rootSport(r.sport)))].sort((a, b) => a.localeCompare(b, "ru"));
   fillSelect(els.sportFilter, sports, state.sport, "Все");
   if (state.view === "odds") {
     const bks = [...new Set(rows.map((r) => r.bookmaker))].sort();
