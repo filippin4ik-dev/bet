@@ -13,9 +13,13 @@ Type=simple
 User=www-data
 Group=www-data
 WorkingDirectory=/opt/arb-scanner
-Environment=SCAN_INTERVAL=10
+Environment=SCAN_INTERVAL=30
 Environment=SOUND_ALERT_PROFIT=2.5
 Environment=DB_PATH=/opt/arb-scanner/arbs.sqlite3
+# Сколько лиг BetBoom обходить на вид спорта (больше = полнее, но дольше)
+Environment=BETBOOM_MAX_LEAGUES=8
+# Сколько секунд прокручивать ленты SPA, чтобы дорисовались все матчи
+Environment=SCROLL_SECONDS=25
 ExecStart=/opt/arb-scanner/venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000
 Restart=always
 RestartSec=5

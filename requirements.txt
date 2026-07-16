@@ -2,6 +2,9 @@ fastapi>=0.111
 uvicorn[standard]>=0.30
 requests>=2.32
 beautifulsoup4>=4.12
+# Быстрый HTML-парсер: за цикл разбираются десятки многомегабайтных
+# снимков DOM, html.parser на слабом VPS не успевает
+lxml>=5.0
 
 # Нужен для динамических сайтов (Winline / BetBoom / Лига Ставок).
 # Требует установленного Chromium/Chrome в системе (см. README).

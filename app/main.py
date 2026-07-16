@@ -40,30 +40,21 @@ app = FastAPI(title="Сканер вилок (двухисходные рынк�
 @app.get("/api/arbs")
 def get_arbs(
     min_profit: float = Query(0.0, ge=0, description="Мин. доходность, %"),
-    kind: str = Query("all", pattern="^(all|live|prematch)$",
-                      description="Тип рынка: all | live | prematch"),
 ):
-    """Текущие вилки (обновляются фоновым сканером каждые 10 секунд)."""
+    """Текущие вилки по прематчу (обновляются фоновым сканером)."""
     snap = scanner.snapshot()
-    arbs = [a for a in snap["arbs"] if a["profit_pct"] >= min_profit]
-    if kind != "all":
-        arbs = [a for a in arbs if a["kind"] == kind]
-    snap["arbs"] = arbs
+    snap["arbs"] = [a for a in snap["arbs"] if a["profit_pct"] >= min_profit]
     snap["sound_alert_profit"] = SOUND_ALERT_PROFIT
     return snap
 
 
 @app.get("/api/odds")
-def get_odds(
-    kind: str = Query("all", pattern="^(all|live|prematch)$",
-                      description="Тип рынка: all | live | prematch"),
-):
-    """Все найденные матчи/котировки последнего обхода (по всем БК)."""
+def get_odds():
+    """Все найденные прематч-матчи/котировки (по всем БК)."""
     snap = scanner.snapshot()
     odds = scanner.odds_snapshot()
-    if kind != "all":
-        odds = [o for o in odds if o["kind"] == kind]
-    odds.sort(key=lambda o: (o["bookmaker"], o["sport"], o["match"]))
+    odds.sort(key=lambda o: (o["start_ts"] or float("inf"),
+                             o["sport"], o["match"], o["bookmaker"]))
     return {
         "scanning": snap["scanning"],
         "last_scan": snap["last_scan"],

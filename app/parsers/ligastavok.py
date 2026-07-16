@@ -6,15 +6,14 @@
 """
 from bs4 import BeautifulSoup
 
-from ..models import KIND_LIVE, KIND_PREMATCH, MarketOdds
+from ..models import KIND_PREMATCH, MarketOdds
 from .base import BaseParser
-from .html_utils import pair, parse_totals
+from .html_utils import SOUP_PARSER, pair, parse_start_ts, parse_totals
 from .selenium_helper import get_html_via_selenium
 
-# (URL, тип рынка) — между запросами выдерживается случайная пауза 2–5 c
+# Только прематч-линия (live отключён)
 PAGES = [
-    ("https://www.ligastavok.ru/bets/live", KIND_LIVE),  # Live-линия
-    ("https://www.ligastavok.ru/bets", KIND_PREMATCH),   # прематч-линия
+    ("https://www.ligastavok.ru/bets", KIND_PREMATCH),
 ]
 
 
@@ -37,7 +36,7 @@ class LigaStavokParser(BaseParser):
         return odds
 
     def _parse_html(self, html: str, kind: str) -> list[MarketOdds]:
-        soup = BeautifulSoup(html, "html.parser")
+        soup = BeautifulSoup(html, SOUP_PARSER)
         coef_sel = ".bui-outcome__value, .outcome-value, .rate"
         result = []
         for event in soup.select("[itemtype*='SportsEvent'], .bui-event-row, .event"):
@@ -48,10 +47,12 @@ class LigaStavokParser(BaseParser):
             sport_el = event.find_parent(attrs={"data-sport-name": True})
             sport = sport_el["data-sport-name"] if sport_el else "Спорт"
             time_el = event.select_one(".bui-event-row__time, .event-time, time")
+            start_time = time_el.get_text(strip=True) if time_el else None
             base = dict(
                 bookmaker=self.name, sport=sport,
                 team1=teams[0], team2=teams[1], kind=kind,
-                start_time=time_el.get_text(strip=True) if time_el else None,
+                start_time=start_time,
+                start_ts=parse_start_ts(start_time),
             )
             coefs = [c.get_text(strip=True) for c in event.select(coef_sel)]
             k1, k2 = pair(coefs)

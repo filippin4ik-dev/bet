@@ -53,11 +53,12 @@ class BaseParser:
 
     # ---------- сетевые помощники ----------
 
-    def get_json(self, url: str, *, delay: bool = False, **kwargs):
+    def get_json(self, url: str, *, delay: bool = False,
+                 timeout: float | None = None, **kwargs):
         if delay:
             self._delay()
         resp = self.session.get(url, headers=self._headers(),
-                                timeout=HTTP_TIMEOUT, **kwargs)
+                                timeout=timeout or HTTP_TIMEOUT, **kwargs)
         log.debug("%s GET %s -> %s (%d байт)",
                   self.name, url, resp.status_code, len(resp.content))
         resp.raise_for_status()

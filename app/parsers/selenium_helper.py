@@ -132,6 +132,14 @@ def _make_driver():
         else:
             driver = webdriver.Chrome(options=options)
         _tune_executor(driver)
+        # Часовой пояс браузера — московский: БК рендерят время начала
+        # матчей в поясе браузера, а парсер разбирает его как МСК
+        # (BK_TZ_OFFSET). Иначе на сервере с UTC время «уедет» на 3 часа.
+        try:
+            driver.execute_cdp_cmd("Emulation.setTimezoneOverride",
+                                   {"timezoneId": "Europe/Moscow"})
+        except Exception as exc:  # noqa: BLE001
+            log.debug("Selenium: не удалось задать таймзону: %s", exc)
         return driver
     except Exception as exc:  # noqa: BLE001
         log.warning("Selenium: не удалось запустить браузер: %s "
@@ -196,11 +204,30 @@ class SeleniumSession:
             return _get_shared_driver()
 
     def render(self, url: str, wait_seconds: float = 8.0) -> str | None:
+        """Рендер страницы без прокрутки — вернёт итоговый DOM."""
+        snaps = self.render_snapshots(url, wait_seconds, scroll_seconds=0.0)
+        return snaps[-1] if snaps else None
+
+    def render_snapshots(self, url: str, wait_seconds: float = 8.0,
+                         scroll_seconds: float = 0.0,
+                         click_text: str | None = None) -> list[str]:
+        """Рендер страницы с прокруткой до конца списка.
+
+        SPA букмекеров рисуют линию лениво (виртуальный список): без
+        прокрутки в DOM есть только верхние ~50 событий. Прокручиваем вниз
+        до дна (не дольше scroll_seconds) и снимаем DOM на каждом шаге —
+        виртуальные списки выгружают уехавшие вверх строки, поэтому одного
+        финального снимка недостаточно. Парсер разбирает все снимки и
+        убирает дубли.
+
+        click_text — кликнуть по элементу с таким текстом после загрузки
+        (BetBoom не рисует прематч-линию, пока не выбран вид спорта в меню).
+        """
         global _render_count
         with _render_lock:
             driver = _get_shared_driver()
             if driver is None:
-                return None
+                return []
             _render_count += 1
             if _render_count > _MAX_RENDERS_PER_BROWSER:
                 log.info("Selenium: профилактический перезапуск браузера")
@@ -208,11 +235,205 @@ class SeleniumSession:
                 _render_count = 1
                 driver = _get_shared_driver()
                 if driver is None:
-                    return None
-            return self._render_locked(driver, url, wait_seconds)
+                    return []
+            return self._render_locked(driver, url, wait_seconds,
+                                       scroll_seconds, click_text)
 
-    def _render_locked(self, driver, url: str,
-                       wait_seconds: float) -> str | None:
+    # Клик по элементу, чей СОБСТВЕННЫЙ текст равен искомому.
+    # Предпочитаем заголовки h1-h6: в левом меню BetBoom вид спорта — это
+    # <h3> внутри кнопки, а такой же текст в live-карусели — <span>.
+    _CLICK_TEXT_JS = """
+        const want = arguments[0];
+        const own = el => Array.from(el.childNodes)
+            .filter(n => n.nodeType === 3)
+            .map(n => n.textContent.trim()).join('');
+        const els = Array.from(document.querySelectorAll('*'))
+            .filter(el => own(el) === want);
+        if (!els.length) return false;
+        els.sort((a, b) =>
+            (/^H[1-6]$/.test(a.tagName) ? 0 : 1) -
+            (/^H[1-6]$/.test(b.tagName) ? 0 : 1));
+        els[0].scrollIntoView({block: 'center'});
+        els[0].click();
+        return true;
+    """
+
+    # Заголовки лиг в ленте: H3 внутри ссылки (в отличие от меню видов
+    # спорта, где H3 живёт в кнопке). Клик открывает страницу лиги.
+    _LEAGUE_HEADS_JS = """
+        const heads = [];
+        for (const h of document.querySelectorAll('h3')) {
+            const a = h.parentElement;
+            if (a && a.tagName === 'A') heads.push(h.textContent.trim());
+        }
+        return heads;
+    """
+    _CLICK_LEAGUE_JS = """
+        const idx = arguments[0];
+        let i = 0;
+        for (const h of document.querySelectorAll('h3')) {
+            const a = h.parentElement;
+            if (!a || a.tagName !== 'A') continue;
+            if (i === idx) { a.click(); return h.textContent.trim(); }
+            i++;
+        }
+        return null;
+    """
+
+    def render_league_pages(self, url: str, click_text: str,
+                            wait_seconds: float = 12.0,
+                            scroll_seconds: float = 10.0,
+                            max_leagues: int = 20) -> list[str]:
+        """BetBoom: обходит лиги одного вида спорта внутри SPA.
+
+        Прямые URL лиг сайт редиректит в live-раздел, поэтому единственный
+        путь к прематч-линии каждой лиги — клики внутри приложения:
+        страница вида спорта -> клик по лиге -> назад -> следующая лига.
+        Возвращает снимки DOM со всех посещённых страниц.
+        """
+        global _render_count
+        with _render_lock:
+            driver = _get_shared_driver()
+            if driver is None:
+                return []
+            _render_count += 1
+            if _render_count > _MAX_RENDERS_PER_BROWSER:
+                log.info("Selenium: профилактический перезапуск браузера")
+                _drop_shared_driver()
+                _render_count = 1
+                driver = _get_shared_driver()
+                if driver is None:
+                    return []
+            return self._render_leagues_locked(
+                driver, url, click_text, wait_seconds, scroll_seconds,
+                max_leagues)
+
+    def _render_leagues_locked(self, driver, url: str, click_text: str,
+                               wait_seconds: float, scroll_seconds: float,
+                               max_leagues: int) -> list[str]:
+        import time
+        t0 = time.monotonic()
+        # Страница вида спорта (первая лига уже развёрнута)
+        snaps = self._render_locked(driver, url, wait_seconds,
+                                    scroll_seconds, click_text)
+        if not snaps:
+            return []
+        try:
+            leagues = driver.execute_script(self._LEAGUE_HEADS_JS) or []
+        except Exception:  # noqa: BLE001
+            leagues = []
+        # Первая лига уже развёрнута на странице вида спорта — её страницу
+        # не открываем, идём по остальным.
+        for idx in range(1, min(len(leagues), max_leagues)):
+            try:
+                name = driver.execute_script(self._CLICK_LEAGUE_JS, idx)
+                if not name:
+                    break
+                self._wait_dom_stable(driver, wait_seconds)
+                html = self._dom(driver)
+                if html:
+                    snaps.append(html)
+                snaps.extend(self._scroll_snapshots(driver, scroll_seconds))
+                driver.back()
+                self._wait_dom_stable(driver, wait_seconds)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("Selenium: лига %d на %s не открылась: %s",
+                            idx, url, exc)
+                break
+        log.info("Selenium: %s обойдено лиг: %d за %.0f c (%d снимков)",
+                 url, min(len(leagues), max_leagues), time.monotonic() - t0,
+                 len(snaps))
+        return snaps
+
+    def _dom(self, driver) -> str | None:
+        """Текущий DOM (без page_source — он висит на слабом VPS)."""
+        html = driver.execute_script(
+            "return document.documentElement.outerHTML;")
+        return html or None
+
+    # Скроллим не window, а контейнер, в котором живёт лента матчей:
+    # у Winline/BetBoom это внутренний div с overflow:auto, и window.scrollBy
+    # для него ничего не делает. Ищем прокручиваемого ПРЕДКА кнопки «П1»
+    # (не боковое меню!), иначе — самый «длинный» прокручиваемый контейнер.
+    _SCROLL_STEP_JS = """
+        const scrollable = el => {
+            const oy = getComputedStyle(el).overflowY;
+            return (oy === 'auto' || oy === 'scroll') &&
+                   el.scrollHeight > el.clientHeight + 50;
+        };
+        let target = null;
+        const p1 = Array.from(document.querySelectorAll('*')).find(
+            el => el.childElementCount === 0 &&
+                  el.textContent.trim() === 'П1');
+        if (p1) {
+            for (let el = p1.parentElement; el; el = el.parentElement) {
+                if (scrollable(el)) { target = el; break; }
+            }
+        }
+        if (!target) {
+            let bestD = 0;
+            for (const el of document.querySelectorAll('div, main, section')) {
+                const d = el.scrollHeight - el.clientHeight;
+                if (d > bestD && el.clientHeight > 200 && scrollable(el)) {
+                    target = el; bestD = d;
+                }
+            }
+        }
+        if (!target) target = document.scrollingElement || document.documentElement;
+        target.scrollTop += Math.max(800, target.clientHeight * 1.2);
+        return target.scrollTop;
+    """
+
+    def _scroll_snapshots(self, driver, scroll_seconds: float) -> list[str]:
+        """Прокручивает список до дна, снимая DOM после каждого шага."""
+        import time
+        snaps: list[str] = []
+        deadline = time.monotonic() + scroll_seconds
+        last_y, stuck = -1.0, 0
+        while time.monotonic() < deadline:
+            try:
+                y = float(driver.execute_script(self._SCROLL_STEP_JS) or 0)
+            except Exception:  # noqa: BLE001
+                break
+            time.sleep(1.2)
+            try:
+                html = self._dom(driver)
+            except Exception:  # noqa: BLE001
+                break
+            # одинаковые подряд снимки не копим — их незачем парсить дважды
+            if html and (not snaps or html != snaps[-1]):
+                snaps.append(html)
+            if abs(y - last_y) < 2:
+                stuck += 1
+                if stuck >= 2:
+                    break        # дно списка — дальше не прокручивается
+            else:
+                stuck = 0
+            last_y = y
+        return snaps
+
+    def _wait_dom_stable(self, driver, wait_seconds: float) -> None:
+        """Ждёт, пока число DOM-узлов перестанет расти (~4 c без изменений)."""
+        import time
+        deadline = time.monotonic() + max(wait_seconds, 6.0)
+        prev, stable = -1, 0
+        while time.monotonic() < deadline:
+            time.sleep(2.0)
+            try:
+                n = int(driver.execute_script(
+                    "return document.getElementsByTagName('*').length"))
+            except Exception:  # noqa: BLE001
+                continue
+            if n == prev and n > 200:
+                stable += 1
+                if stable >= 2:
+                    break
+            else:
+                stable, prev = 0, n
+
+    def _render_locked(self, driver, url: str, wait_seconds: float,
+                       scroll_seconds: float = 0.0,
+                       click_text: str | None = None) -> list[str]:
         import time
         t0 = time.monotonic()
         try:
@@ -234,21 +455,20 @@ class SeleniumSession:
             # по числу DOM-узлов. Выкачивать page_source в цикле нельзя:
             # на слабом VPS сериализация огромного DOM подвешивает рендерер
             # (Read timed out на /source).
-            deadline = time.monotonic() + max(wait_seconds, 6.0)
-            prev, stable = -1, 0
-            while time.monotonic() < deadline:
-                time.sleep(2.0)
+            self._wait_dom_stable(driver, wait_seconds)
+            # BetBoom не рисует линию, пока не кликнешь по виду спорта в
+            # меню — данные приходят по websocket уже после клика.
+            if click_text:
                 try:
-                    n = int(driver.execute_script(
-                        "return document.getElementsByTagName('*').length"))
+                    clicked = driver.execute_script(
+                        self._CLICK_TEXT_JS, click_text)
                 except Exception:  # noqa: BLE001
-                    continue
-                if n == prev and n > 200:
-                    stable += 1
-                    if stable >= 2:      # ~4 секунды без изменений — готово
-                        break
+                    clicked = False
+                if clicked:
+                    self._wait_dom_stable(driver, max(wait_seconds, 12.0))
                 else:
-                    stable, prev = 0, n
+                    log.info("Selenium: %s — элемент «%s» для клика "
+                             "не найден", url, click_text)
             # Останавливаем фоновую загрузку/анимации перед чтением DOM,
             # иначе занятый рендерер может не ответить.
             try:
@@ -258,16 +478,22 @@ class SeleniumSession:
             # ВАЖНО: никаких откатов на page_source — на перегруженном
             # рендерере он висит минутами. Не отдал DOM — перезапускаем
             # браузер и пропускаем страницу.
-            html = driver.execute_script(
-                "return document.documentElement.outerHTML;")
-            log.info("Selenium: %s отрендерен за %.0f c (%d байт)",
-                     url, time.monotonic() - t0, len(html or ""))
-            return html or None
+            snaps: list[str] = []
+            html = self._dom(driver)
+            if html:
+                snaps.append(html)
+            if scroll_seconds > 0:
+                snaps.extend(self._scroll_snapshots(driver, scroll_seconds))
+            log.info("Selenium: %s отрендерен за %.0f c "
+                     "(%d снимков, %d байт)",
+                     url, time.monotonic() - t0, len(snaps),
+                     sum(len(s) for s in snaps))
+            return snaps
         except Exception as exc:  # noqa: BLE001
             log.warning("Selenium: ошибка загрузки %s: %s — "
                         "перезапускаю браузер", url, exc)
             _drop_shared_driver()
-            return None
+            return []
 
     def close(self) -> None:
         """Общий браузер живёт между циклами — здесь ничего не закрываем."""
