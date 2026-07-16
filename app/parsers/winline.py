@@ -23,7 +23,7 @@ from bs4 import BeautifulSoup
 from ..config import SCROLL_SECONDS
 from ..models import KIND_PREMATCH, MarketOdds
 from .base import BaseParser
-from .html_utils import SOUP_PARSER, num, parse_start_ts
+from .html_utils import SOUP_PARSER, num, parse_start_ts, scope_key
 from .selenium_helper import SeleniumSession
 
 # Страницы двухисходных видов спорта (прематч-линия)
@@ -93,15 +93,17 @@ class WinlineParser(BaseParser):
         classes = {c for b in btns for c in b.get("class", [])}
         vals = [num(b.get_text(strip=True)) for b in btns]
 
+        scope = "" if not label or label == "Матч" else scope_key(label)
+
         # Победитель без ничьей: ровно 2 исхода (generic2)
         if "coefficient-button_generic2" in classes and len(vals) == 2:
             k1, k2 = vals
             if k1 and k2:
-                key = "winner" if not label or label == "Матч" else f"winner:{label}"
                 return MarketOdds(
-                    market="Победитель" if not label or label == "Матч"
+                    market="Победитель" if not scope
                     else f"Победитель ({label})",
-                    market_key=key, outcome1="П1", outcome2="П2",
+                    market_key=f"winner:{scope}" if scope else "winner",
+                    outcome1="П1", outcome2="П2",
                     k1=k1, k2=k2, **base)
 
         # Тотал больше/меньше (total2) + линия из .coefficient-middle
@@ -110,10 +112,10 @@ class WinlineParser(BaseParser):
             pt = mid.get_text(strip=True) if mid else None
             over, under = vals
             if pt and over and under:
-                scope = "" if not label or label == "Матч" else f" {label}"
+                key = f"total:{scope}:{pt}" if scope else f"total:{pt}"
                 return MarketOdds(
-                    market=f"Тотал{scope} {pt}",
-                    market_key=f"total{scope}:{pt}",
+                    market=f"Тотал {label} {pt}" if scope else f"Тотал {pt}",
+                    market_key=key,
                     outcome1=f"ТБ {pt}", outcome2=f"ТМ {pt}",
                     k1=over, k2=under, **base)
         return None

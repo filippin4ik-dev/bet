@@ -17,6 +17,7 @@ from datetime import datetime, timedelta, timezone
 from ..config import BK_TZ_OFFSET, FONBET_LINE_HOST
 from ..models import KIND_PREMATCH, MarketOdds
 from .base import BaseParser
+from .html_utils import scope_key
 
 log = logging.getLogger("parsers.fonbet")
 
@@ -158,6 +159,9 @@ class FonbetParser(BaseParser):
             market_name = event.get("name") if event is not root else None
             if market_name:
                 sport = f"{sport} · {market_name}"
+            # Дочерняя роспись (сет/период/карта) — отдельные рынки: их
+            # нельзя сопоставлять с рынками ВСЕГО матча у других БК
+            scope = scope_key(market_name)
 
             start_ts = root.get("startTime")
             start_time = None
@@ -173,12 +177,13 @@ class FonbetParser(BaseParser):
                         start_ts=float(start_ts) if start_ts else None)
 
             factors = ef.get("factors", [])
-            result.extend(self._winner(factors, base))
-            result.extend(self._totals(factors, base))
+            result.extend(self._winner(factors, base, scope))
+            result.extend(self._totals(factors, base, scope))
 
         return result
 
-    def _winner(self, factors: list, base: dict) -> list[MarketOdds]:
+    def _winner(self, factors: list, base: dict,
+                scope: str) -> list[MarketOdds]:
         vals = {f["f"]: f.get("v") for f in factors}
         if F_DRAW in vals:
             return []  # трёхисходный рынок — пропускаем
@@ -186,12 +191,14 @@ class FonbetParser(BaseParser):
         if not k1 or not k2:
             return []
         return [MarketOdds(
-            market="Победитель", market_key="winner",
+            market="Победитель",
+            market_key=f"winner:{scope}" if scope else "winner",
             outcome1="П1", outcome2="П2",
             k1=float(k1), k2=float(k2), **base,
         )]
 
-    def _totals(self, factors: list, base: dict) -> list[MarketOdds]:
+    def _totals(self, factors: list, base: dict,
+                scope: str) -> list[MarketOdds]:
         overs, unders = {}, {}
         for f in factors:
             pt = f.get("pt") or f.get("p")
@@ -206,8 +213,9 @@ class FonbetParser(BaseParser):
             under = unders.get(pt)
             if not over or not under:
                 continue
+            key = f"total:{scope}:{pt}" if scope else f"total:{pt}"
             out.append(MarketOdds(
-                market=f"Тотал {pt}", market_key=f"total:{pt}",
+                market=f"Тотал {pt}", market_key=key,
                 outcome1=f"ТБ {pt}", outcome2=f"ТМ {pt}",
                 k1=float(over), k2=float(under), **base,
             ))

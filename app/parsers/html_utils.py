@@ -101,6 +101,20 @@ def parse_start_ts(text: str | None, now: float | None = None) -> float | None:
     return dt.timestamp()
 
 
+def scope_key(label: str | None) -> str:
+    """Нормализует название дочерней росписи для ключа рынка.
+
+    «2-й сет» и «2сет» должны дать один ключ, чтобы рынки правильно
+    сопоставлялись между БК и, главное, НЕ группировались с рынками
+    всего матча.
+    """
+    if not label:
+        return ""
+    t = label.lower().replace("ё", "е")
+    t = re.sub(r"(\d)\s*-?\s*(й|я|е|ый|ой|ая|ое)\b", r"\1", t)
+    return re.sub(r"[^\w]+", "", t)
+
+
 def format_start(ts: float) -> str:
     """Форматирует unix-время начала матча в «ДД.ММ ЧЧ:ММ» (пояс БК)."""
     tz = timezone(timedelta(hours=BK_TZ_OFFSET))
