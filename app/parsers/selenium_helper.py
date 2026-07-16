@@ -4,6 +4,7 @@
 не получает данные. Требует установленных selenium и webdriver-manager
 (см. requirements.txt) и наличия Chrome/Chromium в системе.
 """
+import atexit
 import logging
 import os
 import random
@@ -16,10 +17,42 @@ log = logging.getLogger("parsers.selenium")
 
 _warned = False
 
-# Парсеры разных БК работают в параллельных потоках, но рендерим страницы
-# СТРОГО по одной: несколько Chrome, рендерящих одновременно на слабом VPS
-# (1–2 vCPU), душат друг друга и всё встаёт на десятки минут.
+# Все парсеры делят ОДИН браузер, страницы рендерятся строго по одной.
+# Несколько Chrome на слабом VPS (1–2 vCPU) не могут даже стартовать
+# одновременно («chrome not reachable») и душат друг друга при рендеринге.
 _render_lock = threading.Lock()
+_shared_driver = None
+_render_count = 0
+# Профилактический перезапуск браузера (утечки памяти долгих SPA-сессий)
+_MAX_RENDERS_PER_BROWSER = 100
+
+
+def _get_shared_driver():
+    """Возвращает общий браузер (лениво создаёт). Вызывать под _render_lock."""
+    global _shared_driver
+    if _shared_driver is None:
+        _shared_driver = _make_driver()
+        if _shared_driver is not None:
+            log.info("Selenium: запущен общий браузер (один на все БК)")
+    return _shared_driver
+
+
+def _drop_shared_driver() -> None:
+    """Закрывает общий браузер. Вызывать под _render_lock."""
+    global _shared_driver
+    if _shared_driver is not None:
+        try:
+            _shared_driver.quit()
+        except Exception:  # noqa: BLE001
+            pass
+        _shared_driver = None
+
+
+@atexit.register
+def _shutdown() -> None:
+    """Не оставляем chromedriver/Chrome после завершения процесса."""
+    with _render_lock:
+        _drop_shared_driver()
 
 # Типичные расположения браузера и chromedriver, включая snap-версию
 # Chromium на Ubuntu (пакет chromium-browser -> snap).
@@ -101,26 +134,43 @@ def _make_driver():
 
 
 class SeleniumSession:
-    """Один браузер на несколько страниц — избегаем перезапуска Chrome
-    (запуск браузера дорогой, а страниц у одной БК много)."""
+    """Доступ к ОБЩЕМУ браузеру (один Chrome на все БК и все циклы).
 
-    def __init__(self) -> None:
-        self.driver = _make_driver()
+    Отдельный браузер на каждую БК не запускаем: на слабом VPS несколько
+    Chrome не могут даже стартовать одновременно («chrome not reachable»).
+    Общий браузер живёт между циклами — экономим и время старта."""
+
+    @property
+    def driver(self):
+        """Для проверок вида `if s.driver is None` в парсерах."""
+        with _render_lock:
+            return _get_shared_driver()
 
     def render(self, url: str, wait_seconds: float = 8.0) -> str | None:
-        if self.driver is None:
-            return None
+        global _render_count
         with _render_lock:
-            return self._render_locked(url, wait_seconds)
+            driver = _get_shared_driver()
+            if driver is None:
+                return None
+            _render_count += 1
+            if _render_count > _MAX_RENDERS_PER_BROWSER:
+                log.info("Selenium: профилактический перезапуск браузера")
+                _drop_shared_driver()
+                _render_count = 1
+                driver = _get_shared_driver()
+                if driver is None:
+                    return None
+            return self._render_locked(driver, url, wait_seconds)
 
-    def _render_locked(self, url: str, wait_seconds: float) -> str | None:
+    def _render_locked(self, driver, url: str,
+                       wait_seconds: float) -> str | None:
         import time
         t0 = time.monotonic()
         try:
-            self.driver.set_page_load_timeout(60)
-            self.driver.set_script_timeout(25)
+            driver.set_page_load_timeout(60)
+            driver.set_script_timeout(25)
             try:
-                self.driver.get(url)
+                driver.get(url)
             except Exception as exc:  # noqa: BLE001
                 # Даже если загрузка «не завершилась» (у live-страниц она не
                 # завершается никогда) — DOM уже отрисован, работаем с ним.
@@ -128,7 +178,7 @@ class SeleniumSession:
                          "останавливаю и беру текущий DOM",
                          url, exc.__class__.__name__)
                 try:
-                    self.driver.execute_script("window.stop();")
+                    driver.execute_script("window.stop();")
                 except Exception:  # noqa: BLE001
                     pass
             # Ждём, пока SPA дорисует линию. Готовность проверяем дёшево —
@@ -140,7 +190,7 @@ class SeleniumSession:
             while time.monotonic() < deadline:
                 time.sleep(2.0)
                 try:
-                    n = int(self.driver.execute_script(
+                    n = int(driver.execute_script(
                         "return document.getElementsByTagName('*').length"))
                 except Exception:  # noqa: BLE001
                     continue
@@ -153,39 +203,25 @@ class SeleniumSession:
             # Останавливаем фоновую загрузку/анимации перед чтением DOM,
             # иначе занятый рендерер может не ответить.
             try:
-                self.driver.execute_script("window.stop();")
+                driver.execute_script("window.stop();")
             except Exception:  # noqa: BLE001
                 pass
             try:
-                html = self.driver.execute_script(
+                html = driver.execute_script(
                     "return document.documentElement.outerHTML;")
             except Exception:  # noqa: BLE001
-                html = self.driver.page_source
+                html = driver.page_source
             log.info("Selenium: %s отрендерен за %.0f c (%d байт)",
                      url, time.monotonic() - t0, len(html or ""))
             return html or None
         except Exception as exc:  # noqa: BLE001
-            log.warning("Selenium: ошибка загрузки %s: %s", url, exc)
-            self._restart()
+            log.warning("Selenium: ошибка загрузки %s: %s — "
+                        "перезапускаю браузер", url, exc)
+            _drop_shared_driver()
             return None
 
-    def _restart(self) -> None:
-        """После краха рендерера сессия может быть неработоспособна —
-        пересоздаём браузер, чтобы следующие страницы не пропали."""
-        try:
-            if self.driver is not None:
-                self.driver.quit()
-        except Exception:  # noqa: BLE001
-            pass
-        self.driver = _make_driver()
-
     def close(self) -> None:
-        if self.driver is not None:
-            try:
-                self.driver.quit()
-            except Exception:  # noqa: BLE001
-                pass
-            self.driver = None
+        """Общий браузер живёт между циклами — здесь ничего не закрываем."""
 
     def __enter__(self) -> "SeleniumSession":
         return self
