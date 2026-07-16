@@ -1,28 +1,48 @@
-"""Модели данных."""
+"""Модели данных.
+
+Работаем с ЛЮБЫМ двухисходным рынком, а не только с победителем матча:
+- Победитель (П1 / П2, без ничьей);
+- Тотал больше/меньше на пол-линии (напр. «больше 2.5» / «меньше 2.5» —
+  сколько будет убийств, карт, геймов, очков и т.п.);
+- любой другой рынок ровно с двумя взаимоисключающими исходами.
+
+Вилка всегда считается по одной формуле: 1/К1_max + 1/К2_max < 1,
+где К1 — макс. кэф на исход 1, К2 — макс. кэф на исход 2 (у разных БК).
+"""
 from dataclasses import dataclass, field
 
-# Тип рынка: live — матч идёт, prematch — матч ещё не начался
+# Тип рынка по времени: live — матч идёт, prematch — матч ещё не начался
 KIND_LIVE = "live"
 KIND_PREMATCH = "prematch"
 
 
 @dataclass
-class MatchOdds:
-    """Коэффициенты одной БК на один матч (только П1/П2, без ничьей)."""
+class MarketOdds:
+    """Коэффициенты одной БК на один двухисходный рынок одного события."""
 
-    bookmaker: str      # название БК: Winline / BetBoom / Fonbet / Liga Stavok
-    sport: str          # вид спорта (теннис, баскетбол и т.п.)
+    bookmaker: str          # Winline / BetBoom / Fonbet / Liga Stavok
+    sport: str              # вид спорта (+ дочерняя роспись, если есть)
     team1: str
     team2: str
-    k1: float           # коэффициент на победу team1
-    k2: float           # коэффициент на победу team2
+    market: str             # человекочитаемое имя рынка: «Победитель», «Тотал 2.5»
+    market_key: str         # ключ рынка для сопоставления между БК
+    outcome1: str           # метка исхода 1: «П1», «ТБ 2.5»
+    outcome2: str           # метка исхода 2: «П2», «ТМ 2.5»
+    k1: float               # коэффициент на исход 1
+    k2: float               # коэффициент на исход 2
     kind: str = KIND_LIVE          # live | prematch
-    start_time: str | None = None  # время начала матча (для прематча)
+    start_time: str | None = None  # время начала (для прематча)
+
+    @property
+    def event_key(self) -> str:
+        """Ключ события (без рынка) — для подсчёта числа событий."""
+        return f"{self.kind}|{self.sport}|{_norm(self.team1)}|{_norm(self.team2)}"
 
     @property
     def match_key(self) -> str:
-        """Ключ для сопоставления одного матча между разными БК."""
-        return f"{self.kind}|{self.sport}|{_norm(self.team1)}|{_norm(self.team2)}"
+        """Ключ конкретного рынка конкретного события: по нему кэфы разных
+        БК сопоставляются между собой (одинаковый матч И одинаковый рынок)."""
+        return f"{self.event_key}|{self.market_key}"
 
 
 def _norm(name: str) -> str:
@@ -37,6 +57,9 @@ class Arb:
     sport: str
     team1: str
     team2: str
+    market: str
+    outcome1: str
+    outcome2: str
     k1_max: float
     k1_bookmaker: str
     k2_max: float
@@ -56,6 +79,9 @@ class Arb:
             "match": f"{self.team1} — {self.team2}",
             "team1": self.team1,
             "team2": self.team2,
+            "market": self.market,
+            "outcome1": self.outcome1,
+            "outcome2": self.outcome2,
             "k1_max": self.k1_max,
             "k1_bookmaker": self.k1_bookmaker,
             "k2_max": self.k2_max,

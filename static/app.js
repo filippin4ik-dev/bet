@@ -66,7 +66,7 @@ function render(arbs) {
 
   if (!arbs.length) {
     els.body.innerHTML =
-      '<tr><td colspan="9" class="empty">Вилок нет — ждём следующего обновления…</td></tr>';
+      '<tr><td colspan="10" class="empty">Вилок нет — ждём следующего обновления…</td></tr>';
     return;
   }
 
@@ -77,11 +77,12 @@ function render(arbs) {
       <td>${kindCell(a)}</td>
       <td>${a.sport}</td>
       <td>${a.match}</td>
-      <td><span class="coef">${a.k1_max.toFixed(2)}</span> <span class="bk">${a.k1_bookmaker}</span></td>
-      <td><span class="coef">${a.k2_max.toFixed(2)}</span> <span class="bk">${a.k2_bookmaker}</span></td>
+      <td>${a.market}</td>
+      <td><span class="out">${a.outcome1}</span> <span class="coef">${a.k1_max.toFixed(2)}</span> <span class="bk">${a.k1_bookmaker}</span></td>
+      <td><span class="out">${a.outcome2}</span> <span class="coef">${a.k2_max.toFixed(2)}</span> <span class="bk">${a.k2_bookmaker}</span></td>
       <td class="profit">${a.profit_pct.toFixed(2)} %</td>
-      <td class="stake">${fmtMoney(st.stake1)} <span class="bk">${a.k1_bookmaker}</span></td>
-      <td class="stake">${fmtMoney(st.stake2)} <span class="bk">${a.k2_bookmaker}</span></td>
+      <td class="stake">${fmtMoney(st.stake1)} <span class="bk">${a.outcome1} · ${a.k1_bookmaker}</span></td>
+      <td class="stake">${fmtMoney(st.stake2)} <span class="bk">${a.outcome2} · ${a.k2_bookmaker}</span></td>
       <td class="stake">+${fmtMoney(st.profit)}</td>
     </tr>`;
   }).join("");

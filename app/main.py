@@ -34,7 +34,7 @@ async def lifespan(app: FastAPI):
     task.cancel()
 
 
-app = FastAPI(title="Сканер вилок П1/П2", lifespan=lifespan)
+app = FastAPI(title="Сканер вилок (двухисходные рынки)", lifespan=lifespan)
 
 
 @app.get("/api/arbs")

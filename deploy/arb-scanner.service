@@ -13,7 +13,6 @@ Type=simple
 User=www-data
 Group=www-data
 WorkingDirectory=/opt/arb-scanner
-Environment=SCANNER_MODE=live
 Environment=SCAN_INTERVAL=10
 Environment=SOUND_ALERT_PROFIT=2.5
 Environment=DB_PATH=/opt/arb-scanner/arbs.sqlite3

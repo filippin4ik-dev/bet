@@ -1,10 +1,9 @@
 """Настройки приложения (переопределяются переменными окружения)."""
 import os
 
-# Режим работы сканера:
-#   demo — встроенный генератор котировок (сайт работает сразу, без доступа к БК)
-#   live — реальный парсинг Winline / BetBoom / Fonbet / Liga Stavok
-SCANNER_MODE = os.getenv("SCANNER_MODE", "demo").lower()
+# Сканер всегда работает только с реальными данными БК
+# (Winline / BetBoom / Fonbet / Liga Stavok). Демо-режима нет.
+SCANNER_MODE = "live"
 
 # Период полного цикла обновления коэффициентов, сек (Live-режим по ТЗ — 10 с)
 SCAN_INTERVAL = float(os.getenv("SCAN_INTERVAL", "10"))

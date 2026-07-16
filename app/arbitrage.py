@@ -1,9 +1,14 @@
-"""Поиск двухисходных вилок (П1/П2) по формуле 1/К1_max + 1/К2_max < 1."""
+"""Поиск двухисходных вилок по формуле 1/К1_max + 1/К2_max < 1.
+
+Рынок — любой с двумя взаимоисключающими исходами: победитель (П1/П2),
+тотал больше/меньше (напр. «убийств больше 2.5» / «меньше 2.5»), и т.п.
+Кэфы сравниваются только внутри одного и того же рынка (match_key).
+"""
 from collections import defaultdict
 from typing import Iterable
 
 from .config import BANKS
-from .models import Arb, MatchOdds
+from .models import Arb, MarketOdds
 
 
 def calc_stakes(k1: float, k2: float, bank: float) -> dict:
@@ -24,16 +29,16 @@ def calc_stakes(k1: float, k2: float, bank: float) -> dict:
     }
 
 
-def find_arbs(odds: Iterable[MatchOdds]) -> list[Arb]:
-    """Группирует котировки всех БК по матчам, берёт максимальные К1/К2
-    и возвращает найденные вилки, отсортированные по доходности."""
-    by_match: dict[str, list[MatchOdds]] = defaultdict(list)
+def find_arbs(odds: Iterable[MarketOdds]) -> list[Arb]:
+    """Группирует котировки всех БК по конкретным рынкам, берёт максимальные
+    К1/К2 и возвращает найденные вилки, отсортированные по доходности."""
+    by_market: dict[str, list[MarketOdds]] = defaultdict(list)
     for o in odds:
         if o.k1 and o.k2 and o.k1 > 1 and o.k2 > 1:
-            by_match[o.match_key].append(o)
+            by_market[o.match_key].append(o)
 
     arbs: list[Arb] = []
-    for match_key, quotes in by_match.items():
+    for match_key, quotes in by_market.items():
         if len(quotes) < 2:
             continue  # вилка возможна только при котировках минимум от 2 БК
 
@@ -53,6 +58,9 @@ def find_arbs(odds: Iterable[MatchOdds]) -> list[Arb]:
             sport=best1.sport,
             team1=best1.team1,
             team2=best1.team2,
+            market=best1.market,
+            outcome1=best1.outcome1,
+            outcome2=best2.outcome2,
             k1_max=round(best1.k1, 3),
             k1_bookmaker=best1.bookmaker,
             k2_max=round(best2.k2, 3),
