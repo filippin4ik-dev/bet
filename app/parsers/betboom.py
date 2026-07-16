@@ -115,8 +115,8 @@ class BetBoomParser(BaseParser):
                 continue  # счёт
             if any(m in t for m in ("мин", ":", "Т,", "тайм", "сет", "гейм")):
                 continue
-            if t in ("Ещё", "X"):
-                continue
+            if t in ("Ещё", "X") or len(t) < 2:
+                continue  # служебные метки и одиночные символы — не имена
             if any(w in t.lower() for w in _STATUS_WORDS):
                 continue  # статус матча, не команда
             names.append(t)

@@ -62,9 +62,15 @@ def _make_driver():
     options = Options()
     for arg in ("--headless=new", "--no-sandbox", "--disable-dev-shm-usage",
                 "--disable-blink-features=AutomationControlled",
-                "--disable-gpu", "--lang=ru-RU",
+                "--disable-gpu", "--lang=ru-RU", "--mute-audio",
+                # Картинки/шрифты не нужны для кэфов, а на слабом VPS они
+                # съедают CPU так, что рендерер перестаёт отвечать.
+                "--blink-settings=imagesEnabled=false",
+                "--disable-background-networking",
                 f"--window-size={random.choice(['1920,1080', '1366,768'])}"):
         options.add_argument(arg)
+    options.add_experimental_option(
+        "prefs", {"profile.managed_default_content_settings.images": 2})
     # Живые страницы БК грузятся «бесконечно» (websocket, лента ставок) —
     # не ждём полной загрузки, забираем DOM после паузы. Иначе на слабом
     # VPS driver.get() падает с «Timed out receiving message from renderer».
@@ -101,6 +107,7 @@ class SeleniumSession:
         import time
         try:
             self.driver.set_page_load_timeout(60)
+            self.driver.set_script_timeout(25)
             try:
                 self.driver.get(url)
             except Exception as exc:  # noqa: BLE001
@@ -113,22 +120,36 @@ class SeleniumSession:
                     self.driver.execute_script("window.stop();")
                 except Exception:  # noqa: BLE001
                     pass
-            # Ждём, пока SPA дорисует линию: опрашиваем размер DOM и выходим,
-            # когда он перестал расти (или вышло время).
+            # Ждём, пока SPA дорисует линию. Готовность проверяем дёшево —
+            # по числу DOM-узлов. Выкачивать page_source в цикле нельзя:
+            # на слабом VPS сериализация огромного DOM подвешивает рендерер
+            # (Read timed out на /source).
             deadline = time.monotonic() + max(wait_seconds, 6.0)
-            html, prev_len, stable = "", -1, 0
+            prev, stable = -1, 0
             while time.monotonic() < deadline:
                 time.sleep(2.0)
                 try:
-                    html = self.driver.page_source
+                    n = int(self.driver.execute_script(
+                        "return document.getElementsByTagName('*').length"))
                 except Exception:  # noqa: BLE001
                     continue
-                if len(html) == prev_len and len(html) > 50_000:
+                if n == prev and n > 200:
                     stable += 1
                     if stable >= 2:      # ~4 секунды без изменений — готово
                         break
                 else:
-                    stable, prev_len = 0, len(html)
+                    stable, prev = 0, n
+            # Останавливаем фоновую загрузку/анимации перед чтением DOM,
+            # иначе занятый рендерер может не ответить.
+            try:
+                self.driver.execute_script("window.stop();")
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                html = self.driver.execute_script(
+                    "return document.documentElement.outerHTML;")
+            except Exception:  # noqa: BLE001
+                html = self.driver.page_source
             return html or None
         except Exception as exc:  # noqa: BLE001
             log.warning("Selenium: ошибка загрузки %s: %s", url, exc)
