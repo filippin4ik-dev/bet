@@ -47,6 +47,25 @@ def _candidate_urls() -> list[str]:
     return urls
 
 
+def _discover_hosts(session) -> list[str]:
+    """Пытается вытащить актуальный домен сервера линии прямо со страниц
+    fon.bet (домены ротируются, поэтому список кандидатов быстро устаревает).
+    Работает только с доступом к сайту (российский IP)."""
+    import re
+    hosts: list[str] = []
+    pattern = re.compile(r"https?://(line[\w.-]*\.[\w.-]+)")
+    for page in ("https://www.fon.bet/", "https://fon.bet/",
+                 "https://www.fon.bet/live/", "https://www.fon.bet/sports/"):
+        try:
+            html = session.get(page, timeout=8).text
+        except Exception:  # noqa: BLE001
+            continue
+        for host in pattern.findall(html):
+            if host not in hosts:
+                hosts.append(host)
+    return hosts
+
+
 class FonbetParser(BaseParser):
     name = "Fonbet"
 
@@ -55,8 +74,15 @@ class FonbetParser(BaseParser):
         self._working_url: str | None = None
 
     def _fetch_data(self) -> dict | None:
-        # Сначала пробуем ранее найденный рабочий URL
+        # Сначала пробуем ранее найденный рабочий URL, затем кандидатов,
+        # затем домены, обнаруженные на страницах fon.bet.
         urls = ([self._working_url] if self._working_url else []) + _candidate_urls()
+        discovered = _discover_hosts(self.session)
+        for host in discovered:
+            for path in PATHS:
+                u = f"https://{host}/{path}?lang=ru&scopeMarket=1600"
+                if u not in urls:
+                    urls.append(u)
         for url in urls:
             if not url:
                 continue
