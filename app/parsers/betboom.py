@@ -47,20 +47,40 @@ _STATUS_WORDS = (
 )
 
 
+# Прематч меняется медленно, а обход всех видов спорта долгий — обновляем
+# прематч-страницы только каждый N-й цикл, live — каждый цикл.
+PREMATCH_EVERY = 5
+
+
 class BetBoomParser(BaseParser):
     name = "BetBoom"
 
+    def __init__(self) -> None:
+        super().__init__()
+        self._cycle = 0
+        self._prematch_cache: list[MarketOdds] = []
+
     def fetch_odds(self) -> list[MarketOdds]:
+        self._cycle += 1
+        scan_prematch = (self._cycle - 1) % PREMATCH_EVERY == 0
         odds: list[MarketOdds] = []
         with SeleniumSession() as s:
             if s.driver is None:
                 return []
             for tmpl, kind in SECTIONS:
+                if kind == KIND_PREMATCH and not scan_prematch:
+                    continue
+                page_odds: list[MarketOdds] = []
                 for slug, sport in SPORTS:
                     self._delay()
                     html = s.render(tmpl.format(slug=slug), wait_seconds=15)
                     if html:
-                        odds.extend(self._parse_html(html, kind, sport))
+                        page_odds.extend(self._parse_html(html, kind, sport))
+                if kind == KIND_PREMATCH:
+                    self._prematch_cache = page_odds
+                odds.extend(page_odds)
+        if not scan_prematch:
+            odds.extend(self._prematch_cache)
         return odds
 
     def _parse_html(self, html: str, kind: str,

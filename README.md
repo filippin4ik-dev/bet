@@ -200,6 +200,7 @@ systemctl restart arb-scanner
 | Метод | Описание |
 |---|---|
 | `GET /api/arbs?min_profit=2&kind=all` | Текущие вилки с доходностью ≥ 2 % (`kind`: `all` / `live` / `prematch`) |
+| `GET /api/odds?kind=all` | Все найденные матчи и котировки последнего обхода (по всем БК) |
 | `GET /api/history?limit=100` | История найденных вилок из SQLite |
 
 ## Структура проекта

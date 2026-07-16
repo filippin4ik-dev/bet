@@ -12,12 +12,18 @@
     <div class="status-bar">
       <span id="mode-badge" class="badge">—</span>
       <span id="last-scan">ожидание первого сканирования…</span>
+      <span id="scanning-badge" class="scanning" hidden>⏳ идёт сканирование…</span>
       <span id="coverage"></span>
+      <span id="bk-counts"></span>
       <span id="arb-count"></span>
     </div>
   </header>
 
   <section class="controls">
+    <div class="tabs" id="view-tabs">
+      <button type="button" data-view="arbs" class="active">💰 Вилки</button>
+      <button type="button" data-view="odds">📋 Все матчи</button>
+    </div>
     <div class="tabs" id="kind-tabs">
       <button type="button" data-kind="all" class="active">Все</button>
       <button type="button" data-kind="live">🔴 Live</button>
@@ -60,6 +66,23 @@
       </thead>
       <tbody id="arbs-body">
         <tr><td colspan="10" class="empty">Загрузка данных…</td></tr>
+      </tbody>
+    </table>
+
+    <table id="odds-table" hidden>
+      <thead>
+        <tr>
+          <th>БК</th>
+          <th>Тип</th>
+          <th>Спорт</th>
+          <th>Матч</th>
+          <th>Рынок</th>
+          <th>Исход 1</th>
+          <th>Исход 2</th>
+        </tr>
+      </thead>
+      <tbody id="odds-body">
+        <tr><td colspan="7" class="empty">Загрузка данных…</td></tr>
       </tbody>
     </table>
   </main>
