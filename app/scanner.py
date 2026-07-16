@@ -43,6 +43,7 @@ class Scanner:
     # ---------- публичное состояние ----------
 
     def snapshot(self) -> dict:
+        now = time.time()
         with self._lock:
             return {
                 "mode": SCANNER_MODE,
@@ -52,8 +53,12 @@ class Scanner:
                 "last_scan": self._last_scan,
                 "events_checked": self._events_checked,
                 "quotes_checked": self._quotes_checked,
-                "bookmakers": {bk: len(o)
-                               for bk, o in self._odds_by_bk.items()},
+                # по каждой БК: сколько котировок и сколько секунд назад
+                # они получены (для индикатора свежести в UI)
+                "bookmakers": {
+                    bk: {"count": len(o),
+                         "age_sec": round(now - self._fetched_at.get(bk, now))}
+                    for bk, o in self._odds_by_bk.items()},
                 "arbs": [a.to_dict() for a in self._arbs],
             }
 

@@ -76,7 +76,10 @@ class WinlineParser(BaseParser):
                 continue
 
             for row in card.select(".card__body"):
-                label_el = row.select_one(".match-row-label")
+                # Метка строки: «Матч» — .match-row-label, дочерние росписи
+                # («1 сет», «2 сет») — .period-name. Без метки периода кэфы
+                # сета записались бы как кэфы всего матча!
+                label_el = row.select_one(".match-row-label, .period-name")
                 label = label_el.get_text(strip=True) if label_el else ""
                 row_sport = sport if label in ("", "Матч") else f"{sport} · {label}"
                 base = dict(bookmaker=self.name, sport=row_sport,
