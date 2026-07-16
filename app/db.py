@@ -22,6 +22,8 @@ def init_db() -> None:
             CREATE TABLE IF NOT EXISTS arbs_history (
                 id            INTEGER PRIMARY KEY AUTOINCREMENT,
                 found_at      TEXT NOT NULL,
+                kind          TEXT NOT NULL DEFAULT 'live',
+                start_time    TEXT,
                 match_key     TEXT NOT NULL,
                 sport         TEXT NOT NULL,
                 team1         TEXT NOT NULL,
@@ -34,6 +36,13 @@ def init_db() -> None:
                 stakes_json   TEXT NOT NULL
             )
         """)
+        # Миграция баз, созданных до появления прематча
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(arbs_history)")}
+        if "kind" not in cols:
+            conn.execute("ALTER TABLE arbs_history "
+                         "ADD COLUMN kind TEXT NOT NULL DEFAULT 'live'")
+        if "start_time" not in cols:
+            conn.execute("ALTER TABLE arbs_history ADD COLUMN start_time TEXT")
 
 
 def save_arbs(arbs: list[Arb]) -> None:
@@ -41,7 +50,7 @@ def save_arbs(arbs: list[Arb]) -> None:
         return
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     rows = [
-        (now, a.match_key, a.sport, a.team1, a.team2,
+        (now, a.kind, a.start_time, a.match_key, a.sport, a.team1, a.team2,
          a.k1_max, a.k1_bookmaker, a.k2_max, a.k2_bookmaker,
          round(a.profit_pct, 2), json.dumps(a.stakes, ensure_ascii=False))
         for a in arbs
@@ -49,10 +58,10 @@ def save_arbs(arbs: list[Arb]) -> None:
     with _lock, _connect() as conn:
         conn.executemany(
             """INSERT INTO arbs_history
-               (found_at, match_key, sport, team1, team2,
+               (found_at, kind, start_time, match_key, sport, team1, team2,
                 k1_max, k1_bookmaker, k2_max, k2_bookmaker,
                 profit_pct, stakes_json)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             rows,
         )
 

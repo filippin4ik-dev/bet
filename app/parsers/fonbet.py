@@ -1,9 +1,12 @@
-"""Fonbet — парсинг публичного JSON-API линии.
+"""Fonbet — парсинг публичного JSON-API линии (Live + прематч).
 
 Берём только матчи с двумя исходами: события, у которых в основной
 росписи есть факторы П1 (id=921) и П2 (id=923), но НЕТ ничьей (id=922).
+Live/прематч различаем по полю события place: "live" | "line".
 """
-from ..models import MatchOdds
+from datetime import datetime
+
+from ..models import KIND_LIVE, KIND_PREMATCH, MatchOdds
 from .base import BaseParser
 
 # Зеркала JSON-API линии Fonbet (структура одинаковая)
@@ -44,6 +47,11 @@ class FonbetParser(BaseParser):
             k1, k2 = factors.get(F_P1), factors.get(F_P2)
             if not k1 or not k2:
                 continue
+            kind = KIND_LIVE if event.get("place") == "live" else KIND_PREMATCH
+            start_time = None
+            if kind == KIND_PREMATCH and event.get("startTime"):
+                start_time = datetime.fromtimestamp(
+                    event["startTime"]).strftime("%d.%m %H:%M")
             result.append(MatchOdds(
                 bookmaker=self.name,
                 sport=sports.get(event.get("sportId"), "Спорт"),
@@ -51,5 +59,7 @@ class FonbetParser(BaseParser):
                 team2=event.get("team2", ""),
                 k1=float(k1),
                 k2=float(k2),
+                kind=kind,
+                start_time=start_time,
             ))
         return result

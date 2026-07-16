@@ -59,6 +59,8 @@ def find_arbs(odds: Iterable[MatchOdds]) -> list[Arb]:
             k2_bookmaker=best2.bookmaker,
             margin=margin,
             profit_pct=profit_pct,
+            kind=best1.kind,
+            start_time=best1.start_time,
             stakes={str(b): calc_stakes(best1.k1, best2.k2, b) for b in BANKS},
         ))
 

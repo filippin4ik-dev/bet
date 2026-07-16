@@ -6,6 +6,7 @@ const POLL_INTERVAL_MS = 10_000;
 
 const els = {
   body: document.getElementById("arbs-body"),
+  kindTabs: document.getElementById("kind-tabs"),
   minProfit: document.getElementById("min-profit"),
   bank: document.getElementById("bank"),
   soundOn: document.getElementById("sound-on"),
@@ -19,6 +20,7 @@ const els = {
 
 let soundAlertProfit = 2.5;
 let alertedKeys = new Set(); // вилки, о которых уже «пропищали»
+let currentKind = "all";     // all | live | prematch
 
 /* ---------- звук (Web Audio, без файлов) ---------- */
 
@@ -49,13 +51,21 @@ els.testSound.addEventListener("click", beep);
 
 const fmtMoney = (n) => Number(n).toLocaleString("ru-RU") + " ₽";
 
+function kindCell(a) {
+  if (a.kind === "prematch") {
+    const when = a.start_time ? `<span class="bk">${a.start_time}</span>` : "";
+    return `<span class="kind prematch">Прематч</span> ${when}`;
+  }
+  return '<span class="kind live">LIVE</span>';
+}
+
 function render(arbs) {
   const bank = els.bank.value;
   els.arbCount.textContent = `Вилок: ${arbs.length}`;
 
   if (!arbs.length) {
     els.body.innerHTML =
-      '<tr><td colspan="8" class="empty">Вилок нет — ждём следующего обновления…</td></tr>';
+      '<tr><td colspan="9" class="empty">Вилок нет — ждём следующего обновления…</td></tr>';
     return;
   }
 
@@ -63,6 +73,7 @@ function render(arbs) {
     const st = a.stakes[bank] || {};
     const hot = a.profit_pct > soundAlertProfit ? " class=\"hot\"" : "";
     return `<tr${hot}>
+      <td>${kindCell(a)}</td>
       <td>${a.sport}</td>
       <td>${a.match}</td>
       <td><span class="coef">${a.k1_max.toFixed(2)}</span> <span class="bk">${a.k1_bookmaker}</span></td>
@@ -80,7 +91,7 @@ function render(arbs) {
 async function poll() {
   try {
     const minProfit = parseFloat(els.minProfit.value) || 0;
-    const resp = await fetch(`/api/arbs?min_profit=${minProfit}`);
+    const resp = await fetch(`/api/arbs?min_profit=${minProfit}&kind=${currentKind}`);
     const data = await resp.json();
 
     soundAlertProfit = data.sound_alert_profit ?? 2.5;
@@ -109,6 +120,15 @@ async function poll() {
 
 els.minProfit.addEventListener("change", poll);
 els.bank.addEventListener("change", poll);
+
+els.kindTabs.addEventListener("click", (e) => {
+  const btn = e.target.closest("button[data-kind]");
+  if (!btn) return;
+  currentKind = btn.dataset.kind;
+  els.kindTabs.querySelectorAll("button").forEach(
+    (b) => b.classList.toggle("active", b === btn));
+  poll();
+});
 
 poll();
 setInterval(poll, POLL_INTERVAL_MS);

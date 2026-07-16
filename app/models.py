@@ -1,6 +1,10 @@
 """Модели данных."""
 from dataclasses import dataclass, field
 
+# Тип рынка: live — матч идёт, prematch — матч ещё не начался
+KIND_LIVE = "live"
+KIND_PREMATCH = "prematch"
+
 
 @dataclass
 class MatchOdds:
@@ -12,11 +16,13 @@ class MatchOdds:
     team2: str
     k1: float           # коэффициент на победу team1
     k2: float           # коэффициент на победу team2
+    kind: str = KIND_LIVE          # live | prematch
+    start_time: str | None = None  # время начала матча (для прематча)
 
     @property
     def match_key(self) -> str:
         """Ключ для сопоставления одного матча между разными БК."""
-        return f"{self.sport}|{_norm(self.team1)}|{_norm(self.team2)}"
+        return f"{self.kind}|{self.sport}|{_norm(self.team1)}|{_norm(self.team2)}"
 
 
 def _norm(name: str) -> str:
@@ -37,11 +43,15 @@ class Arb:
     k2_bookmaker: str
     margin: float               # 1/К1 + 1/К2 (< 1 — вилка)
     profit_pct: float           # доходность, %
+    kind: str = KIND_LIVE       # live | prematch
+    start_time: str | None = None
     stakes: dict = field(default_factory=dict)  # {банк: {...}}
 
     def to_dict(self) -> dict:
         return {
             "match_key": self.match_key,
+            "kind": self.kind,
+            "start_time": self.start_time,
             "sport": self.sport,
             "match": f"{self.team1} — {self.team2}",
             "team1": self.team1,

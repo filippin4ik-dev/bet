@@ -38,10 +38,17 @@ app = FastAPI(title="Сканер вилок П1/П2", lifespan=lifespan)
 
 
 @app.get("/api/arbs")
-def get_arbs(min_profit: float = Query(0.0, ge=0, description="Мин. доходность, %")):
+def get_arbs(
+    min_profit: float = Query(0.0, ge=0, description="Мин. доходность, %"),
+    kind: str = Query("all", pattern="^(all|live|prematch)$",
+                      description="Тип рынка: all | live | prematch"),
+):
     """Текущие вилки (обновляются фоновым сканером каждые 10 секунд)."""
     snap = scanner.snapshot()
-    snap["arbs"] = [a for a in snap["arbs"] if a["profit_pct"] >= min_profit]
+    arbs = [a for a in snap["arbs"] if a["profit_pct"] >= min_profit]
+    if kind != "all":
+        arbs = [a for a in arbs if a["kind"] == kind]
+    snap["arbs"] = arbs
     snap["sound_alert_profit"] = SOUND_ALERT_PROFIT
     return snap
 

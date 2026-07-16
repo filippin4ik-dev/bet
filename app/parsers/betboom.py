@@ -6,29 +6,36 @@ Selenium; сначала пробуем обычный requests на случа�
 """
 from bs4 import BeautifulSoup
 
-from ..models import MatchOdds
+from ..models import KIND_LIVE, KIND_PREMATCH, MatchOdds
 from .base import BaseParser
 from .selenium_helper import get_html_via_selenium
 
-LINE_URL = "https://betboom.ru/sport"
+# (URL, тип рынка) — между запросами выдерживается случайная пауза 2–5 c
+PAGES = [
+    ("https://betboom.ru/sport/live", KIND_LIVE),   # Live-линия
+    ("https://betboom.ru/sport", KIND_PREMATCH),    # прематч-линия
+]
 
 
 class BetBoomParser(BaseParser):
     name = "BetBoom"
 
     def fetch_odds(self) -> list[MatchOdds]:
-        try:
-            html = self.get_html(LINE_URL, delay=True)
-        except Exception:  # noqa: BLE001
-            html = None
-        odds = self._parse_html(html) if html else []
-        if not odds:
-            html = get_html_via_selenium(LINE_URL)
-            if html:
-                odds = self._parse_html(html)
+        odds: list[MatchOdds] = []
+        for url, kind in PAGES:
+            try:
+                html = self.get_html(url, delay=True)
+            except Exception:  # noqa: BLE001
+                html = None
+            page_odds = self._parse_html(html, kind) if html else []
+            if not page_odds:
+                html = get_html_via_selenium(url)
+                if html:
+                    page_odds = self._parse_html(html, kind)
+            odds.extend(page_odds)
         return odds
 
-    def _parse_html(self, html: str) -> list[MatchOdds]:
+    def _parse_html(self, html: str, kind: str) -> list[MatchOdds]:
         soup = BeautifulSoup(html, "html.parser")
         result = []
         for event in soup.select("[data-testid='event-card'], .event-card, .match-row"):
@@ -44,8 +51,12 @@ class BetBoomParser(BaseParser):
                 continue
             sport_el = event.find_parent(attrs={"data-sport": True})
             sport = sport_el["data-sport"] if sport_el else "Спорт"
+            time_el = event.select_one(
+                "[data-testid='event-time'], .event-time, time")
             result.append(MatchOdds(
                 bookmaker=self.name, sport=sport,
                 team1=teams[0], team2=teams[1], k1=k1, k2=k2,
+                kind=kind,
+                start_time=time_el.get_text(strip=True) if time_el else None,
             ))
         return result

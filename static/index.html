@@ -17,6 +17,11 @@
   </header>
 
   <section class="controls">
+    <div class="tabs" id="kind-tabs">
+      <button type="button" data-kind="all" class="active">Все</button>
+      <button type="button" data-kind="live">🔴 Live</button>
+      <button type="button" data-kind="prematch">📅 Прематч</button>
+    </div>
     <label>
       Мин. доходность, %:
       <input type="number" id="min-profit" value="0" min="0" step="0.5">
@@ -40,6 +45,7 @@
     <table id="arbs-table">
       <thead>
         <tr>
+          <th>Тип</th>
           <th>Спорт</th>
           <th>Матч</th>
           <th>К1<sub>max</sub> (БК)</th>
@@ -51,14 +57,15 @@
         </tr>
       </thead>
       <tbody id="arbs-body">
-        <tr><td colspan="8" class="empty">Загрузка данных…</td></tr>
+        <tr><td colspan="9" class="empty">Загрузка данных…</td></tr>
       </tbody>
     </table>
   </main>
 
   <footer>
-    Формула: 1/К1<sub>max</sub> + 1/К2<sub>max</sub> &lt; 1 · Обновление каждые
-    <span id="interval">10</span> с · Источники: Winline, BetBoom, Fonbet, Liga Stavok
+    Формула: 1/К1<sub>max</sub> + 1/К2<sub>max</sub> &lt; 1 · Live + прематч ·
+    Обновление каждые <span id="interval">10</span> с ·
+    Источники: Winline, BetBoom, Fonbet, Liga Stavok
   </footer>
 
   <script src="/static/app.js"></script>
