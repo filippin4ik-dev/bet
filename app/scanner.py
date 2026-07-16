@@ -23,6 +23,8 @@ class Scanner:
         self._arbs: list[Arb] = []
         self._last_scan: float | None = None
         self._scan_count = 0
+        self._events_checked = 0   # уникальных событий за последний цикл
+        self._quotes_checked = 0   # всего котировок (событие x БК) за цикл
         # ключи вилок прошлого цикла — чтобы писать в историю только новые
         self._prev_keys: set[str] = set()
         self._executor = ThreadPoolExecutor(max_workers=len(self.parsers))
@@ -37,6 +39,8 @@ class Scanner:
                 "scan_interval": SCAN_INTERVAL,
                 "scan_count": self._scan_count,
                 "last_scan": self._last_scan,
+                "events_checked": self._events_checked,
+                "quotes_checked": self._quotes_checked,
                 "arbs": [a.to_dict() for a in self._arbs],
             }
 
@@ -53,6 +57,8 @@ class Scanner:
             self._arbs = arbs
             self._last_scan = time.time()
             self._scan_count += 1
+            self._events_checked = len({o.match_key for o in all_odds})
+            self._quotes_checked = len(all_odds)
 
         db.save_arbs(new)
         if arbs:

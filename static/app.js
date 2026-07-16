@@ -14,6 +14,7 @@ const els = {
   testSound: document.getElementById("test-sound"),
   modeBadge: document.getElementById("mode-badge"),
   lastScan: document.getElementById("last-scan"),
+  coverage: document.getElementById("coverage"),
   arbCount: document.getElementById("arb-count"),
   interval: document.getElementById("interval"),
 };
@@ -104,6 +105,11 @@ async function poll() {
     if (data.last_scan) {
       els.lastScan.textContent = "Обновлено: " +
         new Date(data.last_scan * 1000).toLocaleTimeString("ru-RU");
+    }
+
+    if (data.events_checked) {
+      els.coverage.textContent =
+        `Проверено: ${data.events_checked} событий / ${data.quotes_checked} котировок`;
     }
 
     render(data.arbs);

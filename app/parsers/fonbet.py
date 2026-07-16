@@ -1,7 +1,8 @@
 """Fonbet — парсинг публичного JSON-API линии (Live + прематч).
 
-Берём только матчи с двумя исходами: события, у которых в основной
-росписи есть факторы П1 (id=921) и П2 (id=923), но НЕТ ничьей (id=922).
+Проверяются ВСЕ события линии, включая дочерние росписи (сеты, периоды,
+карты и т.п.). Подходит любая котировка с двумя исходами: есть факторы
+П1 (id=921) и П2 (id=923), но НЕТ ничьей (id=922).
 Live/прематч различаем по полю события place: "live" | "line".
 """
 from datetime import datetime
@@ -39,24 +40,44 @@ class FonbetParser(BaseParser):
         result = []
         for ef in data.get("customFactors", []):
             event = events.get(ef.get("e"))
-            if not event or event.get("level") != 1:
-                continue  # только основные события, не «дочерние» росписи
+            if not event:
+                continue
             factors = {f["f"]: f.get("v") for f in ef.get("factors", [])}
             if F_DRAW in factors:
                 continue  # есть ничья — рынок трёхисходный, пропускаем
             k1, k2 = factors.get(F_P1), factors.get(F_P2)
             if not k1 or not k2:
                 continue
+
+            # У дочерних росписей (сет/период/карта) команды берём у родителя,
+            # а название росписи добавляем к виду спорта, чтобы такие рынки
+            # сопоставлялись между БК только с точно такими же рынками.
+            root = event
+            hops = 0
+            while (not root.get("team1") or not root.get("team2")) \
+                    and root.get("parentId") in events and hops < 5:
+                root = events[root["parentId"]]
+                hops += 1
+            team1, team2 = root.get("team1"), root.get("team2")
+            if not team1 or not team2:
+                continue
+
+            sport = sports.get(root.get("sportId"), "Спорт")
+            market_name = event.get("name") if event is not root else None
+            if market_name:
+                sport = f"{sport} · {market_name}"
+
             kind = KIND_LIVE if event.get("place") == "live" else KIND_PREMATCH
             start_time = None
-            if kind == KIND_PREMATCH and event.get("startTime"):
+            if kind == KIND_PREMATCH and root.get("startTime"):
                 start_time = datetime.fromtimestamp(
-                    event["startTime"]).strftime("%d.%m %H:%M")
+                    root["startTime"]).strftime("%d.%m %H:%M")
+
             result.append(MatchOdds(
                 bookmaker=self.name,
-                sport=sports.get(event.get("sportId"), "Спорт"),
-                team1=event.get("team1", ""),
-                team2=event.get("team2", ""),
+                sport=sport,
+                team1=team1,
+                team2=team2,
                 k1=float(k1),
                 k2=float(k2),
                 kind=kind,
