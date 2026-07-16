@@ -203,8 +203,15 @@ function renderOdds() {
 }
 
 function renderBkCounts(bookmakers) {
-  const parts = Object.entries(bookmakers || {})
-    .map(([bk, n]) => `${bk}: ${n}`);
+  const age = (s) => {
+    if (s == null) return "";
+    if (s < 90) return "только что";
+    return `${Math.round(s / 60)} мин назад`;
+  };
+  const parts = Object.entries(bookmakers || {}).map(([bk, v]) => {
+    if (typeof v === "number") return `${bk}: ${v}`;
+    return `${bk}: ${v.count} (${age(v.age_sec)})`;
+  });
   els.bkCounts.textContent = parts.length ? parts.join(" · ") : "";
 }
 

@@ -76,7 +76,10 @@ class WinlineParser(BaseParser):
                 continue
 
             for row in card.select(".card__body"):
-                label_el = row.select_one(".match-row-label")
+                # Метка строки: «Матч» — .match-row-label, дочерние росписи
+                # («1 сет», «2 сет») — .period-name. Без метки периода кэфы
+                # сета записались бы как кэфы всего матча!
+                label_el = row.select_one(".match-row-label, .period-name")
                 label = label_el.get_text(strip=True) if label_el else ""
                 row_sport = sport if label in ("", "Матч") else f"{sport} · {label}"
                 base = dict(bookmaker=self.name, sport=row_sport,
@@ -106,11 +109,13 @@ class WinlineParser(BaseParser):
                     outcome1="П1", outcome2="П2",
                     k1=k1, k2=k2, **base)
 
-        # Тотал больше/меньше (total2) + линия из .coefficient-middle
+        # Тотал (total2) + линия из .coefficient-middle. ВАЖНО: колонки
+        # Winline идут «М - Б» (заголовок sport-header), т.е. первая
+        # кнопка — Меньше, вторая — Больше.
         if "coefficient-button_total2" in classes and len(vals) == 2:
             mid = market.select_one(".coefficient-middle")
             pt = mid.get_text(strip=True) if mid else None
-            over, under = vals
+            under, over = vals
             if pt and over and under:
                 key = f"total:{scope}:{pt}" if scope else f"total:{pt}"
                 return MarketOdds(
