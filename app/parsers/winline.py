@@ -109,11 +109,13 @@ class WinlineParser(BaseParser):
                     outcome1="П1", outcome2="П2",
                     k1=k1, k2=k2, **base)
 
-        # Тотал больше/меньше (total2) + линия из .coefficient-middle
+        # Тотал (total2) + линия из .coefficient-middle. ВАЖНО: колонки
+        # Winline идут «М - Б» (заголовок sport-header), т.е. первая
+        # кнопка — Меньше, вторая — Больше.
         if "coefficient-button_total2" in classes and len(vals) == 2:
             mid = market.select_one(".coefficient-middle")
             pt = mid.get_text(strip=True) if mid else None
-            over, under = vals
+            under, over = vals
             if pt and over and under:
                 key = f"total:{scope}:{pt}" if scope else f"total:{pt}"
                 return MarketOdds(
