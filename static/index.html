@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Сканер вилок П1/П2</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header>
+    <h1>⚡ Сканер вилок <span class="accent">П1 / П2</span></h1>
+    <div class="status-bar">
+      <span id="mode-badge" class="badge">—</span>
+      <span id="last-scan">ожидание первого сканирования…</span>
+      <span id="arb-count"></span>
+    </div>
+  </header>
+
+  <section class="controls">
+    <label>
+      Мин. доходность, %:
+      <input type="number" id="min-profit" value="0" min="0" step="0.5">
+    </label>
+    <label>
+      Банк, ₽:
+      <select id="bank">
+        <option value="1000">1 000</option>
+        <option value="5000" selected>5 000</option>
+        <option value="10000">10 000</option>
+      </select>
+    </label>
+    <label class="checkbox">
+      <input type="checkbox" id="sound-on" checked>
+      🔔 Звук при вилке &gt; <span id="sound-threshold">2.5</span>%
+    </label>
+    <button id="test-sound" type="button" title="Проверить звук">Тест звука</button>
+  </section>
+
+  <main>
+    <table id="arbs-table">
+      <thead>
+        <tr>
+          <th>Спорт</th>
+          <th>Матч</th>
+          <th>К1<sub>max</sub> (БК)</th>
+          <th>К2<sub>max</sub> (БК)</th>
+          <th>Доходность</th>
+          <th>Ставка на П1</th>
+          <th>Ставка на П2</th>
+          <th>Прибыль</th>
+        </tr>
+      </thead>
+      <tbody id="arbs-body">
+        <tr><td colspan="8" class="empty">Загрузка данных…</td></tr>
+      </tbody>
+    </table>
+  </main>
+
+  <footer>
+    Формула: 1/К1<sub>max</sub> + 1/К2<sub>max</sub> &lt; 1 · Обновление каждые
+    <span id="interval">10</span> с · Источники: Winline, BetBoom, Fonbet, Liga Stavok
+  </footer>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
