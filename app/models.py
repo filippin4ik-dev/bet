@@ -1,5 +1,6 @@
 """Модели данных.
 
+Сканер работает ТОЛЬКО с прематчем (матчи, которые ещё не начались).
 Работаем с ЛЮБЫМ двухисходным рынком, а не только с победителем матча:
 - Победитель (П1 / П2, без ничьей);
 - Тотал больше/меньше на пол-линии (напр. «больше 2.5» / «меньше 2.5» —
@@ -11,9 +12,14 @@
 """
 from dataclasses import dataclass, field
 
-# Тип рынка по времени: live — матч идёт, prematch — матч ещё не начался
+# Тип рынка по времени. Live больше не сканируем, константы оставлены
+# для совместимости (история в SQLite, старые записи).
 KIND_LIVE = "live"
 KIND_PREMATCH = "prematch"
+
+# Матч считается начавшимся спустя минуту после времени старта —
+# небольшой запас на рассинхрон часов БК и сервера.
+_STARTED_GRACE = 60
 
 
 @dataclass
@@ -30,8 +36,13 @@ class MarketOdds:
     outcome2: str           # метка исхода 2: «П2», «ТМ 2.5»
     k1: float               # коэффициент на исход 1
     k2: float               # коэффициент на исход 2
-    kind: str = KIND_LIVE          # live | prematch
-    start_time: str | None = None  # время начала (для прематча)
+    kind: str = KIND_PREMATCH      # всегда prematch (live отключён)
+    start_time: str | None = None  # время начала (как показывает БК)
+    start_ts: float | None = None  # время начала, unix-время (если распознано)
+
+    def started(self, now: float) -> bool:
+        """Матч уже начался (по распознанному времени старта)?"""
+        return self.start_ts is not None and now >= self.start_ts + _STARTED_GRACE
 
     @property
     def event_key(self) -> str:
@@ -56,6 +67,7 @@ class MarketOdds:
             "k2": self.k2,
             "kind": self.kind,
             "start_time": self.start_time,
+            "start_ts": self.start_ts,
         }
 
 
@@ -80,8 +92,9 @@ class Arb:
     k2_bookmaker: str
     margin: float               # 1/К1 + 1/К2 (< 1 — вилка)
     profit_pct: float           # доходность, %
-    kind: str = KIND_LIVE       # live | prematch
+    kind: str = KIND_PREMATCH
     start_time: str | None = None
+    start_ts: float | None = None
     stakes: dict = field(default_factory=dict)  # {банк: {...}}
 
     def to_dict(self) -> dict:
@@ -89,6 +102,7 @@ class Arb:
             "match_key": self.match_key,
             "kind": self.kind,
             "start_time": self.start_time,
+            "start_ts": self.start_ts,
             "sport": self.sport,
             "match": f"{self.team1} — {self.team2}",
             "team1": self.team1,

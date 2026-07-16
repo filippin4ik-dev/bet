@@ -3,12 +3,12 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Сканер вилок</title>
+  <title>Сканер вилок — прематч</title>
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
   <header>
-    <h1>⚡ Сканер <span class="accent">вилок</span></h1>
+    <h1>⚡ Сканер <span class="accent">вилок</span> <span class="sub">прематч</span></h1>
     <div class="status-bar">
       <span id="mode-badge" class="badge">—</span>
       <span id="last-scan">ожидание первого сканирования…</span>
@@ -24,11 +24,17 @@
       <button type="button" data-view="arbs" class="active">💰 Вилки</button>
       <button type="button" data-view="odds">📋 Все матчи</button>
     </div>
-    <div class="tabs" id="kind-tabs">
-      <button type="button" data-kind="all" class="active">Все</button>
-      <button type="button" data-kind="live">🔴 Live</button>
-      <button type="button" data-kind="prematch">📅 Прематч</button>
-    </div>
+    <label class="search-label">
+      🔍 <input type="search" id="search" placeholder="Поиск: команда, турнир…">
+    </label>
+    <label>
+      Спорт:
+      <select id="sport-filter"><option value="">Все</option></select>
+    </label>
+    <label id="bk-filter-label" hidden>
+      БК:
+      <select id="bk-filter"><option value="">Все</option></select>
+    </label>
     <label>
       Мин. доходность, %:
       <input type="number" id="min-profit" value="0" min="0" step="0.5">
@@ -49,16 +55,18 @@
   </section>
 
   <main>
+    <div class="table-meta" id="table-meta"></div>
+
     <table id="arbs-table">
       <thead>
         <tr>
-          <th>Тип</th>
-          <th>Спорт</th>
-          <th>Матч</th>
-          <th>Рынок</th>
-          <th>Исход 1: К<sub>max</sub> (БК)</th>
-          <th>Исход 2: К<sub>max</sub> (БК)</th>
-          <th>Доходность</th>
+          <th class="sortable" data-sort="start_ts">Начало</th>
+          <th class="sortable" data-sort="sport">Спорт</th>
+          <th class="sortable" data-sort="match">Матч</th>
+          <th class="sortable" data-sort="market">Рынок</th>
+          <th class="sortable" data-sort="k1_max">Исход 1: К<sub>max</sub> (БК)</th>
+          <th class="sortable" data-sort="k2_max">Исход 2: К<sub>max</sub> (БК)</th>
+          <th class="sortable" data-sort="profit_pct">Доходность</th>
           <th>Ставка 1</th>
           <th>Ставка 2</th>
           <th>Прибыль</th>
@@ -72,13 +80,13 @@
     <table id="odds-table" hidden>
       <thead>
         <tr>
-          <th>БК</th>
-          <th>Тип</th>
-          <th>Спорт</th>
-          <th>Матч</th>
-          <th>Рынок</th>
-          <th>Исход 1</th>
-          <th>Исход 2</th>
+          <th class="sortable" data-sort="bookmaker">БК</th>
+          <th class="sortable" data-sort="start_ts">Начало</th>
+          <th class="sortable" data-sort="sport">Спорт</th>
+          <th class="sortable" data-sort="match">Матч</th>
+          <th class="sortable" data-sort="market">Рынок</th>
+          <th class="sortable" data-sort="k1">Исход 1</th>
+          <th class="sortable" data-sort="k2">Исход 2</th>
         </tr>
       </thead>
       <tbody id="odds-body">
@@ -89,8 +97,9 @@
 
   <footer>
     Формула: 1/К1<sub>max</sub> + 1/К2<sub>max</sub> &lt; 1 ·
-    Любые двухисходные рынки (победитель, тоталы больше/меньше) · Live + прематч ·
-    Обновление каждые <span id="interval">10</span> с ·
+    Любые двухисходные рынки (победитель, тоталы больше/меньше) ·
+    Только прематч (начавшиеся матчи убираются автоматически) ·
+    Обновление каждые <span id="interval">30</span> с ·
     Источники: Winline, BetBoom, Fonbet, Liga Stavok
   </footer>
 

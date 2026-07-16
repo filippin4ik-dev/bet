@@ -1,33 +1,42 @@
-"""Fonbet — парсинг публичного JSON-API линии (Live + прематч).
+"""Fonbet — парсинг публичного JSON-API линии (только прематч).
 
-Домен сервера линии Fonbet периодически меняется (line01..lineNN на разных
+Домен сервера линии Fonbet периодически меняется (line01w..lineNNw на разных
 resource-доменах), поэтому парсер перебирает список кандидатов и запоминает
 первый рабочий. Можно жёстко задать хост через переменную окружения
 FONBET_LINE_HOST (см. app/config.py и README).
 
-Проверяются ВСЕ события (включая дочерние росписи) и оба двухисходных рынка:
+Проверяются ВСЕ прематч-события (включая дочерние росписи) и оба
+двухисходных рынка:
 - Победитель (П1 id=921 / П2 id=923), если НЕТ ничьей (id=922);
 - Тоталы больше/меньше (ТБ id=930 / ТМ id=931) с параметром линии `pt`.
 """
 import logging
-from datetime import datetime
+import time
+from datetime import datetime, timedelta, timezone
 
-from ..config import FONBET_LINE_HOST
-from ..models import KIND_LIVE, KIND_PREMATCH, MarketOdds
+from ..config import BK_TZ_OFFSET, FONBET_LINE_HOST
+from ..models import KIND_PREMATCH, MarketOdds
 from .base import BaseParser
 
 log = logging.getLogger("parsers.fonbet")
 
 # Resource-домены, на которых Fonbet раздаёт JSON линии (меняются со временем)
 RESOURCE_DOMAINS = [
-    "bkfon-resources.com",
     "bk6bba-resources.com",
+    "bkfon-resources.com",
     "ccf4ab51771cacd46d.com",
 ]
 # Номера серверов линии, которые пробуем на каждом домене
 LINE_NUMBERS = ["01", "02", "03", "04", "05", "08", "20", "32", "44", "52"]
+# Шаблоны имени хоста: сейчас рабочие хосты вида line01w.<домен>,
+# старый формат line01.<домен> оставлен как запасной.
+HOST_TEMPLATES = ["line{num}w.{domain}", "line{num}.{domain}"]
 # Пути JSON-API (list — компактный, listBase — расширенный)
 PATHS = ["events/list", "events/listBase"]
+
+# Если ни один хост не ответил — не долбим все кандидаты каждый цикл,
+# а повторяем полный перебор не чаще, чем раз в N секунд.
+PROBE_BACKOFF = 300
 
 F_P1, F_DRAW, F_P2 = 921, 922, 923
 F_TOTAL_OVER, F_TOTAL_UNDER = 930, 931
@@ -40,10 +49,12 @@ def _candidate_urls() -> list[str]:
         # Явно заданный хост — пробуем в первую очередь
         for path in PATHS:
             urls.append(f"https://{FONBET_LINE_HOST}/{path}{query}")
-    for domain in RESOURCE_DOMAINS:
-        for num in LINE_NUMBERS:
-            for path in PATHS:
-                urls.append(f"https://line{num}.{domain}/{path}{query}")
+    for tmpl in HOST_TEMPLATES:
+        for domain in RESOURCE_DOMAINS:
+            for num in LINE_NUMBERS:
+                host = tmpl.format(num=num, domain=domain)
+                for path in PATHS:
+                    urls.append(f"https://{host}/{path}{query}")
     return urls
 
 
@@ -72,33 +83,45 @@ class FonbetParser(BaseParser):
     def __init__(self) -> None:
         super().__init__()
         self._working_url: str | None = None
+        self._last_full_probe = 0.0
 
     def _fetch_data(self) -> dict | None:
-        # Сначала пробуем ранее найденный рабочий URL, затем кандидатов,
-        # затем домены, обнаруженные на страницах fon.bet.
-        urls = ([self._working_url] if self._working_url else []) + _candidate_urls()
-        discovered = _discover_hosts(self.session)
-        for host in discovered:
+        # Рабочий URL известен — используем его, при сбое перебираем заново.
+        if self._working_url:
+            try:
+                data = self.get_json(self._working_url)
+                if isinstance(data, dict) and data.get("events"):
+                    return data
+            except Exception as exc:  # noqa: BLE001
+                log.info("Fonbet: рабочий домен %s перестал отвечать (%s) — "
+                         "ищу новый", self._working_url, exc)
+            self._working_url = None
+
+        # Полный перебор кандидатов — не чаще, чем раз в PROBE_BACKOFF сек
+        now = time.monotonic()
+        if now - self._last_full_probe < PROBE_BACKOFF:
+            return None
+        self._last_full_probe = now
+
+        urls = _candidate_urls()
+        for host in _discover_hosts(self.session):
             for path in PATHS:
                 u = f"https://{host}/{path}?lang=ru&scopeMarket=1600"
                 if u not in urls:
                     urls.append(u)
         for url in urls:
-            if not url:
-                continue
             try:
-                data = self.get_json(url)
+                data = self.get_json(url, timeout=6)
                 if isinstance(data, dict) and data.get("events"):
-                    if url != self._working_url:
-                        log.info("Fonbet: рабочий домен линии — %s", url)
+                    log.info("Fonbet: рабочий домен линии — %s", url)
                     self._working_url = url
                     return data
-            except Exception as exc:  # noqa: BLE001 — пробуем следующий кандидат
+            except Exception as exc:  # noqa: BLE001 — пробуем следующий
                 log.debug("Fonbet: %s не подошёл (%s)", url, exc)
                 continue
-        log.warning("Fonbet: ни один домен линии не ответил валидным JSON. "
-                    "Укажите актуальный хост в FONBET_LINE_HOST (см. README).")
-        self._working_url = None
+        log.warning("Fonbet: ни один домен линии не ответил валидным JSON "
+                    "(повторный поиск через %d с). Можно указать актуальный "
+                    "хост в FONBET_LINE_HOST (см. README).", PROBE_BACKOFF)
         return None
 
     def fetch_odds(self) -> list[MarketOdds]:
@@ -126,20 +149,28 @@ class FonbetParser(BaseParser):
             if not team1 or not team2:
                 continue
 
+            # Только прематч: place == 'line'. Live и неактивные события
+            # ('live' / 'notActive') пропускаем.
+            if event.get("place") != "line" or root.get("place") != "line":
+                continue
+
             sport = sports.get(root.get("sportId"), "Спорт")
             market_name = event.get("name") if event is not root else None
             if market_name:
                 sport = f"{sport} · {market_name}"
 
-            kind = KIND_LIVE if event.get("place") == "live" else KIND_PREMATCH
+            start_ts = root.get("startTime")
             start_time = None
-            if kind == KIND_PREMATCH and root.get("startTime"):
+            if start_ts:
+                # Показываем время в часовом поясе БК (МСК), а не сервера
+                tz = timezone(timedelta(hours=BK_TZ_OFFSET))
                 start_time = datetime.fromtimestamp(
-                    root["startTime"]).strftime("%d.%m %H:%M")
+                    start_ts, tz).strftime("%d.%m %H:%M")
 
             base = dict(bookmaker=self.name, sport=sport,
                         team1=team1, team2=team2,
-                        kind=kind, start_time=start_time)
+                        kind=KIND_PREMATCH, start_time=start_time,
+                        start_ts=float(start_ts) if start_ts else None)
 
             factors = ef.get("factors", [])
             result.extend(self._winner(factors, base))

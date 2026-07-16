@@ -20,6 +20,13 @@ body {
 
 header h1 { font-size: 1.6rem; font-weight: 700; }
 .accent { color: var(--accent); }
+.sub {
+  font-size: 0.9rem;
+  color: var(--muted);
+  font-weight: 400;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
 
 .status-bar {
   margin-top: 8px;
@@ -128,6 +135,29 @@ thead th {
   text-transform: uppercase;
   letter-spacing: 0.04em;
 }
+
+th.sortable { cursor: pointer; user-select: none; white-space: nowrap; }
+th.sortable:hover { color: var(--text); }
+th.sortable::after { content: " ↕"; opacity: 0.35; font-size: 0.75em; }
+th.sortable.sorted-asc::after { content: " ▲"; opacity: 1; color: var(--accent); }
+th.sortable.sorted-desc::after { content: " ▼"; opacity: 1; color: var(--accent); }
+
+.table-meta {
+  color: var(--muted);
+  font-size: 0.85rem;
+  margin-bottom: 8px;
+}
+
+.search-label input[type="search"] {
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 6px 10px;
+  width: 220px;
+  font-size: 0.95rem;
+}
+.muted { color: var(--muted); }
 
 tbody tr { border-top: 1px solid var(--border); }
 tbody tr:hover { background: #1c2438; }
