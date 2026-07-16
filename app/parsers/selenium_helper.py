@@ -7,17 +7,30 @@
 import logging
 import random
 
+from ..config import USE_SELENIUM
+
 log = logging.getLogger("parsers.selenium")
+
+_warned = False
 
 
 def get_html_via_selenium(url: str, wait_seconds: float = 5.0) -> str | None:
     """Возвращает HTML страницы после исполнения JS, либо None,
-    если Selenium недоступен или произошла ошибка."""
+    если Selenium отключён/недоступен или произошла ошибка."""
+    global _warned
+    if not USE_SELENIUM:
+        return None
     try:
         from selenium import webdriver
         from selenium.webdriver.chrome.options import Options
     except ImportError:
-        log.info("Selenium не установлен — пропускаем динамический парсинг")
+        if not _warned:
+            log.warning(
+                "Selenium не установлен — Winline/BetBoom/Лига Ставок "
+                "(динамические сайты) отдадут 0 котировок. Установите его: "
+                "раскомментируйте selenium в requirements.txt, поставьте "
+                "Chromium и переустановите зависимости (см. README).")
+            _warned = True
         return None
 
     options = Options()

@@ -22,4 +22,14 @@ BANKS = [1000, 5000, 10000]
 DB_PATH = os.getenv("DB_PATH", "arbs.sqlite3")
 
 # Таймаут HTTP-запросов к БК, сек
-HTTP_TIMEOUT = float(os.getenv("HTTP_TIMEOUT", "8"))
+HTTP_TIMEOUT = float(os.getenv("HTTP_TIMEOUT", "10"))
+
+# Fonbet: домен сервера линии периодически меняется. Если авто-перебор
+# кандидатов не сработал, впишите сюда актуальный хост из вкладки Network
+# браузера (запрос events/list или events/listBase), например:
+#   FONBET_LINE_HOST=line52.bkfon-resources.com
+FONBET_LINE_HOST = os.getenv("FONBET_LINE_HOST", "").strip()
+
+# Использовать Selenium для БК с динамическими страницами (Winline / BetBoom /
+# Лига Ставок). Требует установленных selenium + Chromium (см. README).
+USE_SELENIUM = os.getenv("USE_SELENIUM", "1") not in ("0", "false", "no", "")
