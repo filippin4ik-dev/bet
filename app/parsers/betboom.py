@@ -1,21 +1,50 @@
-"""BetBoom — сайт полностью динамический (SPA), поэтому основной путь —
-Selenium; сначала пробуем обычный requests на случай серверного рендера.
+"""BetBoom — динамический сайт (React SPA), парсится через Selenium.
 
-ВНИМАНИЕ: селекторы могут потребовать актуализации под текущую вёрстку;
-сайт доступен только с российских IP.
+Вёрстка использует обфусцированные классы (bb-xxx), поэтому вместо CSS-классов
+разбираем последовательность текстовых токенов внутри карточки события.
+
+Структура карточки (проверена на живой странице):
+    [Команда1, (счёт...), Команда2, (счёт...), статус, 'П1', k1, 'X', kX,
+     'П2', k2, 'Ещё', '+ N']
+Берём только П1/П2 (исход матча). Ничью (X) игнорируем — рынок остаётся
+двухисходным. Тоталы на карточке в списке не отображаются (нужен заход в
+событие), поэтому здесь только победитель.
+
+При смене вёрстки правьте разбор ниже; логика поиска вилок не меняется.
 """
+import re
+
 from bs4 import BeautifulSoup
 
 from ..models import KIND_LIVE, KIND_PREMATCH, MarketOdds
 from .base import BaseParser
-from .html_utils import pair, parse_totals
-from .selenium_helper import get_html_via_selenium
+from .html_utils import num
+from .selenium_helper import SeleniumSession
 
-# (URL, тип рынка) — между запросами выдерживается случайная пауза 2–5 c
-PAGES = [
-    ("https://betboom.ru/sport/live", KIND_LIVE),   # Live-линия
-    ("https://betboom.ru/sport", KIND_PREMATCH),    # прематч-линия
+# Двухисходные виды спорта и их slug'и на betboom.ru (без футбола/гандбола —
+# там есть ничья). Обходим каждый вид отдельно: на общей странице доминирует
+# футбол, а нам нужны только рынки без ничьей.
+SPORTS = [
+    ("tennis", "Теннис"),
+    ("table-tennis", "Настольный теннис"),
+    ("basketball", "Баскетбол"),
+    ("volleyball", "Волейбол"),
+    ("ice-hockey", "Хоккей"),
+    ("esports", "Киберспорт"),
 ]
+# (шаблон URL, тип рынка)
+SECTIONS = [
+    ("https://betboom.ru/sport/live/{slug}", KIND_LIVE),
+    ("https://betboom.ru/sport/line/{slug}", KIND_PREMATCH),
+]
+
+_DEC = re.compile(r"^\d+\.\d{1,3}$")
+
+# Служебные подписи статуса матча — не команды
+_STATUS_WORDS = (
+    "прерван", "не начал", "перерыв", "заверш", "отмен", "перенес",
+    "пауза", "ещё", "eще", "матч",
+)
 
 
 class BetBoomParser(BaseParser):
@@ -23,42 +52,94 @@ class BetBoomParser(BaseParser):
 
     def fetch_odds(self) -> list[MarketOdds]:
         odds: list[MarketOdds] = []
-        for url, kind in PAGES:
-            try:
-                html = self.get_html(url, delay=True)
-            except Exception:  # noqa: BLE001
-                html = None
-            page_odds = self._parse_html(html, kind) if html else []
-            if not page_odds:
-                html = get_html_via_selenium(url)
-                if html:
-                    page_odds = self._parse_html(html, kind)
-            odds.extend(page_odds)
+        with SeleniumSession() as s:
+            if s.driver is None:
+                return []
+            for tmpl, kind in SECTIONS:
+                for slug, sport in SPORTS:
+                    self._delay()
+                    html = s.render(tmpl.format(slug=slug), wait_seconds=9)
+                    if html:
+                        odds.extend(self._parse_html(html, kind, sport))
         return odds
 
-    def _parse_html(self, html: str, kind: str) -> list[MarketOdds]:
+    def _parse_html(self, html: str, kind: str,
+                    sport: str = "Спорт") -> list[MarketOdds]:
         soup = BeautifulSoup(html, "html.parser")
-        coef_sel = "[data-testid='odd-button'], .odd-value, .factor-value"
-        result = []
-        for event in soup.select("[data-testid='event-card'], .event-card, .match-row"):
-            teams = [t.get_text(strip=True) for t in event.select(
-                "[data-testid='team-name'], .team-title, .competitor-name")]
-            if len(teams) != 2:
+        result: list[MarketOdds] = []
+
+        # Карточки событий: узлы, содержащие маркер 'П1' и хотя бы 2 кэфа.
+        for card in soup.select("div"):
+            # только «листовые» карточки, без вложенных карточек
+            if card.find("div", recursive=False) and card.select("div div div div div"):
+                pass
+            toks = [t.strip() for t in card.stripped_strings]
+            if "П1" not in toks or "П2" not in toks:
                 continue
-            sport_el = event.find_parent(attrs={"data-sport": True})
-            sport = sport_el["data-sport"] if sport_el else "Спорт"
-            time_el = event.select_one(
-                "[data-testid='event-time'], .event-time, time")
-            base = dict(
-                bookmaker=self.name, sport=sport,
-                team1=teams[0], team2=teams[1], kind=kind,
-                start_time=time_el.get_text(strip=True) if time_el else None,
-            )
-            coefs = [c.get_text(strip=True) for c in event.select(coef_sel)]
-            k1, k2 = pair(coefs)
-            if k1 and k2:
-                result.append(MarketOdds(
-                    market="Победитель", market_key="winner",
-                    outcome1="П1", outcome2="П2", k1=k1, k2=k2, **base))
-            result.extend(parse_totals(event, base, coef_sel))
-        return result
+            # чтобы не брать контейнер целой лиги — в карточке одна связка П1..П2
+            if toks.count("П1") != 1 or toks.count("П2") != 1:
+                continue
+
+            parsed = self._parse_card(toks, kind, sport)
+            if parsed:
+                result.append(parsed)
+        # Удаляем дубли (одно и то же событие ловится на нескольких уровнях DOM)
+        return _dedup(result)
+
+    def _parse_card(self, toks: list[str], kind: str,
+                    sport: str) -> MarketOdds | None:
+        i1 = toks.index("П1")
+        # k1 идёт сразу после 'П1'
+        k1 = num(toks[i1 + 1]) if i1 + 1 < len(toks) else None
+        # k2 идёт сразу после 'П2'
+        i2 = toks.index("П2")
+        k2 = num(toks[i2 + 1]) if i2 + 1 < len(toks) else None
+        if not k1 or not k2:
+            return None
+
+        # Если между П1 и П2 есть ничья 'X' с реальным кэфом — это рынок
+        # 1X2 (три исхода, напр. футбол), он НЕ двухисходный. Пропускаем.
+        if "X" in toks[i1:i2]:
+            xi = toks.index("X", i1, i2)
+            if xi + 1 < len(toks) and num(toks[xi + 1]):
+                return None
+
+        # Команды — токены до блока со счётом/статусом, до первого 'П1'.
+        # Берём непустые нечисловые токены слева, отбрасывая счёт (одиночные
+        # цифры) и статус (содержит 'мин', ':' или 'Т,').
+        names = []
+        for t in toks[:i1]:
+            if _DEC.match(t):
+                continue
+            if re.fullmatch(r"\d+", t):
+                continue  # счёт
+            if any(m in t for m in ("мин", ":", "Т,", "тайм", "сет", "гейм")):
+                continue
+            if t in ("Ещё", "X"):
+                continue
+            if any(w in t.lower() for w in _STATUS_WORDS):
+                continue  # статус матча, не команда
+            names.append(t)
+        if len(names) < 2:
+            return None
+        team1, team2 = names[0], names[-1]
+        if team1 == team2:
+            return None
+
+        return MarketOdds(
+            bookmaker=self.name, sport=sport,
+            team1=team1, team2=team2,
+            market="Победитель", market_key="winner",
+            outcome1="П1", outcome2="П2",
+            k1=k1, k2=k2, kind=kind,
+        )
+
+
+def _dedup(items: list[MarketOdds]) -> list[MarketOdds]:
+    seen, out = set(), []
+    for o in items:
+        key = (o.team1, o.team2, o.k1, o.k2)
+        if key not in seen:
+            seen.add(key)
+            out.append(o)
+    return out

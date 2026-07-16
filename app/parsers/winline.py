@@ -17,7 +17,7 @@ from bs4 import BeautifulSoup
 from ..models import KIND_LIVE, KIND_PREMATCH, MarketOdds
 from .base import BaseParser
 from .html_utils import num
-from .selenium_helper import get_html_via_selenium
+from .selenium_helper import SeleniumSession
 
 # (URL, тип рынка)
 PAGES = [
@@ -31,11 +31,14 @@ class WinlineParser(BaseParser):
 
     def fetch_odds(self) -> list[MarketOdds]:
         odds: list[MarketOdds] = []
-        for url, kind in PAGES:
-            self._delay()
-            html = get_html_via_selenium(url, wait_seconds=12)
-            if html:
-                odds.extend(self._parse_html(html, kind))
+        with SeleniumSession() as s:
+            if s.driver is None:
+                return []
+            for url, kind in PAGES:
+                self._delay()
+                html = s.render(url, wait_seconds=12)
+                if html:
+                    odds.extend(self._parse_html(html, kind))
         return odds
 
     def _parse_html(self, html: str, kind: str) -> list[MarketOdds]:
