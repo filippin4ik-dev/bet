@@ -38,13 +38,10 @@ def _get_shared_driver():
 
 
 def _drop_shared_driver() -> None:
-    """Закрывает общий браузер. Вызывать под _render_lock."""
+    """Закрывает общий браузер (жёстко, с таймаутом). Вызывать под _render_lock."""
     global _shared_driver
     if _shared_driver is not None:
-        try:
-            _shared_driver.quit()
-        except Exception:  # noqa: BLE001
-            pass
+        _force_quit(_shared_driver)
         _shared_driver = None
 
 
@@ -106,6 +103,12 @@ def _make_driver():
                 # съедают CPU так, что рендерер перестаёт отвечать.
                 "--blink-settings=imagesEnabled=false",
                 "--disable-background-networking",
+                # Экономия памяти на VPS с 1–2 ГБ (без этого систему
+                # добивает OOM-killer: в логе это выглядит как «Killed»)
+                "--renderer-process-limit=2",
+                "--disable-site-isolation-trials",
+                "--disable-extensions",
+                "--disk-cache-size=1048576",
                 f"--window-size={random.choice(['1920,1080', '1366,768'])}"):
         options.add_argument(arg)
     options.add_experimental_option(
@@ -123,14 +126,60 @@ def _make_driver():
         from selenium import webdriver
         if driver_path:
             from selenium.webdriver.chrome.service import Service
-            return webdriver.Chrome(options=options,
-                                    service=Service(executable_path=driver_path))
-        return webdriver.Chrome(options=options)
+            driver = webdriver.Chrome(
+                options=options,
+                service=Service(executable_path=driver_path))
+        else:
+            driver = webdriver.Chrome(options=options)
+        _tune_executor(driver)
+        return driver
     except Exception as exc:  # noqa: BLE001
         log.warning("Selenium: не удалось запустить браузер: %s "
                     "(браузер=%s, драйвер=%s)",
                     exc, browser or "не найден", driver_path or "авто")
         return None
+
+
+def _tune_executor(driver) -> None:
+    """Жёстко ограничивает время ЛЮБОЙ команды браузеру.
+
+    По умолчанию selenium ждёт ответа 120 секунд и повторяет 3 раза —
+    если рендерер на слабом VPS перегружен, каждая команда (page_source,
+    quit и т.д.) висит до 12 минут. Ставим 60 секунд без повторов."""
+    try:
+        ce = driver.command_executor
+        ce._client_config.timeout = 60          # noqa: SLF001
+        ce._conn.connection_pool_kw["retries"] = 0  # noqa: SLF001
+        ce._conn.clear()                        # noqa: SLF001 — пересоздать пулы
+    except Exception as exc:  # noqa: BLE001
+        log.debug("Selenium: не удалось настроить таймауты клиента: %s", exc)
+
+
+def _force_quit(driver) -> None:
+    """quit() с таймаутом: зависший браузер добиваем через kill процессов."""
+    done = threading.Event()
+
+    def _quit() -> None:
+        try:
+            driver.quit()
+        except Exception:  # noqa: BLE001
+            pass
+        done.set()
+
+    t = threading.Thread(target=_quit, daemon=True)
+    t.start()
+    t.join(20)
+    if not done.is_set():
+        log.warning("Selenium: quit завис — убиваю процессы браузера")
+        try:
+            proc = getattr(driver.service, "process", None)
+            if proc is not None:
+                import subprocess
+                subprocess.run(["pkill", "-9", "-P", str(proc.pid)],
+                               check=False)
+                proc.kill()
+        except Exception:  # noqa: BLE001
+            pass
 
 
 class SeleniumSession:
@@ -206,11 +255,11 @@ class SeleniumSession:
                 driver.execute_script("window.stop();")
             except Exception:  # noqa: BLE001
                 pass
-            try:
-                html = driver.execute_script(
-                    "return document.documentElement.outerHTML;")
-            except Exception:  # noqa: BLE001
-                html = driver.page_source
+            # ВАЖНО: никаких откатов на page_source — на перегруженном
+            # рендерере он висит минутами. Не отдал DOM — перезапускаем
+            # браузер и пропускаем страницу.
+            html = driver.execute_script(
+                "return document.documentElement.outerHTML;")
             log.info("Selenium: %s отрендерен за %.0f c (%d байт)",
                      url, time.monotonic() - t0, len(html or ""))
             return html or None

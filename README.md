@@ -188,6 +188,15 @@ systemctl restart arb-scanner
 2. **Не установлен Selenium/Chromium.** Winline, BetBoom и Лига Ставок — это SPA, их линия грузится JavaScript'ом, поэтому нужен браузер. Поставьте `chromium-browser` и `pip install selenium`. Fonbet работает и без браузера.
 3. **Сменился домен линии Fonbet.** Домены вида `lineNN.<hash>.com` периодически меняются. Парсер перебирает известные кандидаты, но если все не подошли — найдите актуальный хост в браузере (DevTools → Network → запрос `events/list`/`events/listBase`) и задайте `FONBET_LINE_HOST`.
 4. **Изменилась вёрстка Winline/BetBoom/Лиги Ставок.** CSS-селекторы в `app/parsers/*.py` могут потребовать актуализации под текущую разметку; структура парсеров и разбор тоталов при этом сохраняются.
+5. **Слабый VPS: не хватает памяти.** Chrome + сканер требуют ~1.5–2 ГБ. Если в логе процесс внезапно завершается словом `Killed` — это OOM-killer. Добавьте swap (после этого перезапустите сканер):
+
+```bash
+fallocate -l 2G /swapfile && chmod 600 /swapfile
+mkswap /swapfile && swapon /swapfile
+echo '/swapfile none swap sw 0 0' >> /etc/fstab   # чтобы пережил перезагрузку
+```
+
+Рекомендуемый минимум для VPS: **2 vCPU и 2 ГБ RAM** (+2 ГБ swap). На 1 vCPU / 1 ГБ сканер работает, но рендеринг страниц заметно медленнее.
 
 ## Важно про парсинг
 
