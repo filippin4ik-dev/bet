@@ -1,41 +1,83 @@
 """Fonbet — парсинг публичного JSON-API линии (Live + прематч).
 
-Проверяются ВСЕ события линии (включая дочерние росписи — сеты, карты,
-периоды) и все подходящие двухисходные рынки:
+Домен сервера линии Fonbet периодически меняется (line01..lineNN на разных
+resource-доменах), поэтому парсер перебирает список кандидатов и запоминает
+первый рабочий. Можно жёстко задать хост через переменную окружения
+FONBET_LINE_HOST (см. app/config.py и README).
 
+Проверяются ВСЕ события (включая дочерние росписи) и оба двухисходных рынка:
 - Победитель (П1 id=921 / П2 id=923), если НЕТ ничьей (id=922);
-- Тоталы больше/меньше (ТБ id=930 / ТМ id=931) с параметром линии `pt`
-  (например «убийств больше 2.5 / меньше 2.5», карт, геймов, очков и т.п.).
-
-Каждый тотал — отдельный двухисходный рынок; сравнивается только с точно
-таким же тоталом (та же линия pt) у других БК.
+- Тоталы больше/меньше (ТБ id=930 / ТМ id=931) с параметром линии `pt`.
 """
+import logging
 from datetime import datetime
 
+from ..config import FONBET_LINE_HOST
 from ..models import KIND_LIVE, KIND_PREMATCH, MarketOdds
 from .base import BaseParser
 
-# Зеркала JSON-API линии Fonbet (структура одинаковая)
-API_URLS = [
-    "https://line32.bk6bba-resources.com/events/list?lang=ru&scopeMarket=1600",
-    "https://line01.bk6bba-resources.com/events/list?lang=ru&scopeMarket=1600",
+log = logging.getLogger("parsers.fonbet")
+
+# Resource-домены, на которых Fonbet раздаёт JSON линии (меняются со временем)
+RESOURCE_DOMAINS = [
+    "bkfon-resources.com",
+    "bk6bba-resources.com",
+    "ccf4ab51771cacd46d.com",
 ]
+# Номера серверов линии, которые пробуем на каждом домене
+LINE_NUMBERS = ["01", "02", "03", "04", "05", "08", "20", "32", "44", "52"]
+# Пути JSON-API (list — компактный, listBase — расширенный)
+PATHS = ["events/list", "events/listBase"]
 
 F_P1, F_DRAW, F_P2 = 921, 922, 923
 F_TOTAL_OVER, F_TOTAL_UNDER = 930, 931
 
 
+def _candidate_urls() -> list[str]:
+    query = "?lang=ru&scopeMarket=1600"
+    urls: list[str] = []
+    if FONBET_LINE_HOST:
+        # Явно заданный хост — пробуем в первую очередь
+        for path in PATHS:
+            urls.append(f"https://{FONBET_LINE_HOST}/{path}{query}")
+    for domain in RESOURCE_DOMAINS:
+        for num in LINE_NUMBERS:
+            for path in PATHS:
+                urls.append(f"https://line{num}.{domain}/{path}{query}")
+    return urls
+
+
 class FonbetParser(BaseParser):
     name = "Fonbet"
 
-    def fetch_odds(self) -> list[MarketOdds]:
-        data = None
-        for url in API_URLS:
-            try:
-                data = self.get_json(url, delay=True)
-                break
-            except Exception:  # noqa: BLE001 — пробуем следующее зеркало
+    def __init__(self) -> None:
+        super().__init__()
+        self._working_url: str | None = None
+
+    def _fetch_data(self) -> dict | None:
+        # Сначала пробуем ранее найденный рабочий URL
+        urls = ([self._working_url] if self._working_url else []) + _candidate_urls()
+        for url in urls:
+            if not url:
                 continue
+            try:
+                data = self.get_json(url)
+                if isinstance(data, dict) and data.get("events"):
+                    if url != self._working_url:
+                        log.info("Fonbet: рабочий домен линии — %s", url)
+                    self._working_url = url
+                    return data
+            except Exception as exc:  # noqa: BLE001 — пробуем следующий кандидат
+                log.debug("Fonbet: %s не подошёл (%s)", url, exc)
+                continue
+        log.warning("Fonbet: ни один домен линии не ответил валидным JSON. "
+                    "Укажите актуальный хост в FONBET_LINE_HOST (см. README).")
+        self._working_url = None
+        return None
+
+    def fetch_odds(self) -> list[MarketOdds]:
+        self._delay()
+        data = self._fetch_data()
         if not data:
             return []
 
@@ -48,8 +90,6 @@ class FonbetParser(BaseParser):
             if not event:
                 continue
 
-            # У дочерних росписей команды берём у родителя, а название
-            # росписи добавляем к виду спорта.
             root = event
             hops = 0
             while (not root.get("team1") or not root.get("team2")) \
@@ -95,7 +135,6 @@ class FonbetParser(BaseParser):
         )]
 
     def _totals(self, factors: list, base: dict) -> list[MarketOdds]:
-        # Тоталы приходят парами ТБ/ТМ с одинаковым параметром линии pt
         overs, unders = {}, {}
         for f in factors:
             pt = f.get("pt") or f.get("p")

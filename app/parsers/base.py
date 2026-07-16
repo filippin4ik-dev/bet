@@ -58,6 +58,8 @@ class BaseParser:
             self._delay()
         resp = self.session.get(url, headers=self._headers(),
                                 timeout=HTTP_TIMEOUT, **kwargs)
+        log.debug("%s GET %s -> %s (%d байт)",
+                  self.name, url, resp.status_code, len(resp.content))
         resp.raise_for_status()
         return resp.json()
 
@@ -66,6 +68,8 @@ class BaseParser:
             self._delay()
         resp = self.session.get(url, headers=self._headers(),
                                 timeout=HTTP_TIMEOUT, **kwargs)
+        log.info("%s GET %s -> %s (%d байт)",
+                 self.name, url, resp.status_code, len(resp.text))
         resp.raise_for_status()
         return resp.text
 
