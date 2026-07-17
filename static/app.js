@@ -2,7 +2,8 @@
  * Опрашивает /api/arbs и /api/odds, рисует таблицы с сортировкой по любому
  * столбцу, поиском и фильтрами; подаёт звук при новой вилке выше порога. */
 
-const POLL_INTERVAL_MS = 10_000;
+const POLL_INTERVAL_MS = 10_000;      // прематч — раз в 10 с
+const LIVE_POLL_INTERVAL_MS = 5_000;  // лайв обновляем чаще
 
 const els = {
   body: document.getElementById("arbs-body"),
@@ -35,15 +36,19 @@ let alertedKeys = new Set(); // вилки, о которых уже «проп�
 /* ---------- состояние (сохраняется в localStorage) ---------- */
 
 const state = {
-  view: "arbs",                 // arbs | odds
+  view: "arbs",                 // arbs | live | odds
   search: "",
   sport: "",
   bookmaker: "",
   sort: {
     arbs: { key: "profit_pct", dir: -1 },
+    live: { key: "profit_pct", dir: -1 },
     odds: { key: "start_ts", dir: 1 },
   },
 };
+
+// вилки-режимы (прематч и лайв) рисуются в одну таблицу вилок
+const isArbView = (v) => v === "arbs" || v === "live";
 
 function loadState() {
   let saved = {};
@@ -127,7 +132,7 @@ function applySort(rows) {
 }
 
 function updateSortIndicators() {
-  const table = state.view === "arbs" ? els.arbsTable : els.oddsTable;
+  const table = isArbView(state.view) ? els.arbsTable : els.oddsTable;
   const { key, dir } = state.sort[state.view];
   document.querySelectorAll("th.sortable").forEach((th) => th.classList.remove("sorted-asc", "sorted-desc"));
   table.querySelectorAll("th.sortable").forEach((th) => {
@@ -136,7 +141,7 @@ function updateSortIndicators() {
 }
 
 function refreshFilterOptions() {
-  const rows = state.view === "arbs" ? lastArbs : lastOdds;
+  const rows = isArbView(state.view) ? lastArbs : lastOdds;
   // В фильтре — только корневые виды спорта, без лиг и росписей
   const sports = [...new Set(rows.map((r) => rootSport(r.sport)))].sort((a, b) => a.localeCompare(b, "ru"));
   fillSelect(els.sportFilter, sports, state.sport, "Все");
@@ -248,24 +253,26 @@ function renderArbs() {
 function rerender() {
   refreshFilterOptions();
   updateSortIndicators();
-  if (state.view === "arbs") renderArbs();
+  if (isArbView(state.view)) renderArbs();
   else renderOdds();
 }
 
 /* ---------- опрос API ---------- */
 
 async function poll() {
+  const live = state.view === "live";
+  const arbsUrl = live ? "/api/live/arbs" : "/api/arbs";
   try {
     const minProfit = parseFloat(els.minProfit.value) || 0;
-    const resp = await fetch(`/api/arbs?min_profit=${minProfit}`);
+    const resp = await fetch(`${arbsUrl}?min_profit=${minProfit}`);
     const data = await resp.json();
 
     soundAlertProfit = data.sound_alert_profit ?? 2.5;
     els.soundThreshold.textContent = soundAlertProfit;
     els.interval.textContent = data.scan_interval;
 
-    els.modeBadge.textContent = "ПРЕМАТЧ";
-    els.modeBadge.className = "badge live";
+    els.modeBadge.textContent = live ? "ЛАЙВ" : "ПРЕМАТЧ";
+    els.modeBadge.className = live ? "badge hot-badge" : "badge live";
     els.scanningBadge.hidden = !data.scanning;
 
     if (data.last_scan) {
@@ -332,8 +339,9 @@ els.viewTabs.addEventListener("click", (e) => {
   saveState();
   els.viewTabs.querySelectorAll("button").forEach(
     (b) => b.classList.toggle("active", b === btn));
-  els.arbsTable.hidden = state.view !== "arbs";
+  els.arbsTable.hidden = !isArbView(state.view);
   els.oddsTable.hidden = state.view !== "odds";
+  restartPolling();
   poll();
 });
 
@@ -354,11 +362,18 @@ document.querySelectorAll("th.sortable").forEach((th) => {
 
 /* ---------- запуск ---------- */
 
+let pollTimer = null;
+function restartPolling() {
+  if (pollTimer) clearInterval(pollTimer);
+  const ms = state.view === "live" ? LIVE_POLL_INTERVAL_MS : POLL_INTERVAL_MS;
+  pollTimer = setInterval(poll, ms);
+}
+
 loadState();
 els.viewTabs.querySelectorAll("button").forEach(
   (b) => b.classList.toggle("active", b.dataset.view === state.view));
-els.arbsTable.hidden = state.view !== "arbs";
+els.arbsTable.hidden = !isArbView(state.view);
 els.oddsTable.hidden = state.view !== "odds";
 
 poll();
-setInterval(poll, POLL_INTERVAL_MS);
+restartPolling();

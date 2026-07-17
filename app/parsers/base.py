@@ -79,6 +79,10 @@ class BaseParser:
     def fetch_odds(self) -> list[MarketOdds]:
         raise NotImplementedError
 
+    def fetch_live_odds(self) -> list[MarketOdds]:
+        """Лайв-линия (матчи в игре). БК без поддержки лайва — пустой список."""
+        return []
+
     def safe_fetch(self) -> list[MarketOdds]:
         """Обёртка: ошибки одной БК не должны ронять весь цикл сканера."""
         try:
@@ -87,4 +91,15 @@ class BaseParser:
             return odds
         except Exception as exc:  # noqa: BLE001 — любые сбои сети/разметки
             log.warning("%s: ошибка парсинга: %s", self.name, exc)
+            return []
+
+    def safe_fetch_live(self) -> list[MarketOdds]:
+        """То же для лайва: сбой одной БК не должен ронять лайв-цикл."""
+        try:
+            odds = self.fetch_live_odds()
+            if odds:
+                log.info("%s: получено %d лайв-котировок", self.name, len(odds))
+            return odds
+        except Exception as exc:  # noqa: BLE001
+            log.warning("%s: ошибка лайв-парсинга: %s", self.name, exc)
             return []

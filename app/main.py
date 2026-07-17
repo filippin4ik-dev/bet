@@ -13,6 +13,7 @@ from fastapi.staticfiles import StaticFiles
 
 from . import db
 from .config import SOUND_ALERT_PROFIT
+from .models import KIND_LIVE, KIND_PREMATCH
 from .scanner import Scanner
 
 logging.basicConfig(
@@ -22,16 +23,21 @@ logging.basicConfig(
 
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 
-scanner = Scanner()
+# Два независимых сканера: прематч (медленный) и лайв (быстрый).
+scanner = Scanner(mode=KIND_PREMATCH)
+live_scanner = Scanner(mode=KIND_LIVE)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     db.init_db()
-    task = asyncio.create_task(scanner.run())
+    tasks = [asyncio.create_task(scanner.run()),
+             asyncio.create_task(live_scanner.run())]
     yield
     scanner.stop()
-    task.cancel()
+    live_scanner.stop()
+    for t in tasks:
+        t.cancel()
 
 
 app = FastAPI(title="Сканер вилок (двухисходные рынки)", lifespan=lifespan)
@@ -55,6 +61,31 @@ def get_odds():
     odds = scanner.odds_snapshot()
     odds.sort(key=lambda o: (o["start_ts"] or float("inf"),
                              o["sport"], o["match"], o["bookmaker"]))
+    return {
+        "scanning": snap["scanning"],
+        "last_scan": snap["last_scan"],
+        "bookmakers": snap["bookmakers"],
+        "odds": odds,
+    }
+
+
+@app.get("/api/live/arbs")
+def get_live_arbs(
+    min_profit: float = Query(0.0, ge=0, description="Мин. доходность, %"),
+):
+    """Текущие ЛАЙВ-вилки (быстрый цикл, матчи в игре)."""
+    snap = live_scanner.snapshot()
+    snap["arbs"] = [a for a in snap["arbs"] if a["profit_pct"] >= min_profit]
+    snap["sound_alert_profit"] = SOUND_ALERT_PROFIT
+    return snap
+
+
+@app.get("/api/live/odds")
+def get_live_odds():
+    """Все найденные ЛАЙВ-матчи/котировки (по всем БК)."""
+    snap = live_scanner.snapshot()
+    odds = live_scanner.odds_snapshot()
+    odds.sort(key=lambda o: (o["sport"], o["match"], o["bookmaker"]))
     return {
         "scanning": snap["scanning"],
         "last_scan": snap["last_scan"],
