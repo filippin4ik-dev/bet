@@ -15,10 +15,11 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from . import db
 from .arbitrage import find_arbs
-from .config import (LIVE_ODDS_TTL, LIVE_SCAN_INTERVAL, ODDS_TTL,
-                     SCAN_INTERVAL)
+from .config import (LIVE_ODDS_TTL, LIVE_PER_BK_GAP, LIVE_SCAN_INTERVAL,
+                     ODDS_TTL, SCAN_INTERVAL)
 from .models import Arb, KIND_LIVE, KIND_PREMATCH, MarketOdds
 from .parsers import get_parsers
+from .parsers.base import BaseParser
 
 log = logging.getLogger("scanner")
 
@@ -169,6 +170,9 @@ class Scanner:
                  f" (лучшая {arbs[0].profit_pct:.2f}%)" if arbs else "")
 
     async def run(self) -> None:
+        if self.live:
+            await self._run_live()
+            return
         log.info("Сканер запущен: режим=%s, период=%s c",
                  self.mode, self.interval)
         loop = asyncio.get_running_loop()
@@ -184,6 +188,56 @@ class Scanner:
                 await asyncio.wait_for(self._stop.wait(), timeout=wait)
             except asyncio.TimeoutError:
                 pass
+
+    # ---------- лайв: независимое обновление по каждой БК ----------
+
+    @staticmethod
+    def _supports_live(parser: BaseParser) -> bool:
+        """БК реально отдаёт лайв (переопределила fetch_live_odds)?"""
+        return type(parser).fetch_live_odds is not BaseParser.fetch_live_odds
+
+    async def _run_live(self) -> None:
+        """Каждая лайв-БК крутится в своём потоке и обновляется как можно
+        чаще — медленная БК не тормозит быструю. Как только БК принесла
+        свежие кэфы, вилки сразу пересчитываются по всем БК."""
+        workers = [p for p in self.parsers if self._supports_live(p)]
+        if not workers:
+            log.info("Лайв-сканер: ни одна БК не поддерживает лайв — простой")
+            await self._stop.wait()
+            return
+        log.info("Лайв-сканер запущен: БК=%s, пауза между обновлениями %.1f c",
+                 ", ".join(p.name for p in workers), LIVE_PER_BK_GAP)
+        with self._lock:
+            self._scanning = True
+        loop = asyncio.get_running_loop()
+        tasks = [loop.run_in_executor(self._executor, self._live_worker, p)
+                 for p in workers]
+        await self._stop.wait()
+        for t in tasks:
+            try:
+                await t
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _live_worker(self, parser: BaseParser) -> None:
+        """Бесконечный цикл обновления одной лайв-БК (в отдельном потоке)."""
+        while not self._stop.is_set():
+            started = time.monotonic()
+            try:
+                odds = self._fetch(parser)
+                arbs = self._update_bk(parser.name, odds)
+                with self._lock:
+                    self._scan_count += 1
+                log.info("[live] %s: %d котировок за %.1f c, вилок: %d",
+                         parser.name, len(odds), time.monotonic() - started,
+                         len(arbs))
+            except Exception:  # noqa: BLE001
+                log.exception("[live] %s: ошибка обновления", parser.name)
+            # небольшая пауза, чтобы не долбить сервер БК вплотную
+            slept = 0.0
+            while slept < LIVE_PER_BK_GAP and not self._stop.is_set():
+                time.sleep(0.3)
+                slept += 0.3
 
     def stop(self) -> None:
         self._stop.set()
