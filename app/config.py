@@ -49,7 +49,7 @@ USE_SELENIUM = os.getenv("USE_SELENIUM", "1") not in ("0", "false", "no", "")
 # верхушка линии, ~50-60 событий).
 SCROLL_SECONDS = float(os.getenv("SCROLL_SECONDS", "25"))
 
-# BetBoom показывает развёрнутой только первую лигу вида спорта, остальные
-# лиги — отдельные страницы. Сколько лиг обходить на каждый вид спорта
-# (больше лиг = больше матчей, но заметно дольше цикл).
-BETBOOM_MAX_LEAGUES = int(os.getenv("BETBOOM_MAX_LEAGUES", "8"))
+# BetBoom парсится не через браузер, а через прямой websocket-фид линии
+# (sporthub). Сколько максимум секунд собирать всю прематч-линию за цикл:
+# обычно хватает ~10-15 c на несколько тысяч матчей, ставим запас.
+BETBOOM_FEED_TIMEOUT = float(os.getenv("BETBOOM_FEED_TIMEOUT", "60"))
