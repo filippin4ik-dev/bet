@@ -6,6 +6,10 @@ beautifulsoup4>=4.12
 # снимков DOM, html.parser на слабом VPS не успевает
 lxml>=5.0
 
-# Нужен для динамических сайтов (Winline / BetBoom / Лига Ставок).
+# Нужен для динамических сайтов (Winline / Лига Ставок).
 # Требует установленного Chromium/Chrome в системе (см. README).
 selenium>=4.21
+
+# BetBoom собирается через прямой websocket-фид линии (protobuf вручную),
+# браузер для него больше не нужен — только клиент websocket.
+websocket-client>=1.7

@@ -1,145 +1,177 @@
-"""BetBoom — динамический сайт (React SPA), парсится через Selenium.
+"""BetBoom — прематч-линия через прямой websocket-фид sporthub.
 
-Только ПРЕМАТЧ (раздел «Линия»). Особенность сайта: список событий не
-рисуется, пока не кликнешь по виду спорта в левом меню — данные приходят
-по websocket после клика. Поэтому каждая страница открывается с кликом по
-названию вида спорта, затем лента прокручивается до конца (иначе в DOM
-только верхние ~30 событий).
+Раньше линию собирали через Selenium: браузер открывал каждый вид спорта,
+прокликивал первые несколько лиг и прокручивал ленту. Так набиралось лишь
+около сотни матчей, а цикл был долгим и хрупким. Сайт (Next.js/React) вообще
+не отдаёт линию в HTML — события приходят по бинарному websocket-фиду.
 
-Вёрстка использует обфусцированные классы (bb-xxx), поэтому вместо
-CSS-классов разбираем последовательность текстовых токенов внутри карточки:
-    [Команда1, (рейтинг ATP: 71...), Команда2, (рейтинг...),
-     'Завтра в 09:00', 'П1', k1, 'П2', k2, 'Ещё', '+ N']
-Берём только П1/П2 (исход матча); рынки с ничьей (X с кэфом) пропускаем.
+Теперь мы подключаемся к тому же фиду напрямую (см. bb_feed.py) и забираем
+ВСЮ прематч-линию: несколько тысяч матчей за ~10 секунд, без браузера. Так
+BetBoom собирает столько же прематч-матчей, сколько Fonbet и Winline.
 
-При смене вёрстки правьте разбор ниже; логика поиска вилок не меняется.
+Разбираем два двухисходных рынка ВСЕГО матча:
+- «Исход» (П1/П2) — только если нет ничьей (X): рынки 1X2 пропускаем;
+- «Тотал» (Больше/Меньше) по каждой линии (аргумент ставки).
+Дочерние росписи (сеты/тайму/карты — отдельные названия рынков) не берём:
+их нельзя сопоставлять с рынками всего матча у других БК.
 """
-import re
+import logging
 import time
+from datetime import datetime, timezone
 
-from bs4 import BeautifulSoup
-
-from ..config import BETBOOM_MAX_LEAGUES, SCROLL_SECONDS
+from ..config import BETBOOM_FEED_TIMEOUT
 from ..models import KIND_PREMATCH, MarketOdds
 from .base import BaseParser
-from .html_utils import SOUP_PARSER, format_start, num, parse_start_ts
-from .selenium_helper import SeleniumSession
+from .bb_feed import BBFeedClient, FeedError, _decode, _one, _text
+from .html_utils import format_start
 
-# Двухисходные виды спорта: (slug URL, название в левом меню, вид спорта).
-# Хоккей не обходим: на карточках BetBoom он всегда 1X2 (с ничьей),
-# двухисходных рынков в списке нет — только трата времени цикла.
-SPORTS = [
-    ("tennis", "Теннис", "Теннис"),
-    ("table-tennis", "Настольный теннис", "Настольный теннис"),
-    ("basketball", "Баскетбол", "Баскетбол"),
-    ("volleyball", "Волейбол", "Волейбол"),
-    ("esports", "Кибер", "Киберспорт"),
-]
-URL_TMPL = "https://betboom.ru/sport/line/{slug}"
+log = logging.getLogger("parsers.betboom")
 
-_DEC = re.compile(r"^\d+\.\d{1,3}$")
+# Короткие подписи исходов в фиде (поле short_name ставки)
+_WIN_1, _WIN_2, _WIN_X = "П1", "П2", "X"
+_TOTAL_OVER, _TOTAL_UNDER = "Больше", "Меньше"
 
-# Служебные подписи статуса матча — не команды
-_STATUS_WORDS = (
-    "прерван", "не начал", "перерыв", "заверш", "отмен", "перенес",
-    "пауза", "ещё", "eще", "матч", "сегодня", "завтра",
-)
+# Полное имя рынка ВСЕГО матча (дочерние росписи — другие имена, напр.
+# «Исход (с ОТ)», «Исход матча», «Тотал карт» — их не берём).
+_MARKET_WINNER = "Исход"
+_MARKET_TOTAL = "Тотал"
+
+# Номера полей ModelsMatch.MatchInfo (bb.sport_ws.v1.models)
+_MI_ID = 1
+_MI_TYPE = 3          # 2 = обычный матч
+_MI_START_DTTM = 13   # ISO-строка «2026-07-17T13:00:00.000Z» (UTC)
+_MI_TEAMS = 16
+# ModelsStake
+_ST_SHORT_NAME = 6
+_ST_ARGUMENT = 9      # линия тотала (double)
+_ST_FACTOR = 10       # коэффициент (double)
+_ST_MARKET_NAME = 14
+
+# Обычный матч (не аутрайт/спецставка)
+_MATCH_TYPE_NORMAL = 2
 
 
 class BetBoomParser(BaseParser):
     name = "BetBoom"
 
+    def __init__(self) -> None:
+        super().__init__()
+        self._feed_host: str | None = None
+
     def fetch_odds(self) -> list[MarketOdds]:
         by_key: dict[str, MarketOdds] = {}
-        with SeleniumSession() as s:
-            if s.driver is None:
-                return []
-            for slug, menu_text, sport in SPORTS:
-                self._delay()
-                snaps = s.render_league_pages(
-                    URL_TMPL.format(slug=slug), click_text=menu_text,
-                    wait_seconds=12, scroll_seconds=SCROLL_SECONDS,
-                    max_leagues=BETBOOM_MAX_LEAGUES)
-                for html in snaps:
-                    for o in self._parse_html(html, sport):
-                        by_key[o.match_key] = o  # дубли между снимками
+        now = time.time()
+        client = BBFeedClient(host=self._feed_host,
+                              overall_timeout=BETBOOM_FEED_TIMEOUT)
+        try:
+            for sport_name, match in client.crawl():
+                for o in self._parse_match(sport_name, match, now):
+                    by_key[o.match_key] = o
+        except FeedError as exc:
+            log.warning("BetBoom feed недоступен: %s", exc)
+            return []
+        except ImportError:
+            log.warning("BetBoom: не установлен websocket-client "
+                        "(pip install websocket-client) — 0 котировок")
+            return []
+        finally:
+            self._feed_host = client.host
+            client.close()
         return list(by_key.values())
 
-    def _parse_html(self, html: str, sport: str) -> list[MarketOdds]:
-        soup = BeautifulSoup(html, SOUP_PARSER)
-        result: list[MarketOdds] = []
-        now = time.time()
+    # ---- разбор одного матча ----
 
-        # Карточки событий: узлы, содержащие ровно одну связку П1..П2
-        for card in soup.select("div"):
-            toks = [t.strip() for t in card.stripped_strings]
-            if toks.count("П1") != 1 or toks.count("П2") != 1:
-                continue
+    def _parse_match(self, sport: str, match: dict,
+                     now: float) -> list[MarketOdds]:
+        if 1 not in match:
+            return []
+        info = _decode(match[_MI_ID][0])
+        if _one(info, _MI_TYPE) != _MATCH_TYPE_NORMAL:
+            return []  # аутрайты и спецставки — не двухисходные матчи
 
-            parsed = self._parse_card(toks, sport, now)
-            if parsed:
-                result.append(parsed)
-        # Одно и то же событие ловится на нескольких уровнях DOM — дубли
-        # уберёт fetch_odds по match_key.
-        return result
+        team1, team2 = self._teams(info)
+        if not team1 or not team2 or team1 == team2:
+            return []
 
-    def _parse_card(self, toks: list[str], sport: str,
-                    now: float) -> MarketOdds | None:
-        i1 = toks.index("П1")
-        # k1 идёт сразу после 'П1'
-        k1 = num(toks[i1 + 1]) if i1 + 1 < len(toks) else None
-        # k2 идёт сразу после 'П2'
-        i2 = toks.index("П2")
-        k2 = num(toks[i2 + 1]) if i2 + 1 < len(toks) else None
-        if not k1 or not k2:
-            return None
-
-        # Если между П1 и П2 есть ничья 'X' с реальным кэфом — это рынок
-        # 1X2 (три исхода, напр. футбол), он НЕ двухисходный. Пропускаем.
-        if "X" in toks[i1:i2]:
-            xi = toks.index("X", i1, i2)
-            if xi + 1 < len(toks) and num(toks[xi + 1]):
-                return None
-
-        # Время начала: распознаём по всему тексту карточки до 'П1'
-        # («Завтра в 09:00», «19.07 в 13:10»; токены могут быть разбиты
-        # на несколько DOM-узлов, поэтому парсим склеенную строку).
-        # Прематч-карточка ВСЕГДА показывает время — карточки без него
-        # (live, служебные блоки) пропускаем.
-        start_ts = parse_start_ts(" ".join(toks[:i1]), now)
+        start_ts = self._start_ts(info)
         if start_ts is None or start_ts <= now:
-            return None
+            return []  # только прематч
         start_time = format_start(start_ts)
 
-        # Команды — непустые нечисловые токены до 'П1', без рейтингов
-        # (содержат ':'), счёта (одиночные числа) и служебных слов.
-        names = []
-        for t in toks[:i1]:
-            if _DEC.match(t):
+        base = dict(bookmaker=self.name, sport=sport or "Спорт",
+                    team1=team1, team2=team2, kind=KIND_PREMATCH,
+                    start_time=start_time, start_ts=start_ts)
+
+        # Группируем ставки нужных рынков всего матча
+        winner: dict[str, float] = {}
+        totals: dict[float, dict[str, float]] = {}
+        for stake_raw in match.get(2, []):
+            st = _decode(stake_raw)
+            market = _text(st, _ST_MARKET_NAME)
+            short = _text(st, _ST_SHORT_NAME)
+            factor = _one(st, _ST_FACTOR)
+            if not factor or factor <= 1:
                 continue
-            if re.fullmatch(r"\d+", t):
-                continue  # счёт / номер
-            if any(m in t for m in ("мин", ":", "Т,", "тайм", "сет", "гейм")):
+            if market == _MARKET_WINNER and short in (_WIN_1, _WIN_2, _WIN_X):
+                winner[short] = float(factor)
+            elif market == _MARKET_TOTAL and short in (_TOTAL_OVER,
+                                                       _TOTAL_UNDER):
+                line = _one(st, _ST_ARGUMENT)
+                if line is None:
+                    continue
+                totals.setdefault(float(line), {})[short] = float(factor)
+
+        result: list[MarketOdds] = []
+
+        # Победитель: только двухисходный (без ничьей X)
+        if _WIN_X not in winner and _WIN_1 in winner and _WIN_2 in winner:
+            result.append(MarketOdds(
+                market="Победитель", market_key="winner",
+                outcome1="П1", outcome2="П2",
+                k1=winner[_WIN_1], k2=winner[_WIN_2], **base))
+
+        # Тоталы: по каждой линии, где есть и Больше, и Меньше
+        for line, sides in totals.items():
+            over, under = sides.get(_TOTAL_OVER), sides.get(_TOTAL_UNDER)
+            if not over or not under:
                 continue
-            if t in ("Ещё", "X") or len(t) < 2:
-                continue  # служебные метки и одиночные символы — не имена
-            if any(w in t.lower() for w in _STATUS_WORDS):
-                continue  # статус матча, не команда
-            names.append(t)
-        # В карточке матча остаётся ровно пара команд. Если «имён» много —
-        # это контейнер целой страницы (в токены попало меню сайта), а не
-        # карточка. Пропускаем, иначе получатся команды вида «Линия».
-        if len(names) != 2:
+            pt = self._fmt_line(line)
+            result.append(MarketOdds(
+                market=f"Тотал {pt}", market_key=f"total:{pt}",
+                outcome1=f"ТБ {pt}", outcome2=f"ТМ {pt}",
+                k1=over, k2=under, **base))
+
+        return result
+
+    # ---- вспомогательное ----
+
+    @staticmethod
+    def _teams(info: dict) -> tuple[str, str]:
+        if _MI_TEAMS not in info:
+            return "", ""
+        teams = _decode(info[_MI_TEAMS][0])
+        home = _decode(teams[1][0]) if 1 in teams else {}
+        away = _decode(teams[3][0]) if 3 in teams else {}
+        return _text(home, 3), _text(away, 3)  # поле 3 = name
+
+    @staticmethod
+    def _start_ts(info: dict) -> float | None:
+        iso = _text(info, _MI_START_DTTM)
+        if not iso:
             return None
-        team1, team2 = names[0], names[1]
-        if team1 == team2:
+        try:
+            # «2026-07-17T13:00:00.000Z» — время в UTC
+            dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.timestamp()
+        except ValueError:
             return None
 
-        return MarketOdds(
-            bookmaker=self.name, sport=sport,
-            team1=team1, team2=team2,
-            market="Победитель", market_key="winner",
-            outcome1="П1", outcome2="П2",
-            k1=k1, k2=k2, kind=KIND_PREMATCH,
-            start_time=start_time, start_ts=start_ts,
-        )
+    @staticmethod
+    def _fmt_line(line: float) -> str:
+        # «2.5» / «2» — без хвостовых нулей, чтобы совпадать с ключами
+        # тоталов других БК (Fonbet/Winline)
+        if line == int(line):
+            return str(int(line))
+        return ("%f" % line).rstrip("0").rstrip(".")
