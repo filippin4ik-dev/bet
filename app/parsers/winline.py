@@ -17,6 +17,7 @@
 
 При смене вёрстки правьте селекторы ниже; логика поиска вилок не меняется.
 """
+import logging
 import re
 import time
 
@@ -28,6 +29,8 @@ from .base import BaseParser
 from .html_utils import (SOUP_PARSER, fmt_hcap, fmt_total, market_scope, num,
                          parse_start_ts)
 from .selenium_helper import SeleniumSession
+
+log = logging.getLogger("parsers.winline")
 
 # Страницы двухисходных видов спорта (прематч-линия)
 PAGES = [
@@ -49,13 +52,37 @@ class WinlineParser(BaseParser):
             if s.driver is None:
                 return []
             for url, sport in PAGES:
-                self._delay()
-                snaps = s.render_snapshots(url, wait_seconds=20,
-                                           scroll_seconds=SCROLL_SECONDS)
-                for html in snaps:
-                    for o in self._parse_html(html, sport):
-                        by_key[o.match_key] = o  # дубли между снимками
+                page_odds = self._fetch_page(s, url, sport)
+                for o in page_odds:
+                    by_key[o.match_key] = o  # дубли между снимками
         return list(by_key.values())
+
+    def _fetch_page(self, s: SeleniumSession, url: str,
+                    sport: str) -> list[MarketOdds]:
+        """Рендерит страницу вида спорта; при пустом результате повторяет.
+
+        Angular-SPA Winline подтягивает события своим websocket'ом уже после
+        загрузки страницы. Иногда снимки DOM снимаются до того, как лента
+        наполнилась, и вид спорта приходит пустым (гонка рендеринга). Если
+        матчей не нашли вовсе — даём странице больше времени и пробуем ещё
+        раз, прежде чем сдаться."""
+        for attempt in range(2):
+            self._delay()
+            # на повторе ждём и прокручиваем дольше — лента точно наполнится
+            wait = 20 if attempt == 0 else 30
+            scroll = SCROLL_SECONDS if attempt == 0 else SCROLL_SECONDS + 15
+            snaps = s.render_snapshots(url, wait_seconds=wait,
+                                       scroll_seconds=scroll)
+            odds: dict[str, MarketOdds] = {}
+            for html in snaps:
+                for o in self._parse_html(html, sport):
+                    odds[o.match_key] = o
+            if odds:
+                return list(odds.values())
+            log.info("Winline: %s — 0 матчей (попытка %d/2)%s",
+                     url, attempt + 1,
+                     ", повтор" if attempt == 0 else ", пропускаю")
+        return []
 
     def _parse_html(self, html: str, sport: str) -> list[MarketOdds]:
         soup = BeautifulSoup(html, SOUP_PARSER)
