@@ -361,11 +361,22 @@ class SeleniumSession:
 
         # Очередь дочерних пунктов меню: лиги открываются (URL меняется),
         # группы разворачиваются (URL прежний, но появляются новые пункты).
+        # Пункт заканчивается числом событий («Setka Cup359») — идём от
+        # крупных лиг к мелким, чтобы за лимит страниц собрать максимум
+        # матчей. Страницы лиг короткие, длинная прокрутка им не нужна.
+        import re as _re
+
+        def _count(t: str) -> int:
+            m = _re.search(r"(\d+)$", t)
+            return int(m.group(1)) if m else 0
+
+        league_scroll = min(scroll_seconds, 12.0)
         queue = [t for t in self._sidebar_items(driver) if t not in before]
         seen_items = set(queue) | before
         visited_urls = {driver.current_url}
         pages = 0
         while queue and pages < max_leagues:
+            queue.sort(key=_count, reverse=True)
             name = queue.pop(0)
             try:
                 prev_url = driver.current_url
@@ -381,7 +392,7 @@ class SeleniumSession:
                     if html:
                         snaps.append(html)
                     snaps.extend(
-                        self._scroll_snapshots(driver, scroll_seconds))
+                        self._scroll_snapshots(driver, league_scroll))
                 # в любом случае подбираем новые пункты (развернулась
                 # группа или подсписок остался открытым)
                 for t in self._sidebar_items(driver):
