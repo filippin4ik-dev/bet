@@ -175,6 +175,10 @@ class FonbetParser(BaseParser):
 
             sport = sport_name(root.get("sportId"))
             market_name = event.get("name") if event is not root else None
+            if event is not root and not market_name:
+                # Дочерняя роспись без названия: непонятно, к чему относятся
+                # кэфы. Смешивать их с рынками ВСЕГО матча нельзя — пропуск.
+                continue
             if market_name:
                 sport = f"{sport} · {market_name}"
             # Дочерняя роспись (сет/период/карта) — отдельные рынки: их

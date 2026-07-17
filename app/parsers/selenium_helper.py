@@ -258,38 +258,57 @@ class SeleniumSession:
         return true;
     """
 
-    # Заголовки лиг в ленте: H3 внутри ссылки (в отличие от меню видов
-    # спорта, где H3 живёт в кнопке). Клик открывает страницу лиги.
-    _LEAGUE_HEADS_JS = """
-        const heads = [];
-        for (const h of document.querySelectorAll('h3')) {
-            const a = h.parentElement;
-            if (a && a.tagName === 'A') heads.push(h.textContent.trim());
+    # Пункты левого меню BetBoom: текст «Имя лиги/группы<счётчик событий>»
+    # (например «Setka Cup359»). Берём самый глубокий элемент с таким
+    # текстом — по нему и кликаем.
+    _SIDEBAR_ITEMS_JS = """
+        const out = [], seen = new Set();
+        for (const el of document.querySelectorAll('a, button, [role=button], div, li')) {
+            if (el.offsetParent === null) continue;
+            const r = el.getBoundingClientRect();
+            if (r.left > 420 || r.width === 0) continue;   // только левое меню
+            const t = el.textContent.trim();
+            if (!t || t.length > 80 || !/\\d$/.test(t)) continue;
+            if (seen.has(t)) continue;
+            let deepest = true;
+            for (const c of el.querySelectorAll('*'))
+                if (c.textContent.trim() === t) { deepest = false; break; }
+            if (!deepest) continue;
+            seen.add(t);
+            out.push(t);
         }
-        return heads;
+        return out;
     """
-    _CLICK_LEAGUE_JS = """
-        const idx = arguments[0];
-        let i = 0;
-        for (const h of document.querySelectorAll('h3')) {
-            const a = h.parentElement;
-            if (!a || a.tagName !== 'A') continue;
-            if (i === idx) { a.click(); return h.textContent.trim(); }
-            i++;
+    _CLICK_SIDEBAR_JS = """
+        const want = arguments[0];
+        let best = null;
+        for (const el of document.querySelectorAll('a, button, [role=button], div, li')) {
+            if (el.offsetParent === null) continue;
+            const r = el.getBoundingClientRect();
+            if (r.left > 420 || r.width === 0) continue;
+            if (el.textContent.trim() !== want) continue;
+            if (!best || best.contains(el)) best = el;   // самый глубокий
         }
-        return null;
+        if (!best) return false;
+        best.scrollIntoView({block: 'center'});
+        best.click();
+        return true;
     """
 
     def render_league_pages(self, url: str, click_text: str,
                             wait_seconds: float = 12.0,
                             scroll_seconds: float = 10.0,
                             max_leagues: int = 20) -> list[str]:
-        """BetBoom: обходит лиги одного вида спорта внутри SPA.
+        """BetBoom: обходит все лиги одного вида спорта внутри SPA.
 
-        Прямые URL лиг сайт редиректит в live-раздел, поэтому единственный
-        путь к прематч-линии каждой лиги — клики внутри приложения:
-        страница вида спорта -> клик по лиге -> назад -> следующая лига.
-        Возвращает снимки DOM со всех посещённых страниц.
+        Линия не рисуется, пока вид спорта не выбран в левом меню. После
+        клика в меню появляются его дочерние пункты: закреплённые лиги
+        и группы (страны/туры). Клик по лиге открывает её страницу (лента
+        показывает только ближайшие матчи первой лиги), клик по группе
+        разворачивает подсписок — обходим и то и другое, до max_leagues
+        страниц. Сайдбар остаётся на страницах лиг, поэтому переходим
+        между лигами без возврата назад. Возвращает снимки DOM со всех
+        посещённых страниц.
         """
         global _render_count
         with _render_lock:
@@ -308,41 +327,74 @@ class SeleniumSession:
                 driver, url, click_text, wait_seconds, scroll_seconds,
                 max_leagues)
 
+    def _sidebar_items(self, driver) -> list[str]:
+        try:
+            return driver.execute_script(self._SIDEBAR_ITEMS_JS) or []
+        except Exception:  # noqa: BLE001
+            return []
+
     def _render_leagues_locked(self, driver, url: str, click_text: str,
                                wait_seconds: float, scroll_seconds: float,
                                max_leagues: int) -> list[str]:
         import time
         t0 = time.monotonic()
-        # Страница вида спорта (первая лига уже развёрнута)
-        snaps = self._render_locked(driver, url, wait_seconds,
-                                    scroll_seconds, click_text)
+        # Страница вида спорта — пока БЕЗ клика по меню: сначала запоминаем
+        # пункты сайдбара, чтобы после клика вычислить ДОБАВИВШИЕСЯ (это
+        # и есть лиги/группы выбранного вида спорта).
+        snaps = self._render_locked(driver, url, wait_seconds, 0.0, None)
         if not snaps:
             return []
+        before = set(self._sidebar_items(driver))
         try:
-            leagues = driver.execute_script(self._LEAGUE_HEADS_JS) or []
+            clicked = driver.execute_script(self._CLICK_TEXT_JS, click_text)
         except Exception:  # noqa: BLE001
-            leagues = []
-        # Первая лига уже развёрнута на странице вида спорта — её страницу
-        # не открываем, идём по остальным.
-        for idx in range(1, min(len(leagues), max_leagues)):
+            clicked = False
+        if not clicked:
+            log.info("Selenium: %s — вид спорта «%s» в меню не найден",
+                     url, click_text)
+            return snaps
+        self._wait_cards(driver, wait_seconds)
+        html = self._dom(driver)
+        if html:
+            snaps.append(html)
+        snaps.extend(self._scroll_snapshots(driver, scroll_seconds))
+
+        # Очередь дочерних пунктов меню: лиги открываются (URL меняется),
+        # группы разворачиваются (URL прежний, но появляются новые пункты).
+        queue = [t for t in self._sidebar_items(driver) if t not in before]
+        seen_items = set(queue) | before
+        visited_urls = {driver.current_url}
+        pages = 0
+        while queue and pages < max_leagues:
+            name = queue.pop(0)
             try:
-                name = driver.execute_script(self._CLICK_LEAGUE_JS, idx)
-                if not name:
-                    break
-                self._wait_dom_stable(driver, wait_seconds)
-                html = self._dom(driver)
-                if html:
-                    snaps.append(html)
-                snaps.extend(self._scroll_snapshots(driver, scroll_seconds))
-                driver.back()
-                self._wait_dom_stable(driver, wait_seconds)
+                prev_url = driver.current_url
+                if not driver.execute_script(self._CLICK_SIDEBAR_JS, name):
+                    continue
+                self._wait_cards(driver, wait_seconds)
+                cur = driver.current_url
+                if cur != prev_url and cur not in visited_urls:
+                    # открылась страница лиги — снимаем её
+                    visited_urls.add(cur)
+                    pages += 1
+                    html = self._dom(driver)
+                    if html:
+                        snaps.append(html)
+                    snaps.extend(
+                        self._scroll_snapshots(driver, scroll_seconds))
+                # в любом случае подбираем новые пункты (развернулась
+                # группа или подсписок остался открытым)
+                for t in self._sidebar_items(driver):
+                    if t not in seen_items:
+                        seen_items.add(t)
+                        queue.append(t)
             except Exception as exc:  # noqa: BLE001
-                log.warning("Selenium: лига %d на %s не открылась: %s",
-                            idx, url, exc)
+                log.warning("Selenium: пункт «%s» на %s не открылся: %s",
+                            name, url, exc)
                 break
-        log.info("Selenium: %s обойдено лиг: %d за %.0f c (%d снимков)",
-                 url, min(len(leagues), max_leagues), time.monotonic() - t0,
-                 len(snaps))
+        log.info("Selenium: %s обойдено страниц лиг: %d за %.0f c "
+                 "(%d снимков)",
+                 url, pages, time.monotonic() - t0, len(snaps))
         return snaps
 
     def _dom(self, driver) -> str | None:
@@ -411,6 +463,36 @@ class SeleniumSession:
                 stuck = 0
             last_y = y
         return snaps
+
+    # Число карточек событий на странице (кнопок «П1») — дешёвый признак
+    # готовности страницы лиги.
+    _CARD_COUNT_JS = """
+        let n = 0;
+        for (const el of document.querySelectorAll('*'))
+            if (el.childElementCount === 0 && el.textContent.trim() === 'П1')
+                n++;
+        return n;
+    """
+
+    def _wait_cards(self, driver, wait_seconds: float) -> None:
+        """Быстрое ожидание страницы лиги: карточки появились и их число
+        перестало меняться. Вдвое быстрее _wait_dom_stable на готовых
+        страницах — важно, когда лиг десятки."""
+        import time
+        deadline = time.monotonic() + max(wait_seconds, 4.0)
+        prev, stable = -1, 0
+        while time.monotonic() < deadline:
+            time.sleep(1.0)
+            try:
+                n = int(driver.execute_script(self._CARD_COUNT_JS))
+            except Exception:  # noqa: BLE001
+                continue
+            if n == prev and n > 0:
+                stable += 1
+                if stable >= 2:
+                    return
+            else:
+                stable, prev = 0, n
 
     def _wait_dom_stable(self, driver, wait_seconds: float) -> None:
         """Ждёт, пока число DOM-узлов перестанет расти (~4 c без изменений)."""
