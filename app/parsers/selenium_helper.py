@@ -108,8 +108,8 @@ def _make_driver():
     except ImportError:
         if not _warned:
             log.warning(
-                "Selenium не установлен — Winline/BetBoom/Лига Ставок "
-                "(динамические сайты) отдадут 0 котировок. Установите его: "
+                "Selenium не установлен — Лига Ставок (динамический сайт) "
+                "отдаст 0 котировок. Установите его: "
                 "pip install selenium и поставьте Chromium (см. README).")
             _warned = True
         return None

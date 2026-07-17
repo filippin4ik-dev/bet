@@ -32,11 +32,12 @@ def main() -> None:
     except Exception as exc:  # noqa: BLE001
         print(f"Не удалось определить внешний IP: {exc}")
 
-    # 2. Доступность Selenium (нужен для Winline / BetBoom / Лиги Ставок)
+    # 2. Доступность Selenium (нужен только для Лиги Ставок; Winline и
+    # BetBoom работают через прямые websocket-фиды без браузера)
     print("-" * 64)
     html = get_html_via_selenium("https://example.com", wait_seconds=2)
-    print("Selenium:", "работает" if html else "недоступен (динамические БК "
-          "вернут 0 — установите selenium + Chromium)")
+    print("Selenium:", "работает" if html else "недоступен (Лига Ставок "
+          "вернёт 0 — установите selenium + Chromium)")
 
     # 3. Что реально возвращает каждый парсер
     print("-" * 64)
