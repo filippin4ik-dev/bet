@@ -9,11 +9,14 @@
 ВСЮ прематч-линию: несколько тысяч матчей за ~10 секунд, без браузера. Так
 BetBoom собирает столько же прематч-матчей, сколько Fonbet и Winline.
 
-Разбираем два двухисходных рынка ВСЕГО матча:
+Разбираем ВСЕ двухисходные рынки события:
 - «Исход» (П1/П2) — только если нет ничьей (X): рынки 1X2 пропускаем;
-- «Тотал» (Больше/Меньше) по каждой линии (аргумент ставки).
-Дочерние росписи (сеты/тайму/карты — отдельные названия рынков) не берём:
-их нельзя сопоставлять с рынками всего матча у других БК.
+- любой «Тотал…» (Больше/Меньше) по каждой линии — голов, карт, углов,
+  сетов, геймов и т.п.; предмет тотала берём из имени рынка;
+- любая «Фора…» (двухисходная, привязана к команде и знаку линии).
+Индивидуальные тоталы/форы пропускаем (это не двухисходный рынок всего
+матча в привычном виде). Предмет/период рынка нормализуется общим
+`market_scope`, чтобы совпадать с тем же рынком у других БК.
 """
 import logging
 import time
@@ -23,7 +26,7 @@ from ..config import BETBOOM_FEED_TIMEOUT
 from ..models import KIND_PREMATCH, MarketOdds
 from .base import BaseParser
 from .bb_feed import BBFeedClient, FeedError, _decode, _one, _text
-from .html_utils import format_start
+from .html_utils import fmt_hcap, fmt_total, format_start, market_scope
 
 log = logging.getLogger("parsers.betboom")
 
@@ -31,10 +34,8 @@ log = logging.getLogger("parsers.betboom")
 _WIN_1, _WIN_2, _WIN_X = "П1", "П2", "X"
 _TOTAL_OVER, _TOTAL_UNDER = "Больше", "Меньше"
 
-# Полное имя рынка ВСЕГО матча (дочерние росписи — другие имена, напр.
-# «Исход (с ОТ)», «Исход матча», «Тотал карт» — их не берём).
+# Имена рынков ВСЕГО матча (по префиксу): «Исход», «Тотал…», «Фора…».
 _MARKET_WINNER = "Исход"
-_MARKET_TOTAL = "Тотал"
 
 # Номера полей ModelsMatch.MatchInfo (bb.sport_ws.v1.models)
 _MI_ID = 1
@@ -102,9 +103,15 @@ class BetBoomParser(BaseParser):
                     team1=team1, team2=team2, kind=KIND_PREMATCH,
                     start_time=start_time, start_ts=start_ts)
 
-        # Группируем ставки нужных рынков всего матча
+        # Группируем ставки по рынкам:
+        #   winner        — {short: factor}
+        #   totals[scope][line] = {Больше/Меньше: factor}
+        #   hcaps[scope][line] = {team_side: factor}   (team_side: 1/2)
         winner: dict[str, float] = {}
-        totals: dict[float, dict[str, float]] = {}
+        totals: dict[str, dict[float, dict[str, float]]] = {}
+        hcaps: dict[str, dict[float, dict[int, float]]] = {}
+        n1, n2 = team1.strip().lower(), team2.strip().lower()
+
         for stake_raw in match.get(2, []):
             st = _decode(stake_raw)
             market = _text(st, _ST_MARKET_NAME)
@@ -112,14 +119,28 @@ class BetBoomParser(BaseParser):
             factor = _one(st, _ST_FACTOR)
             if not factor or factor <= 1:
                 continue
+            factor = float(factor)
+            low = market.lower()
+
             if market == _MARKET_WINNER and short in (_WIN_1, _WIN_2, _WIN_X):
-                winner[short] = float(factor)
-            elif market == _MARKET_TOTAL and short in (_TOTAL_OVER,
-                                                       _TOTAL_UNDER):
+                winner[short] = factor
+            elif low.startswith("тотал") and "индивид" not in low \
+                    and short in (_TOTAL_OVER, _TOTAL_UNDER):
                 line = _one(st, _ST_ARGUMENT)
                 if line is None:
                     continue
-                totals.setdefault(float(line), {})[short] = float(factor)
+                scope = market_scope(market)
+                totals.setdefault(scope, {}).setdefault(
+                    float(line), {})[short] = factor
+            elif low.startswith("фора") and "индивид" not in low:
+                line = _one(st, _ST_ARGUMENT)
+                if line is None:
+                    continue
+                side = self._team_side(short, n1, n2)
+                if side:
+                    scope = market_scope(market)
+                    hcaps.setdefault(scope, {}).setdefault(
+                        float(line), {})[side] = factor
 
         result: list[MarketOdds] = []
 
@@ -131,17 +152,55 @@ class BetBoomParser(BaseParser):
                 k1=winner[_WIN_1], k2=winner[_WIN_2], **base))
 
         # Тоталы: по каждой линии, где есть и Больше, и Меньше
-        for line, sides in totals.items():
-            over, under = sides.get(_TOTAL_OVER), sides.get(_TOTAL_UNDER)
-            if not over or not under:
-                continue
-            pt = self._fmt_line(line)
-            result.append(MarketOdds(
-                market=f"Тотал {pt}", market_key=f"total:{pt}",
-                outcome1=f"ТБ {pt}", outcome2=f"ТМ {pt}",
-                k1=over, k2=under, **base))
+        for scope, lines in totals.items():
+            for line, sides in lines.items():
+                over, under = sides.get(_TOTAL_OVER), sides.get(_TOTAL_UNDER)
+                if not over or not under:
+                    continue
+                pt = fmt_total(line)
+                pref = f"{scope} " if scope else ""
+                key = f"total:{scope}:{pt}" if scope else f"total:{pt}"
+                result.append(MarketOdds(
+                    market=f"Тотал {pref}{pt}", market_key=key,
+                    outcome1=f"ТБ {pt}", outcome2=f"ТМ {pt}",
+                    k1=over, k2=under, **base))
+
+        # Форы: пара «team1(+L)/team2(-L)» = один двухисходный рынок
+        for scope, lines in hcaps.items():
+            for line, sides in lines.items():
+                if 1 not in sides:
+                    continue
+                # линия team2 должна быть противоположной (-line)
+                opp = lines.get(-line)
+                if not opp or 2 not in opp:
+                    continue
+                h1 = fmt_hcap(line)
+                h2 = fmt_hcap(-line)
+                key = f"hcap:{scope}:{h1}"
+                pref = f"{scope} " if scope else ""
+                result.append(MarketOdds(
+                    market=f"Фора {pref}{h1}", market_key=key,
+                    outcome1=f"Ф1 {h1}", outcome2=f"Ф2 {h2}",
+                    k1=sides[1], k2=opp[2], **base))
 
         return result
+
+    @staticmethod
+    def _team_side(short: str, n1: str, n2: str) -> int | None:
+        """Определяет, чья это фора: 1 (team1), 2 (team2) или None."""
+        s = short.strip().lower()
+        if not s:
+            return None
+        if s == n1:
+            return 1
+        if s == n2:
+            return 2
+        # имя в ставке бывает усечено — сверяем по вхождению
+        if s and (s in n1 or n1 in s) and not (s in n2 or n2 in s):
+            return 1
+        if s and (s in n2 or n2 in s) and not (s in n1 or n1 in s):
+            return 2
+        return None
 
     # ---- вспомогательное ----
 
@@ -167,11 +226,3 @@ class BetBoomParser(BaseParser):
             return dt.timestamp()
         except ValueError:
             return None
-
-    @staticmethod
-    def _fmt_line(line: float) -> str:
-        # «2.5» / «2» — без хвостовых нулей, чтобы совпадать с ключами
-        # тоталов других БК (Fonbet/Winline)
-        if line == int(line):
-            return str(int(line))
-        return ("%f" % line).rstrip("0").rstrip(".")

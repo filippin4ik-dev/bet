@@ -51,12 +51,28 @@ class _Outcome:
         self.bookmaker = bookmaker
 
 
+def _neg_hcap(line: str) -> str:
+    """Противоположная фора: «-1.5» → «+1.5», «+1» → «-1», «0» → «0»."""
+    line = line.strip()
+    if line in ("0", "+0", "-0", ""):
+        return "0"
+    if line.startswith("-"):
+        return "+" + line[1:]
+    if line.startswith("+"):
+        return "-" + line[1:]
+    return "-" + line
+
+
 def _explode(o: MarketOdds):
     """Разбивает котировку на два канонических исхода (id, метка, кэф).
 
     id — устойчивый между БК идентификатор исхода:
     - победитель: нормализованное имя команды;
-    - тотал: 'over:<pt>' / 'under:<pt>'.
+    - тотал: 'over:<pt>' / 'under:<pt>';
+    - фора: 'hcap:<команда>:<знаковая линия>' — исход привязан к КОМАНДЕ и
+      её линии. Фора team1(-1.5) сшивается с team2(+1.5) другой БК как две
+      стороны одного рынка, а team1(+1.5) — уже другой рынок (другой
+      фаворит), ложных вилок не будет.
     """
     if o.market_key.startswith("total"):
         pt = o.market_key.split(":", 1)[1] if ":" in o.market_key else ""
@@ -64,11 +80,34 @@ def _explode(o: MarketOdds):
             (f"over:{pt}", o.outcome1, o.k1),
             (f"under:{pt}", o.outcome2, o.k2),
         ]
+    if o.market_key.startswith("hcap"):
+        # hcap:<scope>:<линия team1>
+        h1 = o.market_key.rsplit(":", 1)[1]
+        return [
+            (f"hcap:{norm_team(o.team1)}:{h1}", o.outcome1, o.k1),
+            (f"hcap:{norm_team(o.team2)}:{_neg_hcap(h1)}", o.outcome2, o.k2),
+        ]
     # победитель (в т.ч. дочерние росписи вроде winner:2сет)
     return [
         (f"team:{norm_team(o.team1)}", o.outcome1, o.k1),
         (f"team:{norm_team(o.team2)}", o.outcome2, o.k2),
     ]
+
+
+def _market_group(o: MarketOdds) -> str:
+    """Ключ рынка, ОДИНАКОВЫЙ у обеих БК независимо от порядка команд.
+
+    Для победителя/тотала подходит сам market_key. Для форы линия зависит
+    от того, какая команда «первая», поэтому привязываем знак к
+    алфавитно-первой нормализованной команде — тогда обе стороны рынка
+    (и при перевёрнутом порядке команд у другой БК) попадают в одну группу.
+    """
+    if not o.market_key.startswith("hcap"):
+        return o.market_key
+    prefix, h1 = o.market_key.rsplit(":", 1)  # prefix = hcap:<scope>
+    a, b = norm_team(o.team1), norm_team(o.team2)
+    anchor = h1 if a <= b else _neg_hcap(h1)
+    return f"{prefix}:{anchor}"
 
 
 def find_arbs(odds: Iterable[MarketOdds]) -> list[Arb]:
@@ -84,11 +123,9 @@ def find_arbs(odds: Iterable[MarketOdds]) -> list[Arb]:
         teams = frozenset((norm_team(o.team1), norm_team(o.team2)))
         if len(teams) < 2:
             continue
-        # вид рынка: winner / winner:<роспись> / total:<pt>
-        if o.market_key.startswith("total"):
-            market_group = o.market_key  # включает линию pt
-        else:
-            market_group = o.market_key  # winner или winner:<label>
+        # вид рынка: winner / winner:<роспись> / total:<pt> / hcap:<линия>.
+        # Для форы группа привязана к алфавитно-первой команде (см. _market_group)
+        market_group = _market_group(o)
         key = (o.kind, teams, market_group)
         g = groups[key]
         g["sample"] = g["sample"] or o
@@ -115,8 +152,11 @@ def find_arbs(odds: Iterable[MarketOdds]) -> list[Arb]:
         profit_pct = (1 / margin - 1) * 100
         # порядок исходов: для победителя выравниваем к team1/team2 образца
         first, second = _order(s, o1, o2)
-        if s.market_key.startswith("total"):
-            label1, label2 = first.label, second.label   # ТБ pt / ТМ pt
+        if s.market_key.startswith(("total", "hcap")):
+            # метки берём у образца (он ориентирован team1→team2), а не у
+            # БК с лучшим кэфом — иначе фора team2 подписалась бы как «Ф1»,
+            # если у той БК эта команда идёт первой
+            label1, label2 = s.outcome1, s.outcome2
         else:
             label1, label2 = "П1", "П2"
         arbs.append(Arb(
@@ -140,6 +180,9 @@ def _order(sample: MarketOdds, o1: _Outcome, o2: _Outcome):
     чтобы столбцы в таблице совпадали с отображаемым матчем."""
     if sample.market_key.startswith("total"):
         first = o1 if o1.oid.startswith("over:") else o2
+    elif sample.market_key.startswith("hcap"):
+        want = f"hcap:{norm_team(sample.team1)}:"
+        first = o1 if o1.oid.startswith(want) else o2
     else:
         want = f"team:{norm_team(sample.team1)}"
         first = o1 if o1.oid == want else o2

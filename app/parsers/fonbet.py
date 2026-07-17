@@ -17,7 +17,7 @@ from datetime import datetime, timedelta, timezone
 from ..config import BK_TZ_OFFSET, FONBET_LINE_HOST
 from ..models import KIND_PREMATCH, MarketOdds
 from .base import BaseParser
-from .html_utils import scope_key
+from .html_utils import fmt_hcap, fmt_total, market_scope
 
 log = logging.getLogger("parsers.fonbet")
 
@@ -41,6 +41,11 @@ PROBE_BACKOFF = 300
 
 F_P1, F_DRAW, F_P2 = 921, 922, 923
 F_TOTAL_OVER, F_TOTAL_UNDER = 930, 931
+# Пары форы (Ф1, Ф2): каждая пара — отдельная линия форы. pt у Ф1 — линия
+# team1, у Ф2 — линия team2 (противоположная). Это хорошо известные id
+# основной азиатской форы (910/912), форы «ноль» (927/928) и форы ±1
+# (989/991); экзотические id не трогаем, чтобы не поймать ложную вилку.
+F_HANDICAPS = [(910, 912), (927, 928), (989, 991)]
 
 
 def _candidate_urls() -> list[str]:
@@ -177,9 +182,10 @@ class FonbetParser(BaseParser):
             market_name = event.get("name") if event is not root else None
             if market_name:
                 sport = f"{sport} · {market_name}"
-            # Дочерняя роспись (сет/период/карта) — отдельные рынки: их
-            # нельзя сопоставлять с рынками ВСЕГО матча у других БК
-            scope = scope_key(market_name)
+            # Дочерняя роспись (сет/период/угловые/карты) — отдельный рынок:
+            # приводим предмет/период к канону, чтобы совпадал с тем же
+            # рынком других БК и НЕ смешивался с рынком всего матча.
+            scope = market_scope(market_name)
 
             start_ts = root.get("startTime")
             start_time = None
@@ -197,6 +203,7 @@ class FonbetParser(BaseParser):
             factors = ef.get("factors", [])
             result.extend(self._winner(factors, base, scope))
             result.extend(self._totals(factors, base, scope))
+            result.extend(self._handicaps(factors, base, scope))
 
         return result
 
@@ -219,13 +226,14 @@ class FonbetParser(BaseParser):
                 scope: str) -> list[MarketOdds]:
         overs, unders = {}, {}
         for f in factors:
-            pt = f.get("pt") or f.get("p")
-            if pt is None:
+            raw = f.get("pt") or f.get("p")
+            if raw is None:
                 continue
+            pt = fmt_total(raw)
             if f["f"] == F_TOTAL_OVER:
-                overs[str(pt)] = f.get("v")
+                overs[pt] = f.get("v")
             elif f["f"] == F_TOTAL_UNDER:
-                unders[str(pt)] = f.get("v")
+                unders[pt] = f.get("v")
         out = []
         for pt, over in overs.items():
             under = unders.get(pt)
@@ -236,5 +244,34 @@ class FonbetParser(BaseParser):
                 market=f"Тотал {pt}", market_key=key,
                 outcome1=f"ТБ {pt}", outcome2=f"ТМ {pt}",
                 k1=float(over), k2=float(under), **base,
+            ))
+        return out
+
+    def _handicaps(self, factors: list, base: dict,
+                   scope: str) -> list[MarketOdds]:
+        """Форы: каждая пара (Ф1, Ф2) — двухисходный рынок.
+
+        pt у Ф1 — знаковая линия team1; линия team2 должна быть строго
+        противоположной (иначе это не одна и та же фора — пропускаем).
+        """
+        vals = {f["f"]: f for f in factors}
+        out = []
+        for f1_id, f2_id in F_HANDICAPS:
+            f1, f2 = vals.get(f1_id), vals.get(f2_id)
+            if not f1 or not f2:
+                continue
+            k1, k2 = f1.get("v"), f2.get("v")
+            if not k1 or not k2:
+                continue
+            # у форы всегда есть строковый pt со знаком («-1.5», «+1», «0»)
+            if f1.get("pt") is None or f2.get("pt") is None:
+                continue
+            h1 = fmt_hcap(f1["pt"])
+            h2 = fmt_hcap(f2["pt"])
+            key = f"hcap:{scope}:{h1}"
+            out.append(MarketOdds(
+                market=f"Фора {h1}", market_key=key,
+                outcome1=f"Ф1 {h1}", outcome2=f"Ф2 {h2}",
+                k1=float(k1), k2=float(k2), **base,
             ))
         return out
