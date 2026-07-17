@@ -51,24 +51,34 @@ def _shutdown() -> None:
     with _render_lock:
         _drop_shared_driver()
 
-# Типичные расположения браузера и chromedriver, включая snap-версию
-# Chromium на Ubuntu (пакет chromium-browser -> snap).
+# Расположения браузера и chromedriver. ВАЖНО: snap-версия Chromium
+# (пакет chromium-browser -> snap) под systemd часто не запускается
+# («chromium.chromedriver unexpectedly exited»), а скачанный драйвер не
+# может управлять snap-хромом из-за конфайнмента. Поэтому НЕ-snap варианты
+# (google-chrome, /usr/bin/chromium) идут первыми, а snap — последним.
 BROWSER_CANDIDATES = [
     os.getenv("CHROME_BINARY", ""),
-    shutil.which("chromium-browser") or "",
-    shutil.which("chromium") or "",
     shutil.which("google-chrome") or "",
-    "/snap/bin/chromium",
-    "/usr/bin/chromium-browser",
+    shutil.which("google-chrome-stable") or "",
+    "/usr/bin/google-chrome",
     "/usr/bin/chromium",
+    "/usr/bin/chromium-browser",
+    shutil.which("chromium") or "",
+    shutil.which("chromium-browser") or "",
+    "/snap/bin/chromium",                # snap — в последнюю очередь
 ]
 DRIVER_CANDIDATES = [
     os.getenv("CHROMEDRIVER_PATH", ""),
-    shutil.which("chromedriver") or "",
-    "/snap/bin/chromium.chromedriver",   # драйвер в комплекте snap-хрома
     "/usr/bin/chromedriver",
+    "/usr/local/bin/chromedriver",
     "/usr/lib/chromium-browser/chromedriver",
+    shutil.which("chromedriver") or "",
+    "/snap/bin/chromium.chromedriver",   # snap-драйвер — в последнюю очередь
 ]
+
+
+def _is_snap(path: str | None) -> bool:
+    return bool(path) and "/snap/" in path
 
 
 def _first_existing(paths: list[str]) -> str | None:
@@ -76,6 +86,15 @@ def _first_existing(paths: list[str]) -> str | None:
         if p and os.path.exists(p):
             return p
     return None
+
+
+def _existing(paths: list[str]) -> list[str]:
+    seen, out = set(), []
+    for p in paths:
+        if p and p not in seen and os.path.exists(p):
+            seen.add(p)
+            out.append(p)
+    return out
 
 
 def _make_driver():
@@ -120,17 +139,43 @@ def _make_driver():
     browser = _first_existing(BROWSER_CANDIDATES)
     if browser:
         options.binary_location = browser
+    snap_browser = _is_snap(browser)
 
-    driver_path = _first_existing(DRIVER_CANDIDATES)
-    try:
-        from selenium import webdriver
-        if driver_path:
-            from selenium.webdriver.chrome.service import Service
-            driver = webdriver.Chrome(
-                options=options,
-                service=Service(executable_path=driver_path))
-        else:
-            driver = webdriver.Chrome(options=options)
+    # Порядок попыток запуска драйвера:
+    #   1) явные не-snap chromedriver'ы;
+    #   2) авто-подбор Selenium Manager (сам скачает подходящий драйвер) —
+    #      работает с обычным Chrome, но НЕ со snap-хромом (конфайнмент);
+    #   3) snap-драйвер — только если браузер тоже snap (последний шанс).
+    nonsnap_drivers = [d for d in _existing(DRIVER_CANDIDATES)
+                       if not _is_snap(d)]
+    snap_drivers = [d for d in _existing(DRIVER_CANDIDATES) if _is_snap(d)]
+    attempts: list[str | None] = list(nonsnap_drivers)
+    if not snap_browser:
+        attempts.append(None)            # Selenium Manager (авто)
+    attempts.extend(snap_drivers)
+    if snap_browser:
+        attempts.append(None)            # для snap — авто в самом конце
+    # уберём дубли, сохранив порядок
+    seen: set = set()
+    attempts = [a for a in attempts if not (a in seen or seen.add(a))]
+
+    from selenium import webdriver
+    from selenium.webdriver.chrome.service import Service
+    last_exc = None
+    for driver_path in attempts:
+        try:
+            if driver_path:
+                driver = webdriver.Chrome(
+                    options=options,
+                    service=Service(executable_path=driver_path))
+            else:
+                driver = webdriver.Chrome(options=options)
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+            log.info("Selenium: драйвер %s не стартовал (%s) — пробую дальше",
+                     driver_path or "авто (Selenium Manager)",
+                     exc.__class__.__name__)
+            continue
         _tune_executor(driver)
         # Часовой пояс браузера — московский: БК рендерят время начала
         # матчей в поясе браузера, а парсер разбирает его как МСК
@@ -140,12 +185,16 @@ def _make_driver():
                                    {"timezoneId": "Europe/Moscow"})
         except Exception as exc:  # noqa: BLE001
             log.debug("Selenium: не удалось задать таймзону: %s", exc)
+        log.info("Selenium: браузер запущен (бинарь=%s, драйвер=%s)",
+                 browser or "по умолчанию", driver_path or "авто")
         return driver
-    except Exception as exc:  # noqa: BLE001
-        log.warning("Selenium: не удалось запустить браузер: %s "
-                    "(браузер=%s, драйвер=%s)",
-                    exc, browser or "не найден", driver_path or "авто")
-        return None
+
+    log.warning(
+        "Selenium: не удалось запустить браузер (браузер=%s): %s. "
+        "Если Chromium из snap — он часто не работает под systemd; "
+        "поставьте google-chrome (не snap) и задайте CHROME_BINARY "
+        "(см. README).", browser or "не найден", last_exc)
+    return None
 
 
 def _tune_executor(driver) -> None:

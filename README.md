@@ -184,6 +184,8 @@ systemctl restart arb-scanner
 | `DB_PATH` | `arbs.sqlite3` | Файл SQLite с историей найденных вилок |
 | `FONBET_LINE_HOST` | — | Хост сервера линии Fonbet, если авто-подбор не сработал (напр. `line01w.bk6bba-resources.com`) |
 | `USE_SELENIUM` | `1` | Использовать браузер (Selenium) для динамических БК. `0` — отключить |
+| `CHROME_BINARY` | — | Путь к бинарю браузера (напр. `/usr/bin/google-chrome`). Если Chromium из snap не стартует — укажите не-snap Chrome |
+| `CHROMEDRIVER_PATH` | — | Путь к chromedriver вручную. Обычно не нужен — сканер подбирает драйвер сам (Selenium Manager) |
 | `HTTP_TIMEOUT` | `10` | Таймаут HTTP-запросов к БК, сек |
 
 ## Диагностика («почему 0 котировок»)
@@ -191,7 +193,21 @@ systemctl restart arb-scanner
 Запустите `python -m app.diagnose` — покажет IP/страну, доступность Selenium и что отдаёт каждая БК. Частые причины пустого результата:
 
 1. **IP не российский.** Сайты БК доступны только из РФ. Решение — VPS с российским IP.
-2. **Не установлен Selenium/Chromium.** Winline и Лига Ставок — это SPA, их линия грузится JavaScript'ом, поэтому нужен браузер. Поставьте `chromium-browser` и `pip install selenium`. Fonbet и BetBoom работают без браузера (Fonbet — JSON-API, BetBoom — прямой websocket-фид линии; нужен `pip install websocket-client`).
+2. **Не установлен Selenium/Chromium или Chromium из snap не стартует.** Winline и Лига Ставок — это SPA, их линия грузится JavaScript'ом, поэтому нужен браузер. Fonbet и BetBoom работают без браузера (Fonbet — JSON-API, BetBoom — прямой websocket-фид линии; нужен `pip install websocket-client`).
+
+   ⚠️ **Chromium из snap (пакет `chromium-browser` на Ubuntu ставится как snap) под systemd часто не запускается** — в логе `Service /snap/bin/chromium.chromedriver unexpectedly exited. Status code was: 1`, и Winline/Лига Ставок дают 0. Скачанный драйвер тоже не может управлять snap-хромом (конфайнмент). Решение — поставить **не-snap** Google Chrome и указать его сканеру:
+
+```bash
+cd /tmp
+wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+apt install -y ./google-chrome-stable_current_amd64.deb
+snap remove chromium 2>/dev/null; apt-get remove -y chromium-browser 2>/dev/null; true
+# указать бинарь в юните (драйвер сканер подберёт сам через Selenium Manager)
+echo 'Environment=CHROME_BINARY=/usr/bin/google-chrome' >> /etc/systemd/system/arb-scanner.service
+systemctl daemon-reload && systemctl restart arb-scanner
+```
+
+   Сканер сам предпочитает не-snap браузер и при сбое явного драйвера откатывается на авто-подбор (Selenium Manager), но исправный не-snap Chrome для этого должен быть установлен.
 3. **Сменился домен линии Fonbet.** Домены вида `lineNNw.<hash>.com` периодически меняются. Парсер перебирает известные кандидаты (включая формат `line01w.bk6bba-resources.com`), но если все не подошли — найдите актуальный хост в браузере (DevTools → Network → запрос `events/list`/`events/listBase`) и задайте `FONBET_LINE_HOST`.
 4. **Изменилась вёрстка Winline/Лиги Ставок или схема фида BetBoom.** CSS-селекторы Winline/Лиги Ставок в `app/parsers/*.py` могут потребовать актуализации под текущую разметку; для BetBoom — номера полей protobuf в `app/parsers/bb_feed.py`. Структура парсеров при этом сохраняется.
 5. **Слабый VPS: не хватает памяти.** Chrome + сканер требуют ~1.5–2 ГБ. Если в логе процесс внезапно завершается словом `Killed` — это OOM-killer. Добавьте swap (после этого перезапустите сканер):
