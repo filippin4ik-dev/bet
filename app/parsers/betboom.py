@@ -22,10 +22,11 @@ import logging
 import time
 from datetime import datetime, timezone
 
-from ..config import BETBOOM_FEED_TIMEOUT
-from ..models import KIND_PREMATCH, MarketOdds
+from ..config import BETBOOM_FEED_TIMEOUT, BETBOOM_LIVE_FEED_TIMEOUT
+from ..models import KIND_LIVE, KIND_PREMATCH, MarketOdds
 from .base import BaseParser
-from .bb_feed import BBFeedClient, FeedError, _decode, _one, _text
+from .bb_feed import (TREE_LIVE, TREE_PREMATCH, BBFeedClient, FeedError,
+                      _decode, _one, _text)
 from .html_utils import fmt_hcap, fmt_total, format_start, market_scope
 
 log = logging.getLogger("parsers.betboom")
@@ -48,8 +49,10 @@ _ST_ARGUMENT = 9      # линия тотала (double)
 _ST_FACTOR = 10       # коэффициент (double)
 _ST_MARKET_NAME = 14
 
-# Обычный матч (не аутрайт/спецставка)
-_MATCH_TYPE_NORMAL = 2
+# Тип матча: 2 — прематч-матч, 1 — лайв-матч (в игре). Прочие типы
+# (аутрайты/спецставки) отсеиваем. Двухисходность рынка и наличие двух
+# команд дополнительно фильтруют неигровые события.
+_MATCH_TYPES_NORMAL = (1, 2)
 
 
 class BetBoomParser(BaseParser):
@@ -60,13 +63,22 @@ class BetBoomParser(BaseParser):
         self._feed_host: str | None = None
 
     def fetch_odds(self) -> list[MarketOdds]:
+        return self._crawl(tree_type=TREE_PREMATCH, live=False,
+                           timeout=BETBOOM_FEED_TIMEOUT)
+
+    def fetch_live_odds(self) -> list[MarketOdds]:
+        return self._crawl(tree_type=TREE_LIVE, live=True,
+                           timeout=BETBOOM_LIVE_FEED_TIMEOUT)
+
+    def _crawl(self, tree_type: int, live: bool,
+               timeout: float) -> list[MarketOdds]:
         by_key: dict[str, MarketOdds] = {}
         now = time.time()
-        client = BBFeedClient(host=self._feed_host,
-                              overall_timeout=BETBOOM_FEED_TIMEOUT)
+        client = BBFeedClient(host=self._feed_host, overall_timeout=timeout,
+                              tree_type=tree_type)
         try:
             for sport_name, match in client.crawl():
-                for o in self._parse_match(sport_name, match, now):
+                for o in self._parse_match(sport_name, match, now, live):
                     by_key[o.match_key] = o
         except FeedError as exc:
             log.warning("BetBoom feed недоступен: %s", exc)
@@ -82,12 +94,12 @@ class BetBoomParser(BaseParser):
 
     # ---- разбор одного матча ----
 
-    def _parse_match(self, sport: str, match: dict,
-                     now: float) -> list[MarketOdds]:
+    def _parse_match(self, sport: str, match: dict, now: float,
+                     live: bool = False) -> list[MarketOdds]:
         if 1 not in match:
             return []
         info = _decode(match[_MI_ID][0])
-        if _one(info, _MI_TYPE) != _MATCH_TYPE_NORMAL:
+        if _one(info, _MI_TYPE) not in _MATCH_TYPES_NORMAL:
             return []  # аутрайты и спецставки — не двухисходные матчи
 
         team1, team2 = self._teams(info)
@@ -95,12 +107,18 @@ class BetBoomParser(BaseParser):
             return []
 
         start_ts = self._start_ts(info)
-        if start_ts is None or start_ts <= now:
-            return []  # только прематч
-        start_time = format_start(start_ts)
+        if live:
+            # лайв: матч уже идёт — не отбрасываем по времени старта
+            kind = KIND_LIVE
+            start_time = format_start(start_ts) if start_ts else None
+        else:
+            if start_ts is None or start_ts <= now:
+                return []  # только прематч
+            kind = KIND_PREMATCH
+            start_time = format_start(start_ts)
 
         base = dict(bookmaker=self.name, sport=sport or "Спорт",
-                    team1=team1, team2=team2, kind=KIND_PREMATCH,
+                    team1=team1, team2=team2, kind=kind,
                     start_time=start_time, start_ts=start_ts)
 
         # Группируем ставки по рынкам:

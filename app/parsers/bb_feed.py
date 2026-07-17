@@ -39,6 +39,7 @@ USER_AGENT = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
               "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
 
 # Значения enum из бандла (bb.sport_ws.v1.common.TreeTypes / LANGUAGES)
+TREE_LIVE = 1
 TREE_PREMATCH = 2
 LANG_RU = 8
 
@@ -174,9 +175,12 @@ class BBFeedClient:
     """
 
     def __init__(self, host: str | None = None,
-                 overall_timeout: float = 60.0) -> None:
+                 overall_timeout: float = 60.0,
+                 tree_type: int = TREE_PREMATCH) -> None:
         self.host = host
         self.overall_timeout = overall_timeout
+        # тип дерева: TREE_PREMATCH (линия) или TREE_LIVE (лайв)
+        self.tree_type = tree_type
         self._ws = None
 
     # ---- соединение ----
@@ -230,7 +234,7 @@ class BBFeedClient:
         self._send(REQ_SETTINGS_SET, body)
 
     def _list_sports(self, deadline: float) -> list[int]:
-        packed_types = _varint(TREE_PREMATCH)
+        packed_types = _varint(self.tree_type)
         self._send(REQ_STATE_BY_SPORTS,
                    _f_str(1, _uid()) + _f_len(2, packed_types))
         while time.monotonic() < deadline:
@@ -253,7 +257,7 @@ class BBFeedClient:
 
     def _list_tournaments(self, sport_id: int,
                           deadline: float) -> list[int]:
-        sub = _f_str(1, _uid()) + _f_varint(2, TREE_PREMATCH) + \
+        sub = _f_str(1, _uid()) + _f_varint(2, self.tree_type) + \
             _f_varint(3, sport_id)
         self._send(REQ_STATE_SPORTS, _f_str(1, _uid()) + _f_len(2, sub))
         while time.monotonic() < deadline:
@@ -278,7 +282,7 @@ class BBFeedClient:
     def _subscribe_tournaments(self, tournament_ids: list[int],
                                deadline: float):
         subs = b"".join(
-            _f_len(2, _f_str(1, _uid()) + _f_varint(2, TREE_PREMATCH) +
+            _f_len(2, _f_str(1, _uid()) + _f_varint(2, self.tree_type) +
                    _f_varint(3, tid))
             for tid in tournament_ids)
         self._send(REQ_STATE_TOURNAMENTS, _f_str(1, _uid()) + subs)

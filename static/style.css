@@ -48,6 +48,7 @@ header h1 { font-size: 1.6rem; font-weight: 700; }
 }
 .badge.demo { color: var(--hot); border-color: var(--hot); }
 .badge.live { color: var(--accent); border-color: var(--accent); }
+.badge.hot-badge { color: #ef4444; border-color: #ef4444; }
 
 .scanning { color: var(--hot); }
 .bk-name { font-weight: 600; }

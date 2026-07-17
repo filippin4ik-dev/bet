@@ -15,7 +15,7 @@ import time
 from datetime import datetime, timedelta, timezone
 
 from ..config import BK_TZ_OFFSET, FONBET_LINE_HOST
-from ..models import KIND_PREMATCH, MarketOdds
+from ..models import KIND_LIVE, KIND_PREMATCH, MarketOdds
 from .base import BaseParser
 from .html_utils import fmt_hcap, fmt_total, market_scope
 
@@ -131,10 +131,18 @@ class FonbetParser(BaseParser):
         return None
 
     def fetch_odds(self) -> list[MarketOdds]:
+        return self._collect(live=False)
+
+    def fetch_live_odds(self) -> list[MarketOdds]:
+        return self._collect(live=True)
+
+    def _collect(self, live: bool) -> list[MarketOdds]:
         self._delay()
         data = self._fetch_data()
         if not data:
             return []
+        want_place = "live" if live else "line"
+        kind = KIND_LIVE if live else KIND_PREMATCH
 
         # У Fonbet «спорт» события — это лига/сегмент (напр. «США. MLS»),
         # у сегмента есть parentId до корневого вида спорта («Футбол»).
@@ -173,9 +181,10 @@ class FonbetParser(BaseParser):
             if not team1 or not team2:
                 continue
 
-            # Только прематч: place == 'line'. Live и неактивные события
-            # ('live' / 'notActive') пропускаем.
-            if event.get("place") != "line" or root.get("place") != "line":
+            # Берём только запрошенный тип: прематч (place=='line') или
+            # лайв (place=='live'); неактивные ('notActive') всегда мимо.
+            if event.get("place") != want_place \
+                    or root.get("place") != want_place:
                 continue
 
             sport = sport_name(root.get("sportId"))
@@ -197,7 +206,7 @@ class FonbetParser(BaseParser):
 
             base = dict(bookmaker=self.name, sport=sport,
                         team1=team1, team2=team2,
-                        kind=KIND_PREMATCH, start_time=start_time,
+                        kind=kind, start_time=start_time,
                         start_ts=float(start_ts) if start_ts else None)
 
             factors = ef.get("factors", [])
