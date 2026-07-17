@@ -1,189 +1,221 @@
-"""Winline — динамический сайт (Angular SPA), парсится через Selenium.
+"""Winline — прямой бинарный websocket-фид линии (без браузера).
 
-Только ПРЕМАТЧ. Общая страница /stavki/sport показывает лишь верхушку
-топ-событий (~10 матчей), поэтому обходим отдельные страницы двухисходных
-видов спорта и прокручиваем ленту до конца — так собираются все матчи.
+Раньше парсер рендерил страницы Selenium'ом и собирал лишь верхушку ленты
+(гонки рендеринга давали 0 матчей). Теперь подключаемся к тому же фиду
+`wss://wss.winline.ru/data_ng`, что и сайт (см. wl_feed.py), и получаем
+ВСЮ линию: пару тысяч прематч-матчей и весь лайв за секунды.
 
-Структура DOM (проверена на живой странице):
-- .event-card — карточка матча
-- .body-left__names > .name — две команды
-- .header-left__time — время начала («Завтра 09:00», «19.07 15:00») либо
-  live-статус («1сет», «2Т 82'») — live-карточки пропускаем
-- ww-feature-event-market-dsk — один рынок; кнопки .coefficient-button,
-  тип по классу coefficient-button_generic2 (исход 1-2 без ничьей),
-  _generic3 (1-X-2 с ничьей — пропускаем), _total2 (ТБ/ТМ),
-  _handicap2 (фора Ф1/Ф2). Линия тотала — в .coefficient-middle;
-  у форы там же знаки сторон, напр. «- 2.5 +» (Ф1 −2.5 / Ф2 +2.5).
+Из фида берём все двухисходные рынки:
+- «Исход 12» / «Победитель» (src=1) — победитель без ничьей;
+- «Тотал» (src=4), «тотал 1-го тайма» (src=7), «тотал N-го периода/сета/
+  карты» (src=71) — каждая линия Больше/Меньше отдельным рынком;
+- «Фора» (src=3), «фора 1-го тайма» (src=6), «фора периода» (src=61) —
+  сторона фаворита в поле favorite, величина линии в поле koef;
+- «исход 12 периода» (src=151) — победитель 1-го периода/сета.
+Трёхисходные рынки (1X2: src=2/5/51/9) и спец-рынки (src=15/16) пропускаем.
 
-При смене вёрстки правьте селекторы ниже; логика поиска вилок не меняется.
+Порядок кэфов проверен на живых данных: V[0] — исход «1»/«Больше»,
+V[1] — «2»/«Меньше» (по возрастанию линии тотала кэф V[0] растёт).
+Период/предмет рынка нормализуется общим market_scope, чтобы рынок
+совпадал с тем же рынком других БК.
 """
 import logging
 import re
 import time
 
-from bs4 import BeautifulSoup
-
-from ..config import SCROLL_SECONDS
-from ..models import KIND_PREMATCH, MarketOdds
+from ..config import WINLINE_SNAPSHOT_WAIT
+from ..models import KIND_LIVE, KIND_PREMATCH, MarketOdds
 from .base import BaseParser
-from .html_utils import (SOUP_PARSER, fmt_hcap, fmt_total, market_scope, num,
-                         parse_start_ts)
-from .selenium_helper import SeleniumSession
+from .html_utils import fmt_hcap, fmt_total, format_start, market_scope
+from .wl_feed import get_feed
 
 log = logging.getLogger("parsers.winline")
 
-# Страницы двухисходных видов спорта (прематч-линия)
-PAGES = [
-    ("https://winline.ru/stavki/sport/tennis/", "Теннис"),
-    ("https://winline.ru/stavki/sport/nastolijnyj_tennis/", "Настольный теннис"),
-    ("https://winline.ru/stavki/sport/basketbol/", "Баскетбол"),
-    ("https://winline.ru/stavki/sport/volejbol/", "Волейбол"),
-    ("https://winline.ru/stavki/sport/xokkej/", "Хоккей"),
-    ("https://winline.ru/stavki/sport/kibersport/", "Киберспорт"),
-]
+# Кэф закрытой стороны Winline выдаёт как 1.0, а «невозможный» исход —
+# заглушкой вида 50. Всё вне разумного коридора отбрасываем.
+MIN_K, MAX_K = 1.01, 45.0
+
+# Типы линий (idTipEventSrc), которые умеем превращать в двухисходные рынки
+SRC_WINNER = 1          # исход 12 (без ничьей)
+SRC_HCAP = 3            # фора матча
+SRC_TOTAL = 4           # тотал матча
+SRC_HCAP_HT = 6         # фора 1-го тайма
+SRC_TOTAL_HT = 7        # тотал 1-го тайма
+SRC_HCAP_P = 61         # фора N-го периода (koef = «N/линия»)
+SRC_TOTAL_P = 71        # тотал N-го периода (koef = «N/линия»)
+SRC_WINNER_P = 151      # исход 12 периода (только 1-й, koef = «1»)
+
+# Плейсхолдеры в тексте рынка: @NP@/@FT@/@RT@ — период по умолчанию,
+# @1HT@ — 1-й тайм/половина, @[a]P@ — N-й период (номер в koef), [a]/[b] —
+# параметры линии. Вырезаем их и скармливаем остаток market_scope.
+_PLACEHOLDER_RE = re.compile(r"@[^@]*@|\[[a-z]\]|[()]")
 
 
 class WinlineParser(BaseParser):
     name = "Winline"
 
     def fetch_odds(self) -> list[MarketOdds]:
+        feed = get_feed()
+        feed.start()
+        if not feed.healthy():
+            feed.wait_prematch(WINLINE_SNAPSHOT_WAIT)
+        if not feed.healthy():
+            log.warning("Winline: фид ещё не отдал снапшот прематча — "
+                        "0 котировок в этом цикле")
+            return []
+        sports, tiplines, champs, events, lines = feed.prematch_snapshot()
+        return self._build(sports, tiplines, champs, events, lines,
+                           live=False)
+
+    def fetch_live_odds(self) -> list[MarketOdds]:
+        feed = get_feed()
+        feed.start()
+        if not feed.healthy():
+            return []
+        sports, tiplines, champs, events, lines = feed.live_snapshot()
+        return self._build(sports, tiplines, champs, events, lines,
+                           live=True)
+
+    # ---------- сборка MarketOdds ----------
+
+    def _build(self, sports: dict, tiplines: dict, champs: dict,
+               events: list, lines: list, live: bool) -> list[MarketOdds]:
+        now = time.time()
+        ev_by_id: dict[int, dict] = {}
+        for ev in events:
+            if not ev.get("team1") or not ev.get("team2") \
+                    or ev["team1"] == ev["team2"]:
+                continue
+            if live:
+                # state 1 — приём ставок открыт; 2 — событие приостановлено
+                # (опасный момент), его кэфы для вилок использовать нельзя
+                if ev.get("state") != 1:
+                    continue
+            elif not ev.get("ts") or ev["ts"] <= now:
+                continue  # прематч: матч уже начался
+            ev_by_id[ev["id"]] = ev
+
         by_key: dict[str, MarketOdds] = {}
-        with SeleniumSession() as s:
-            if s.driver is None:
-                return []
-            for url, sport in PAGES:
-                page_odds = self._fetch_page(s, url, sport)
-                for o in page_odds:
-                    by_key[o.match_key] = o  # дубли между снимками
+        for ln in lines:
+            if live and ln.get("state", 1) != 1:
+                continue  # линия приостановлена — ставить нельзя
+            ev = ev_by_id.get(ln["event"])
+            if ev is None:
+                continue
+            tl = tiplines.get(ln["tid"])
+            if tl is None:
+                continue
+            champ = champs.get(ev["champ"])
+            sport_id = champ[0] if champ else 0
+            sport_info = sports.get(sport_id, {})
+            sport_name = sport_info.get("name", "Спорт")
+            if champ and champ[1]:
+                sport = f"{sport_name} · {champ[1]}"
+            else:
+                sport = sport_name
+            base = dict(
+                bookmaker=self.name, sport=sport,
+                team1=ev["team1"], team2=ev["team2"],
+                kind=KIND_LIVE if live else KIND_PREMATCH,
+                start_time=format_start(ev["ts"]) if ev.get("ts") else None,
+                start_ts=float(ev["ts"]) if ev.get("ts") else None,
+            )
+            o = self._market(ln, tl, sport_info, base)
+            if o is not None:
+                by_key[o.match_key] = o
         return list(by_key.values())
 
-    def _fetch_page(self, s: SeleniumSession, url: str,
-                    sport: str) -> list[MarketOdds]:
-        """Рендерит страницу вида спорта; при пустом результате повторяет.
+    def _market(self, ln: dict, tl: dict, sport_info: dict,
+                base: dict) -> MarketOdds | None:
+        src = tl["src"]
+        v = ln["v"]
+        if len(v) < 2:
+            return None
+        k1, k2 = v[0], v[1]
+        if not (MIN_K < k1 < MAX_K and MIN_K < k2 < MAX_K):
+            return None
 
-        Angular-SPA Winline подтягивает события своим websocket'ом уже после
-        загрузки страницы. Иногда снимки DOM снимаются до того, как лента
-        наполнилась, и вид спорта приходит пустым (гонка рендеринга). Если
-        матчей не нашли вовсе — даём странице больше времени и пробуем ещё
-        раз, прежде чем сдаться."""
-        for attempt in range(2):
-            self._delay()
-            # на повторе ждём и прокручиваем дольше — лента точно наполнится
-            wait = 20 if attempt == 0 else 30
-            scroll = SCROLL_SECONDS if attempt == 0 else SCROLL_SECONDS + 15
-            snaps = s.render_snapshots(url, wait_seconds=wait,
-                                       scroll_seconds=scroll)
-            odds: dict[str, MarketOdds] = {}
-            for html in snaps:
-                for o in self._parse_html(html, sport):
-                    odds[o.match_key] = o
-            if odds:
-                return list(odds.values())
-            log.info("Winline: %s — 0 матчей (попытка %d/2)%s",
-                     url, attempt + 1,
-                     ", повтор" if attempt == 0 else ", пропускаю")
-        return []
+        scope, label = self._scope(tl, ln["koef"], sport_info)
 
-    def _parse_html(self, html: str, sport: str) -> list[MarketOdds]:
-        soup = BeautifulSoup(html, SOUP_PARSER)
-        result: list[MarketOdds] = []
-        now = time.time()
+        if src in (SRC_WINNER, SRC_WINNER_P):
+            if len(v) != 2:
+                return None  # страховка: победитель всегда двухисходный
+            return MarketOdds(
+                market=f"Победитель {label}".strip(),
+                market_key=f"winner:{scope}" if scope else "winner",
+                outcome1="П1", outcome2="П2", k1=k1, k2=k2, **base)
 
-        for card in soup.select(".event-card"):
-            names = [n.get_text(strip=True)
-                     for n in card.select(".body-left__names > .name")]
-            if len(names) < 2:
-                continue
-            team1, team2 = names[0], names[1]
+        if src in (SRC_TOTAL, SRC_TOTAL_HT, SRC_TOTAL_P):
+            pt = self._line_value(src, ln["koef"])
+            if pt is None:
+                return None
+            pt = fmt_total(pt)
+            key = f"total:{scope}:{pt}" if scope else f"total:{pt}"
+            return MarketOdds(
+                market=f"Тотал {label} {pt}".replace("  ", " "),
+                market_key=key,
+                outcome1=f"ТБ {pt}", outcome2=f"ТМ {pt}",
+                k1=k1, k2=k2, **base)   # V[0]=Больше, V[1]=Меньше
 
-            time_el = card.select_one(".header-left__time")
-            start_time = time_el.get_text(" ", strip=True) if time_el else None
-            start_ts = parse_start_ts(start_time, now)
-            # Не распознали время начала — это live-карточка («1сет»,
-            # «2Т 82'», «Перерыв») или неизвестный формат. Пропускаем:
-            # работаем только с прематчем.
-            if start_ts is None or start_ts <= now:
-                continue
+        if src in (SRC_HCAP, SRC_HCAP_HT, SRC_HCAP_P):
+            val = self._line_value(src, ln["koef"])
+            if val is None:
+                return None
+            fav = ln.get("fav", 0)
+            if fav == 1:
+                h1 = -val
+            elif fav == 2:
+                h1 = val
+            elif val == 0:
+                h1 = 0.0
+            else:
+                return None  # линия без стороны — не разобрать
+            h1s, h2s = fmt_hcap(h1), fmt_hcap(-h1)
+            key = f"hcap:{scope}:{h1s}"
+            return MarketOdds(
+                market=f"Фора {label} {h1s}".replace("  ", " "),
+                market_key=key,
+                outcome1=f"Ф1 {h1s}", outcome2=f"Ф2 {h2s}",
+                k1=k1, k2=k2, **base)   # V[0]=team1, V[1]=team2
 
-            for row in card.select(".card__body"):
-                # Метка строки: «Матч» — .match-row-label, дочерние росписи
-                # («1 сет», «2 сет») — .period-name. Без метки периода кэфы
-                # сета записались бы как кэфы всего матча!
-                label_el = row.select_one(".match-row-label, .period-name")
-                label = label_el.get_text(strip=True) if label_el else ""
-                row_sport = sport if label in ("", "Матч") else f"{sport} · {label}"
-                scope = "" if label in ("", "Матч") else market_scope(label)
-                base = dict(bookmaker=self.name, sport=row_sport,
-                            team1=team1, team2=team2, kind=KIND_PREMATCH,
-                            start_time=start_time, start_ts=start_ts)
-                for market in row.select("ww-feature-event-market-dsk"):
-                    parsed = self._parse_market(market, base, label, scope)
-                    if parsed:
-                        result.append(parsed)
-        return result
+        return None  # 1X2 и спец-рынки не поддерживаем
 
-    def _parse_market(self, market, base: dict, label: str,
-                      scope: str) -> MarketOdds | None:
-        btns = market.select(".coefficient-button")
-        classes = {c for b in btns for c in b.get("class", [])}
-        vals = [num(b.get_text(strip=True)) for b in btns]
-
-        # Победитель без ничьей: ровно 2 исхода (generic2)
-        if "coefficient-button_generic2" in classes and len(vals) == 2:
-            k1, k2 = vals
-            if k1 and k2:
-                return MarketOdds(
-                    market="Победитель" if not scope
-                    else f"Победитель ({label})",
-                    market_key=f"winner:{scope}" if scope else "winner",
-                    outcome1="П1", outcome2="П2",
-                    k1=k1, k2=k2, **base)
-
-        # Тотал (total2) + линия из .coefficient-middle. ВАЖНО: колонки
-        # Winline идут «М - Б» (заголовок sport-header), т.е. первая
-        # кнопка — Меньше, вторая — Больше.
-        if "coefficient-button_total2" in classes and len(vals) == 2:
-            mid = market.select_one(".coefficient-middle")
-            pt = fmt_total(mid.get_text(strip=True)) if mid else None
-            under, over = vals
-            if pt and over and under:
-                key = f"total:{scope}:{pt}" if scope else f"total:{pt}"
-                return MarketOdds(
-                    market=f"Тотал {label} {pt}" if scope else f"Тотал {pt}",
-                    market_key=key,
-                    outcome1=f"ТБ {pt}", outcome2=f"ТМ {pt}",
-                    k1=over, k2=under, **base)
-
-        # Фора (handicap2): столбцы Ф1 | Ф2 (первая кнопка — team1). Линия и
-        # знаки сторон — в .coefficient-middle, напр. «- 2.5 +» → Ф1 −2.5,
-        # Ф2 +2.5. Знаки читаем из текста (у фаворита бывает и «+ X -»).
-        if "coefficient-button_handicap2" in classes and len(vals) == 2:
-            mid = market.select_one(".coefficient-middle")
-            mtext = mid.get_text(" ", strip=True) if mid else ""
-            hcap = self._parse_hcap_middle(mtext)
-            k1, k2 = vals
-            if hcap and k1 and k2:
-                h1, h2 = hcap
-                key = f"hcap:{scope}:{h1}"
-                return MarketOdds(
-                    market=f"Фора {label} {h1}" if scope else f"Фора {h1}",
-                    market_key=key,
-                    outcome1=f"Ф1 {h1}", outcome2=f"Ф2 {h2}",
-                    k1=k1, k2=k2, **base)
-        return None
+    # ---------- помощники ----------
 
     @staticmethod
-    def _parse_hcap_middle(text: str) -> tuple[str, str] | None:
-        """«- 2.5 +» → ('-2.5', '+2.5'); «+ 1.5 -» → ('+1.5', '-1.5').
-
-        Первый знак — сторона Ф1 (team1), второй — Ф2 (team2). Величина
-        одна, стороны противоположны."""
-        m = re.search(r"([+\-])\s*([\d.,]+)\s*([+\-])", text)
-        if not m:
+    def _line_value(src: int, koef: str) -> float | None:
+        """Числовая линия рынка. Для периодных (src 61/71) koef = «N/лин»."""
+        try:
+            if src in (SRC_HCAP_P, SRC_TOTAL_P):
+                return float(koef.split("/", 1)[1])
+            return float(koef)
+        except (ValueError, IndexError):
             return None
-        s1, val, s2 = m.group(1), m.group(2), m.group(3)
-        if s1 == s2:
-            return None  # оба знака одинаковы — не распознали стороны
-        h1 = fmt_hcap(val if s1 == "+" else "-" + val)
-        h2 = fmt_hcap(val if s2 == "+" else "-" + val)
-        return h1, h2
+
+    @staticmethod
+    def _scope(tl: dict, koef: str, sport_info: dict) -> tuple[str, str]:
+        """(канонический scope рынка, человекочитаемая метка периода).
+
+        Период берём из текста tipline: @1HT@ — 1-й тайм (слово из строк
+        вида спорта: тайм/половина/сет), @[a]P@ — N-й период (номер — в
+        первой части koef, слово — период/сет/четверть/карта/иннинг).
+        Остальной текст рынка («Тотал карт», «тотал раундов») даёт
+        предметные токены. Всё прогоняется через общий market_scope.
+        """
+        text = tl["text"]
+        strings = sport_info.get("strings") or [""] * 9
+        period_txt = ""
+        if "@1HT@" in text:
+            word = strings[3] or strings[4] or "тайм"
+            period_txt = f"1-й {word}"
+        elif "@[a]P@" in text:
+            num = koef.split("/", 1)[0] or "1"
+            word = strings[4] or "период"
+            period_txt = f"{num}-й {word}"
+        residual = _PLACEHOLDER_RE.sub(" ", text)
+        # «исход»/«тотал»/«фора» — вид рынка, не предмет; убираем, чтобы
+        # market_scope видел только предмет (карты, раунды, углы...)
+        residual = re.sub(r"(?i)исход|тотал|фора|победитель", " ", residual)
+        scope = market_scope(f"{period_txt} {residual}".strip())
+        label = f"({period_txt})" if period_txt else ""
+        return scope, label

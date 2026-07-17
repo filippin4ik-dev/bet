@@ -25,6 +25,16 @@ BK_TZ_OFFSET = float(os.getenv("BK_TZ_OFFSET", "3"))
 # Порог доходности для звукового уведомления, %
 SOUND_ALERT_PROFIT = float(os.getenv("SOUND_ALERT_PROFIT", "2.5"))
 
+# Вилки с доходностью выше этого порога почти наверняка НЕ вилки, а ошибки
+# сопоставления (разные рынки/матчи у разных БК) — такие отбрасываются.
+# Реальные прематч-вилки редко превышают 10-15%.
+ARB_MAX_PROFIT = float(os.getenv("ARB_MAX_PROFIT", "25"))
+
+# Допуск расхождения времени начала матча между БК, сек. Если время старта
+# у двух БК отличается сильнее — это РАЗНЫЕ матчи одной пары команд
+# (первый/ответный, мужской/женский), их кэфы не сшиваются в одну вилку.
+START_TS_TOLERANCE = float(os.getenv("START_TS_TOLERANCE", "1800"))
+
 # Банки, для которых рассчитываются суммы ставок, ₽
 BANKS = [1000, 5000, 10000]
 
@@ -40,13 +50,25 @@ HTTP_TIMEOUT = float(os.getenv("HTTP_TIMEOUT", "10"))
 #   FONBET_LINE_HOST=line01w.bk6bba-resources.com
 FONBET_LINE_HOST = os.getenv("FONBET_LINE_HOST", "").strip()
 
-# Использовать Selenium для БК с динамическими страницами (Winline / BetBoom /
-# Лига Ставок). Требует установленных selenium + Chromium (см. README).
+# ---- Winline: прямой websocket-фид линии (data_ng) ----
+# Winline парсится без браузера: подключаемся к тому же бинарному фиду,
+# что и сайт, и держим соединение постоянно (см. app/parsers/wl_feed.py).
+WINLINE_FEED_URL = os.getenv(
+    "WINLINE_FEED_URL", "wss://wss.winline.ru/data_ng?client=newsite&nb=true")
+# Сколько секунд ждать первый снапшот прематча после подключения
+# (обычно приходит за 2-5 c, запас на медленную сеть).
+WINLINE_SNAPSHOT_WAIT = float(os.getenv("WINLINE_SNAPSHOT_WAIT", "30"))
+# Если кадры фида не приходили дольше этого времени — состояние считается
+# протухшим и парсер отдаёт 0 котировок (сканер удержит старые до ODDS_TTL).
+WINLINE_STALE_AFTER = float(os.getenv("WINLINE_STALE_AFTER", "120"))
+
+# Использовать Selenium для БК с динамическими страницами (Лига Ставок).
+# Требует установленных selenium + Chromium (см. README).
 USE_SELENIUM = os.getenv("USE_SELENIUM", "1") not in ("0", "false", "no", "")
 
 # Сколько секунд максимум прокручивать страницу, чтобы SPA дорисовала ВСЕ
-# матчи (Winline/BetBoom рендерят список лениво — без прокрутки видна только
-# верхушка линии, ~50-60 событий).
+# матчи (динамические сайты рендерят список лениво — без прокрутки видна
+# только верхушка линии, ~50-60 событий).
 SCROLL_SECONDS = float(os.getenv("SCROLL_SECONDS", "25"))
 
 # BetBoom парсится не через браузер, а через прямой websocket-фид линии

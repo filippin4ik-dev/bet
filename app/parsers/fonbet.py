@@ -14,6 +14,7 @@ import logging
 import time
 from datetime import datetime, timedelta, timezone
 
+from ..arbitrage import _neg_hcap
 from ..config import BK_TZ_OFFSET, FONBET_LINE_HOST
 from ..models import KIND_LIVE, KIND_PREMATCH, MarketOdds
 from .base import BaseParser
@@ -40,12 +41,17 @@ PATHS = ["events/list", "events/listBase"]
 PROBE_BACKOFF = 300
 
 F_P1, F_DRAW, F_P2 = 921, 922, 923
-F_TOTAL_OVER, F_TOTAL_UNDER = 930, 931
+# Пары тотала (ТБ, ТМ): основной тотал (930/931) и дополнительные линии
+# (1696/1697, 1727/1728, 1730/1731, 1733/1734 — проверены на живой линии:
+# pt пары совпадает, кэфы зеркальны). Каждая линия — отдельный рынок.
+F_TOTAL_PAIRS = [(930, 931), (1696, 1697), (1727, 1728),
+                 (1730, 1731), (1733, 1734)]
 # Пары форы (Ф1, Ф2): каждая пара — отдельная линия форы. pt у Ф1 — линия
 # team1, у Ф2 — линия team2 (противоположная). Это хорошо известные id
-# основной азиатской форы (910/912), форы «ноль» (927/928) и форы ±1
-# (989/991); экзотические id не трогаем, чтобы не поймать ложную вилку.
-F_HANDICAPS = [(910, 912), (927, 928), (989, 991)]
+# основной азиатской форы (910/912), форы «ноль» (927/928), форы ±1
+# (989/991) и доп. форы (1569/1572); валидность пары дополнительно
+# проверяется по противоположности линий (см. _handicaps).
+F_HANDICAPS = [(910, 912), (927, 928), (989, 991), (1569, 1572)]
 
 
 def _candidate_urls() -> list[str]:
@@ -233,21 +239,24 @@ class FonbetParser(BaseParser):
 
     def _totals(self, factors: list, base: dict,
                 scope: str) -> list[MarketOdds]:
-        overs, unders = {}, {}
-        for f in factors:
-            raw = f.get("pt") or f.get("p")
-            if raw is None:
-                continue
-            pt = fmt_total(raw)
-            if f["f"] == F_TOTAL_OVER:
-                overs[pt] = f.get("v")
-            elif f["f"] == F_TOTAL_UNDER:
-                unders[pt] = f.get("v")
+        """Тоталы: основная линия + дополнительные (все пары ТБ/ТМ)."""
+        vals = {f["f"]: f for f in factors}
         out = []
-        for pt, over in overs.items():
-            under = unders.get(pt)
-            if not over or not under:
+        seen: set[str] = set()
+        for over_id, under_id in F_TOTAL_PAIRS:
+            fo, fu = vals.get(over_id), vals.get(under_id)
+            if not fo or not fu:
                 continue
+            over, under = fo.get("v"), fu.get("v")
+            raw_o = fo.get("pt") or fo.get("p")
+            raw_u = fu.get("pt") or fu.get("p")
+            if not over or not under or raw_o is None:
+                continue
+            pt = fmt_total(raw_o)
+            # линии пары обязаны совпадать, дубли линий не плодим
+            if pt != fmt_total(raw_u) or pt in seen:
+                continue
+            seen.add(pt)
             key = f"total:{scope}:{pt}" if scope else f"total:{pt}"
             out.append(MarketOdds(
                 market=f"Тотал {pt}", market_key=key,
@@ -277,6 +286,10 @@ class FonbetParser(BaseParser):
                 continue
             h1 = fmt_hcap(f1["pt"])
             h2 = fmt_hcap(f2["pt"])
+            # стороны одной форы обязаны быть противоположными — иначе это
+            # не пара (защита от смены семантики id у Fonbet)
+            if h2 != _neg_hcap(h1):
+                continue
             key = f"hcap:{scope}:{h1}"
             out.append(MarketOdds(
                 market=f"Фора {h1}", market_key=key,
