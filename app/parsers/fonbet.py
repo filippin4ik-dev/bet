@@ -14,7 +14,7 @@ import logging
 import time
 from datetime import datetime, timedelta, timezone
 
-from ..arbitrage import _neg_hcap
+from .html_utils import neg_hcap as _neg_hcap
 from ..config import BK_TZ_OFFSET, FONBET_LINE_HOST
 from ..models import KIND_LIVE, KIND_PREMATCH, MarketOdds
 from .base import BaseParser

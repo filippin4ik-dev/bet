@@ -194,6 +194,8 @@ def market_scope(text: str | None) -> str:
 
     subject_found = False
     for needle, token in _SUBJECT_TOKENS:
+        if needle == "карт" and "карточ" in t:
+            continue  # «карточки» — это cards, а не карты (maps)
         if needle in t and token not in tokens:
             # «сет»/«карта» как ПРЕДМЕТ счёта — только без порядкового
             # префикса (иначе «1-й сет» уже учтён как период выше)
@@ -212,6 +214,79 @@ def market_scope(text: str | None) -> str:
         tokens.extend(extra)
 
     return "+".join(sorted(set(tokens)))
+
+
+# Русские подписи токенов scope — для отображения рынков пользователю
+_TOKEN_RU = {
+    "corners": "угловые", "cards": "ЖК", "redcards": "КК",
+    "fouls": "фолы", "offsides": "офсайды", "shots": "удары",
+    "shotsontarget": "удары в створ", "goalkicks": "удары от ворот",
+    "throwins": "ауты", "assists": "голевые передачи", "tries": "попытки",
+    "sets": "сеты", "innings": "иннинги", "saves": "сейвы",
+    "interceptions": "перехваты", "dribbles": "обводки",
+    "tackles": "отборы", "var": "видеопросмотры", "woodwork": "каркас",
+    "subs": "замены", "rounds": "раунды", "kills": "убийства",
+    "maps": "карты", "doublefaults": "двойные ошибки", "aces": "эйсы",
+}
+_PERIOD_RU = {
+    "half": "тайм", "period": "период", "quarter": "четверть",
+    "set": "сет", "map": "карта", "inning": "иннинг",
+}
+_PERIOD_TOKEN_RE = re.compile(
+    r"^(half|period|quarter|set|map|inning)(\d+)$")
+
+
+def scope_label(scope: str) -> str:
+    """Человекочитаемая подпись scope: «map1+rounds» → «1-я карта, раунды».
+
+    Неизвестные (запасные) токены показываем как есть."""
+    if not scope:
+        return ""
+    parts = []
+    for tok in scope.split("+"):
+        m = _PERIOD_TOKEN_RE.match(tok)
+        if m:
+            base, num = _PERIOD_RU[m.group(1)], m.group(2)
+            suffix = "-я" if base in ("четверть", "карта") else "-й"
+            parts.append(f"{num}{suffix} {base}")
+        else:
+            parts.append(_TOKEN_RU.get(tok, tok))
+    return ", ".join(parts)
+
+
+def neg_hcap(line: str) -> str:
+    """Противоположная фора: «-1.5» → «+1.5», «+1» → «-1», «0» → «0»."""
+    line = line.strip()
+    if line in ("0", "+0", "-0", ""):
+        return "0"
+    if line.startswith("-"):
+        return "+" + line[1:]
+    if line.startswith("+"):
+        return "-" + line[1:]
+    return "-" + line
+
+
+def display_market(key: str, fallback: str) -> str:
+    """Единое человекочитаемое имя рынка по его ключу.
+
+    Разные БК подписывают один рынок по-разному («Тотал throwins 32.5» /
+    «Тотал 32.5»); в таблицах показываем каноничное имя со scope на русском:
+    «Тотал 32.5 (ауты)», «Фора -1.5 (1-я карта)»."""
+    parts = key.split(":")
+    kind = parts[0]
+    if kind == "total":
+        scope = parts[1] if len(parts) >= 3 else ""
+        lbl = scope_label(scope)
+        return f"Тотал {parts[-1]}" + (f" ({lbl})" if lbl else "")
+    if kind == "hcap":
+        scope = parts[1] if len(parts) >= 3 else ""
+        lbl = scope_label(scope)
+        return f"Фора {parts[-1]}" + (f" ({lbl})" if lbl else "")
+    if kind == "winner":
+        scope = parts[1] if len(parts) >= 2 else ""
+        lbl = scope_label(scope)
+        return "Победитель" + (f" ({lbl})" if lbl else "")
+    return fallback
 
 
 def format_start(ts: float) -> str:

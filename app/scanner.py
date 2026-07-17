@@ -21,6 +21,7 @@ from .config import (LIVE_ODDS_TTL, LIVE_PER_BK_GAP, LIVE_SCAN_INTERVAL,
 from .models import Arb, KIND_LIVE, KIND_PREMATCH, MarketOdds
 from .parsers import get_parsers
 from .parsers.base import BaseParser
+from .parsers.html_utils import display_market
 
 log = logging.getLogger("scanner")
 
@@ -159,7 +160,7 @@ class Scanner:
             m = markets.get(mg)
             if m is None:
                 m = markets[mg] = {
-                    "market": o.market,
+                    "market": display_market(o.market_key, o.market),
                     "market_key": o.market_key,
                     "outcome1": o.outcome1,
                     "outcome2": o.outcome2,
@@ -171,7 +172,8 @@ class Scanner:
                     if o.market_key.startswith("hcap"):
                         # в имени рынка — линия team1 СОБЫТИЯ, а не этой БК
                         h1 = o.market_key.rsplit(":", 1)[1]
-                        m["market"] = o.market.replace(h1, _neg_hcap(h1))
+                        key = o.market_key[:-len(h1)] + _neg_hcap(h1)
+                        m["market"] = display_market(key, o.market)
             k1, k2 = (o.k2, o.k1) if flipped else (o.k1, o.k2)
             if o.bookmaker not in m["quotes"]:
                 m["quotes"][o.bookmaker] = {"k1": k1, "k2": k2}

@@ -16,6 +16,7 @@ from typing import Iterable
 
 from .config import ARB_MAX_PROFIT, BANKS, START_TS_TOLERANCE
 from .models import Arb, KIND_PREMATCH, MarketOdds
+from .parsers.html_utils import display_market, neg_hcap as _neg_hcap
 
 log = logging.getLogger("arbitrage")
 
@@ -60,18 +61,6 @@ class _Outcome:
     def __init__(self, oid: str, label: str, odds: float, bookmaker: str) -> None:
         self.oid, self.label, self.odds = oid, label, odds
         self.bookmaker = bookmaker
-
-
-def _neg_hcap(line: str) -> str:
-    """Противоположная фора: «-1.5» → «+1.5», «+1» → «-1», «0» → «0»."""
-    line = line.strip()
-    if line in ("0", "+0", "-0", ""):
-        return "0"
-    if line.startswith("-"):
-        return "+" + line[1:]
-    if line.startswith("+"):
-        return "-" + line[1:]
-    return "-" + line
 
 
 def _explode(o: MarketOdds):
@@ -217,7 +206,7 @@ def find_arbs(odds: Iterable[MarketOdds]) -> list[Arb]:
             match_key=(f"{kind}|{'|'.join(sorted(teams))}|{cluster}|"
                        f"{market_group}"),
             sport=s.sport, team1=s.team1, team2=s.team2,
-            market=s.market,
+            market=display_market(s.market_key, s.market),
             outcome1=label1, outcome2=label2,
             k1_max=round(first.odds, 3), k1_bookmaker=first.bookmaker,
             k2_max=round(second.odds, 3), k2_bookmaker=second.bookmaker,

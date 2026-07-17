@@ -26,6 +26,7 @@ BetBoom собирает столько же прематч-матчей, ско
 общим `market_scope`, чтобы совпадать с тем же рынком у других БК.
 """
 import logging
+import re
 import time
 from datetime import datetime, timezone
 
@@ -63,11 +64,19 @@ _ST_ARGUMENT = 9      # линия тотала (double)
 _ST_FACTOR = 10       # коэффициент (double)
 _ST_MARKET_NAME = 14
 _ST_GROUP = 18        # группа рынка: «Тотал», «Экспресс», «Интервалы»…
+_ST_PERIOD = 20       # период рынка: «Основное время», «1-й тайм», «Карта 1»
 
 # Группы рынков, которые НЕЛЬЗЯ разбирать как обычные тоталы/форы/исходы:
 # «Экспресс» — комбинированные ставки («1Х и Тотал больше»), «Интервалы» —
-# отрезки матча («Тотал с 1-15 мин.», все сливались бы в один ключ).
-_SKIP_GROUPS = {"экспресс", "интервалы"}
+# отрезки матча («Тотал с 1-15 мин.»), «Игроки» — статистика игроков,
+# «Счет» — точные счета, «Турнир» — долгосрочные ставки.
+_SKIP_GROUPS = {"экспресс", "интервалы", "игроки", "счет", "турнир", "итоги"}
+
+# Периоды, означающие ВЕСЬ матч (не добавляют scope рынку)
+_MAIN_PERIODS = {"", "основное время", "матч", "бой", "игра", "игроки"}
+
+# «Карта 1» → «1 карта»: market_scope ждёт номер ПЕРЕД словом периода
+_PERIOD_NUM_LAST = re.compile(r"^(карта|сет|период|тайм)\s+(\d+)$")
 
 # Тип матча: 2 — прематч-матч, 1 — лайв-матч (в игре). Прочие типы
 # (аутрайты/спецставки) отсеиваем. Двухисходность рынка и наличие двух
@@ -163,14 +172,16 @@ class BetBoomParser(BaseParser):
                     team1=team1, team2=team2, kind=kind,
                     start_time=start_time, start_ts=start_ts)
 
-        # Группируем ставки по рынкам:
-        #   winners[имя рынка] = {short: factor}          («Исход…»)
-        #   totals[имя рынка][line] = {Больше/Меньше: factor}
-        #   hcaps[имя рынка][line] = {team_side: factor}  (team_side: 1/2)
-        winners: dict[str, dict[str, float]] = {}
-        winner_names: dict[str, str] = {}
-        totals: dict[str, dict[float, dict[str, float]]] = {}
-        hcaps: dict[str, dict[float, dict[int, float]]] = {}
+        # Группируем ставки по рынкам. Ключ mk = (период, имя рынка):
+        # у BetBoom период часто НЕ входит в имя («Исход» с периодом
+        # «Карта 1» в киберспорте), без него рынки разных карт слились бы.
+        #   winners[mk] = {short: factor}                 («Исход…»)
+        #   totals[mk][line] = {Больше/Меньше: factor}
+        #   hcaps[mk][line] = {team_side: factor}         (team_side: 1/2)
+        winners: dict[tuple, dict[str, float]] = {}
+        winner_names: dict[tuple, str] = {}
+        totals: dict[tuple, dict[float, dict[str, float]]] = {}
+        hcaps: dict[tuple, dict[float, dict[int, float]]] = {}
         n1, n2 = team1.strip().lower(), team2.strip().lower()
 
         for stake_raw in match.get(2, []):
@@ -182,25 +193,27 @@ class BetBoomParser(BaseParser):
                 continue
             factor = float(factor)
             low = market.lower().replace("ё", "е")
-            group = _text(st, _ST_GROUP).lower().replace("ё", "е")
+            group = _text(st, _ST_GROUP).lower().replace("ё", "е").strip()
             if group in _SKIP_GROUPS:
-                continue  # экспрессы и интервалы — не двухисходные рынки
+                continue  # экспрессы, интервалы, игроки… — не наши рынки
             if "ком." in low or "мин." in low or "результативн" in low:
                 continue  # командные рынки и отрезки без явной группы
             if self._mentions_team(low, n1, n2):
                 continue  # командный (индивидуальный) рынок — пропускаем
+            period = self._period(st)
+            mk = (period, low)
 
             if "исход" in low and (short in (_WIN_1, _WIN_2)
                                    or short in _WIN_X):
                 key = "X" if short in _WIN_X else short
-                winners.setdefault(low, {})[key] = factor
-                winner_names[low] = market
+                winners.setdefault(mk, {})[key] = factor
+                winner_names[mk] = market
             elif "тотал" in low and "индивид" not in low \
                     and short in (_TOTAL_OVER, _TOTAL_UNDER):
                 line = _one(st, _ST_ARGUMENT)
                 if line is None:
                     continue
-                totals.setdefault(low, {}).setdefault(
+                totals.setdefault(mk, {}).setdefault(
                     float(line), {})[short] = factor
             elif "фора" in low and "индивид" not in low:
                 line = _one(st, _ST_ARGUMENT)
@@ -208,7 +221,7 @@ class BetBoomParser(BaseParser):
                     continue
                 side = self._team_side(short, n1, n2)
                 if side:
-                    hcaps.setdefault(low, {}).setdefault(
+                    hcaps.setdefault(mk, {}).setdefault(
                         float(line), {})[side] = factor
 
         result: list[MarketOdds] = []
@@ -216,27 +229,35 @@ class BetBoomParser(BaseParser):
 
         # Победители: рынки «Исход…» без ничьей (X) — двухисходные.
         # Базовые варианты («Исход», «Исход (с ОТ)»…) → ключ winner;
-        # росписи («1-й тайм: Исход») → winner:<scope>. При коллизии
-        # приоритет у варианта, ближнего к «Победителю» других БК.
-        for low in sorted(winners, key=self._winner_rank):
-            sides = winners[low]
+        # росписи («1-й тайм: Исход», «Карта 1» + «Исход») →
+        # winner:<scope>. При коллизии приоритет у варианта, ближнего
+        # к «Победителю» других БК.
+        for mk in sorted(winners, key=self._winner_rank):
+            period, low = mk
+            sides = winners[mk]
             if "X" in sides or _WIN_1 not in sides or _WIN_2 not in sides:
                 continue
-            scope = "" if low in _WINNER_BASE else market_scope(low)
+            if not period and low in _WINNER_BASE:
+                scope = ""
+            else:
+                scope = market_scope(f"{period} {low}".strip())
             key = f"winner:{scope}" if scope else "winner"
             if key in seen_keys:
                 continue
             seen_keys.add(key)
-            name = ("Победитель" if low in _WINNER_BASE
-                    else f"Победитель ({winner_names[low]})")
+            if not scope:
+                name = "Победитель"
+            else:
+                pref = f"{period}: " if period else ""
+                name = f"Победитель ({pref}{winner_names[mk]})"
             result.append(MarketOdds(
                 market=name, market_key=key,
                 outcome1="П1", outcome2="П2",
                 k1=sides[_WIN_1], k2=sides[_WIN_2], **base))
 
         # Тоталы: по каждой линии, где есть и Больше, и Меньше
-        for low, lines in totals.items():
-            scope = market_scope(low)
+        for (period, low), lines in totals.items():
+            scope = market_scope(f"{period} {low}".strip())
             for line, sides in lines.items():
                 over, under = sides.get(_TOTAL_OVER), sides.get(_TOTAL_UNDER)
                 if not over or not under:
@@ -253,8 +274,8 @@ class BetBoomParser(BaseParser):
                     k1=over, k2=under, **base))
 
         # Форы: пара «team1(+L)/team2(-L)» = один двухисходный рынок
-        for low, lines in hcaps.items():
-            scope = market_scope(low)
+        for (period, low), lines in hcaps.items():
+            scope = market_scope(f"{period} {low}".strip())
             for line, sides in lines.items():
                 if 1 not in sides:
                     continue
@@ -277,17 +298,32 @@ class BetBoomParser(BaseParser):
         return result
 
     @staticmethod
-    def _winner_rank(low: str) -> tuple[int, str]:
+    def _period(st: dict) -> str:
+        """Нормализованный период ставки («1 карта», «1-й тайм») или ""
+        для всего матча («Основное время», «Матч», «Бой»…)."""
+        period = _text(st, _ST_PERIOD).lower().replace("ё", "е").strip()
+        period = " ".join(period.split())  # встречается хвостовой \t
+        if period in _MAIN_PERIODS:
+            return ""
+        # «Карта 1» → «1 карта»: market_scope ждёт номер перед словом
+        m = _PERIOD_NUM_LAST.match(period)
+        if m:
+            period = f"{m.group(2)} {m.group(1)}"
+        return period
+
+    @staticmethod
+    def _winner_rank(mk: tuple) -> tuple[int, str, str]:
         """Порядок разбора рынков исхода: при коллизии ключей выигрывает
         вариант с ОТ/доп. иннингами (так считают победителя другие БК),
         затем простой «Исход», затем остальные."""
+        period, low = mk
         if "(с от" in low or "иннинг" in low:
             rank = 0
         elif low in _WINNER_BASE:
             rank = 1
         else:
             rank = 2
-        return (rank, low)
+        return (rank, period, low)
 
     @staticmethod
     def _mentions_team(low: str, n1: str, n2: str) -> bool:
