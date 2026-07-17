@@ -74,9 +74,14 @@ SCROLL_SECONDS = float(os.getenv("SCROLL_SECONDS", "25"))
 # BetBoom парсится не через браузер, а через прямой websocket-фид линии
 # (sporthub). Сколько максимум секунд собирать всю прематч-линию за цикл:
 # обычно хватает ~10-15 c на несколько тысяч матчей, ставим запас.
-BETBOOM_FEED_TIMEOUT = float(os.getenv("BETBOOM_FEED_TIMEOUT", "60"))
+BETBOOM_FEED_TIMEOUT = float(os.getenv("BETBOOM_FEED_TIMEOUT", "90"))
 # Лайв-линия меньше прематча — на её сбор нужно меньше времени.
 BETBOOM_LIVE_FEED_TIMEOUT = float(os.getenv("BETBOOM_LIVE_FEED_TIMEOUT", "30"))
+# Забирать ПОЛНУЮ роспись каждого матча BetBoom (все рынки: таймы, карты,
+# угловые, ЖК и т.д.), а не только топ-ставки из дерева турниров.
+# Стоит ~10 МБ трафика на цикл прематча; 0 — только топ-ставки.
+BETBOOM_FULL_MARKETS = os.getenv("BETBOOM_FULL_MARKETS", "1") not in (
+    "0", "false", "no")
 
 # ---- Лайв-режим (матчи в игре) ----
 # Лайв сканируется ОТДЕЛЬНЫМ быстрым циклом: коэффициенты в игре меняются

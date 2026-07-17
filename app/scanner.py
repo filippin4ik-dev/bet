@@ -14,7 +14,8 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from . import db
-from .arbitrage import find_arbs
+from .arbitrage import (_market_group, _neg_hcap, _time_clusters, find_arbs,
+                        norm_team)
 from .config import (LIVE_ODDS_TTL, LIVE_PER_BK_GAP, LIVE_SCAN_INTERVAL,
                      ODDS_TTL, SCAN_INTERVAL)
 from .models import Arb, KIND_LIVE, KIND_PREMATCH, MarketOdds
@@ -84,6 +85,139 @@ class Scanner:
         with self._lock:
             return [o.to_dict()
                     for odds in self._odds_by_bk.values() for o in odds]
+
+    # ---------- матчи: группировка котировок по событиям ----------
+
+    def _all_odds(self) -> list[MarketOdds]:
+        with self._lock:
+            return [o for odds in self._odds_by_bk.values() for o in odds]
+
+    @staticmethod
+    def _event_groups(all_odds: list[MarketOdds]) -> dict[str, list[MarketOdds]]:
+        """Группирует котировки всех БК по событию (матч + время старта).
+
+        Ключ события устойчив между опросами: kind | отсортированная пара
+        нормализованных команд | номер кластера времени старта (разные
+        матчи одной пары команд не сливаются)."""
+        clusters = _time_clusters(all_odds)
+        groups: dict[str, list[MarketOdds]] = {}
+        for o in all_odds:
+            t1, t2 = norm_team(o.team1), norm_team(o.team2)
+            if not t1 or not t2 or t1 == t2:
+                continue
+            teams = frozenset((t1, t2))
+            cluster = 0
+            if o.kind == KIND_PREMATCH and o.start_ts:
+                cluster = clusters.get((o.kind, teams), {}).get(o.start_ts, 0)
+            key = f"{o.kind}|{'|'.join(sorted(teams))}|{cluster}"
+            groups.setdefault(key, []).append(o)
+        return groups
+
+    def matches_snapshot(self) -> list[dict]:
+        """Список всех найденных матчей (сгруппированных по событию)."""
+        groups = self._event_groups(self._all_odds())
+        out = []
+        for event_id, odds in groups.items():
+            # образец с временем старта и самыми длинными именами команд
+            sample = max(odds, key=lambda o: (o.start_ts is not None,
+                                              len(o.team1) + len(o.team2)))
+            books = sorted({o.bookmaker for o in odds})
+            markets = {_market_group(o) for o in odds}
+            start_ts = min((o.start_ts for o in odds if o.start_ts),
+                           default=None)
+            out.append({
+                "id": event_id,
+                "kind": sample.kind,
+                "sport": sample.sport,
+                "match": f"{sample.team1} — {sample.team2}",
+                "team1": sample.team1,
+                "team2": sample.team2,
+                "start_ts": start_ts,
+                "start_time": sample.start_time,
+                "bookmakers": books,
+                "markets_count": len(markets),
+            })
+        return out
+
+    def match_detail(self, event_id: str) -> dict | None:
+        """Полная роспись одного события: все рынки всех БК бок о бок."""
+        groups = self._event_groups(self._all_odds())
+        odds = groups.get(event_id)
+        if not odds:
+            return None
+        sample = max(odds, key=lambda o: (o.start_ts is not None,
+                                          len(o.team1) + len(o.team2)))
+        base_t1 = norm_team(sample.team1)
+
+        markets: dict[str, dict] = {}
+        for o in odds:
+            # ориентация к team1 события: у БК с перевёрнутым порядком
+            # команд исходы меняются местами (тоталы не зависят от порядка)
+            flipped = (norm_team(o.team1) != base_t1
+                       and not o.market_key.startswith("total"))
+            mg = _market_group(o)
+            m = markets.get(mg)
+            if m is None:
+                m = markets[mg] = {
+                    "market": o.market,
+                    "market_key": o.market_key,
+                    "outcome1": o.outcome1,
+                    "outcome2": o.outcome2,
+                    "quotes": {},
+                }
+                if flipped:
+                    m["outcome1"] = self._swap_side(o.outcome2)
+                    m["outcome2"] = self._swap_side(o.outcome1)
+                    if o.market_key.startswith("hcap"):
+                        # в имени рынка — линия team1 СОБЫТИЯ, а не этой БК
+                        h1 = o.market_key.rsplit(":", 1)[1]
+                        m["market"] = o.market.replace(h1, _neg_hcap(h1))
+            k1, k2 = (o.k2, o.k1) if flipped else (o.k1, o.k2)
+            if o.bookmaker not in m["quotes"]:
+                m["quotes"][o.bookmaker] = {"k1": k1, "k2": k2}
+
+        def _sort_key(item):
+            key = item[1]["market_key"]
+            cat = 0 if key.startswith("winner") else \
+                1 if key.startswith("total") else 2
+            parts = key.split(":")
+            scope = parts[1] if len(parts) > 2 else ""
+            try:
+                line = abs(float(parts[-1].replace("+", "")))
+            except ValueError:
+                line = 0.0
+            return (cat, scope, line, key)
+
+        market_rows = []
+        for _, m in sorted(markets.items(), key=_sort_key):
+            m["quotes"] = [
+                {"bookmaker": bk, **ks}
+                for bk, ks in sorted(m["quotes"].items())]
+            market_rows.append(m)
+
+        return {
+            "id": event_id,
+            "kind": sample.kind,
+            "sport": sample.sport,
+            "match": f"{sample.team1} — {sample.team2}",
+            "team1": sample.team1,
+            "team2": sample.team2,
+            "start_ts": min((o.start_ts for o in odds if o.start_ts),
+                            default=None),
+            "start_time": sample.start_time,
+            "bookmakers": sorted({o.bookmaker for o in odds}),
+            "markets": market_rows,
+        }
+
+    @staticmethod
+    def _swap_side(label: str) -> str:
+        """«Ф2 +1.5» → «Ф1 +1.5», «П2» → «П1» (перестановка стороны
+        исхода при перевёрнутом порядке команд у одной из БК)."""
+        for a, b in (("1", "2"), ("2", "1")):
+            for pref in ("Ф", "П"):
+                if label.startswith(pref + a):
+                    return pref + b + label[2:]
+        return label
 
     # ---------- обновление состояния ----------
 

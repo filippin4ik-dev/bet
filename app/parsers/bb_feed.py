@@ -44,16 +44,23 @@ TREE_PREMATCH = 2
 LANG_RU = 8
 
 # Номера полей oneof `type` в bb.sport_ws.v1.MainRequest / MainResponse
+REQ_UNSUBSCRIBE = 2
 REQ_SETTINGS_SET = 3
 REQ_STATE_BY_SPORTS = 4
 REQ_STATE_SPORTS = 6
 REQ_STATE_TOURNAMENTS = 8
+REQ_STATE_MATCHES = 16
 RESP_STATE_BY_SPORTS = 5
 RESP_STATE_SPORTS = 7
 RESP_STATE_TOURNAMENTS = 9
+RESP_STATE_MATCHES = 17
 
 # Сколько турниров подписывать одним запросом (сервер отдаёт их пачкой).
 TOURNAMENTS_PER_REQUEST = 10
+# Серверный лимит одновременных подписок full_match на одно соединение.
+# Получив роспись матча, сразу отписываемся (REQ_UNSUBSCRIBE) и подписываем
+# следующий — так «окно» из 10 подписок прокатывается по всем матчам.
+MATCH_SUBS_LIMIT = 10
 
 
 # ---------------------------------------------------------------------------
@@ -306,6 +313,56 @@ class BBFeedClient:
                 tour = _decode(tsub[8][0])
                 for match_raw in tour.get(3, []):
                     yield sport_name, _decode(match_raw)
+
+    def subscribe_matches(self, match_ids: list[int], deadline: float):
+        """Полная роспись матчей: генератор (match_id, match_dict).
+
+        В дереве турниров у матча только топ-ставки (~7 штук: исход,
+        основная фора и тотал). Подписка state_subscribe_matches отдаёт
+        ВСЕ рынки матча (сотни ставок: таймы, карты, угловые, ЖК и т.д.).
+
+        Сервер разрешает максимум MATCH_SUBS_LIMIT одновременных подписок
+        full_match на соединение, поэтому получив снапшот матча мы сразу
+        отписываемся и подписываем следующий матч.
+        """
+        got = 0
+        i = 0
+        inflight = 0
+        n = len(match_ids)
+        while got < n and time.monotonic() < deadline:
+            while i < n and inflight < MATCH_SUBS_LIMIT:
+                sub = _f_str(1, _uid()) + _f_varint(2, match_ids[i])
+                self._send(REQ_STATE_MATCHES,
+                           _f_str(1, _uid()) + _f_len(2, sub))
+                i += 1
+                inflight += 1
+            try:
+                m = self._recv()
+            except Exception:  # noqa: BLE001  (таймаут сокета и т.п.)
+                break
+            for raw in m.get(RESP_STATE_MATCHES, []):
+                resp = _decode(raw)
+                for sub_raw in resp.get(5, []):
+                    got += 1
+                    inflight -= 1
+                    sub = _decode(sub_raw)
+                    # освобождаем слот подписки (uid эхом в поле 4)
+                    sub_uid = _text(sub, 4)
+                    if sub_uid:
+                        self._send(REQ_UNSUBSCRIBE,
+                                   _f_str(1, _uid()) + _f_str(2, sub_uid))
+                    if 8 not in sub:
+                        continue  # матч не найден / ошибка — пропускаем
+                    match = _decode(sub[8][0])
+                    if 1 not in match:
+                        continue
+                    info = _decode(match[1][0])
+                    mid = _one(info, 1)
+                    if mid:
+                        yield mid, match
+        if got < n:
+            log.warning("BetBoom feed: полная роспись получена для %d из %d "
+                        "матчей (таймаут)", got, n)
 
     # ---- высокоуровневый обход ----
 

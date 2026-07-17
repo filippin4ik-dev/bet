@@ -23,8 +23,8 @@
     <div class="tabs" id="view-tabs">
       <button type="button" data-view="arbs" class="active">💰 Вилки (прематч)</button>
       <button type="button" data-view="live">🔴 Лайв-вилки</button>
-      <button type="button" data-view="odds">📋 Все матчи</button>
-      <button type="button" data-view="live-odds">📺 Лайв-матчи</button>
+      <button type="button" data-view="matches">📋 Матчи</button>
+      <button type="button" data-view="live-matches">📺 Лайв-матчи</button>
     </div>
     <label class="search-label">
       🔍 <input type="search" id="search" placeholder="Поиск: команда, турнир…">
@@ -37,7 +37,7 @@
       БК:
       <select id="bk-filter"><option value="">Все</option></select>
     </label>
-    <label>
+    <label id="min-profit-label">
       Мин. доходность, %:
       <input type="number" id="min-profit" value="0" min="0" step="0.5">
     </label>
@@ -79,22 +79,42 @@
       </tbody>
     </table>
 
-    <table id="odds-table" hidden>
+    <table id="matches-table" hidden>
       <thead>
         <tr>
-          <th class="sortable" data-sort="bookmaker">БК</th>
           <th class="sortable" data-sort="start_ts">Начало</th>
           <th class="sortable" data-sort="sport">Спорт</th>
           <th class="sortable" data-sort="match">Матч</th>
-          <th class="sortable" data-sort="market">Рынок</th>
-          <th class="sortable" data-sort="k1">Исход 1</th>
-          <th class="sortable" data-sort="k2">Исход 2</th>
+          <th>Букмекеры</th>
+          <th class="sortable" data-sort="markets_count">Рынков</th>
         </tr>
       </thead>
-      <tbody id="odds-body">
-        <tr><td colspan="7" class="empty">Загрузка данных…</td></tr>
+      <tbody id="matches-body">
+        <tr><td colspan="5" class="empty">Загрузка данных…</td></tr>
       </tbody>
     </table>
+
+    <section id="match-detail" hidden>
+      <div class="detail-head">
+        <button id="back-btn" type="button">← К списку матчей</button>
+        <div>
+          <h2 id="detail-title">—</h2>
+          <div class="detail-meta" id="detail-meta"></div>
+        </div>
+      </div>
+      <table id="detail-table">
+        <thead>
+          <tr>
+            <th>Рынок</th>
+            <th>Исход 1</th>
+            <th>Исход 2</th>
+          </tr>
+        </thead>
+        <tbody id="detail-body">
+          <tr><td colspan="3" class="empty">Загрузка котировок…</td></tr>
+        </tbody>
+      </table>
+    </section>
   </main>
 
   <footer>
@@ -102,7 +122,10 @@
     Любые двухисходные рынки (победитель, тоталы, форы; голы/карты/углы/сеты/геймы и т.д.) ·
     Прематч и лайв (лайв обновляется чаще) ·
     Обновление каждые <span id="interval">30</span> с ·
-    Источники: Winline, BetBoom, Fonbet, Liga Stavok
+    Источники: <span class="bk-chip bk-winline">Winline</span>
+    <span class="bk-chip bk-betboom">BetBoom</span>
+    <span class="bk-chip bk-fonbet">Fonbet</span>
+    <span class="bk-chip bk-liga">Liga Stavok</span>
   </footer>
 
   <script src="/static/app.js"></script>

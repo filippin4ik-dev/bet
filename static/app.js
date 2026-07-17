@@ -1,21 +1,28 @@
-/* Сканер вилок (прематч) — фронтенд без фреймворков.
- * Опрашивает /api/arbs и /api/odds, рисует таблицы с сортировкой по любому
- * столбцу, поиском и фильтрами; подаёт звук при новой вилке выше порога. */
+/* Сканер вилок — фронтенд без фреймворков.
+ * Вкладки: вилки (прематч/лайв) и матчи (прематч/лайв). Список матчей
+ * сгруппирован по событиям; клик по матчу открывает страницу со ВСЕМИ
+ * котировками этого матча по всем БК (каждая БК своим цветом). */
 
 const POLL_INTERVAL_MS = 10_000;      // прематч — раз в 10 с
 const LIVE_POLL_INTERVAL_MS = 5_000;  // лайв обновляем чаще
 
 const els = {
   body: document.getElementById("arbs-body"),
-  oddsBody: document.getElementById("odds-body"),
+  matchesBody: document.getElementById("matches-body"),
   arbsTable: document.getElementById("arbs-table"),
-  oddsTable: document.getElementById("odds-table"),
+  matchesTable: document.getElementById("matches-table"),
+  matchDetail: document.getElementById("match-detail"),
+  detailTitle: document.getElementById("detail-title"),
+  detailMeta: document.getElementById("detail-meta"),
+  detailBody: document.getElementById("detail-body"),
+  backBtn: document.getElementById("back-btn"),
   viewTabs: document.getElementById("view-tabs"),
   search: document.getElementById("search"),
   sportFilter: document.getElementById("sport-filter"),
   bkFilter: document.getElementById("bk-filter"),
   bkFilterLabel: document.getElementById("bk-filter-label"),
   minProfit: document.getElementById("min-profit"),
+  minProfitLabel: document.getElementById("min-profit-label"),
   bank: document.getElementById("bank"),
   soundOn: document.getElementById("sound-on"),
   soundThreshold: document.getElementById("sound-threshold"),
@@ -33,27 +40,38 @@ const els = {
 let soundAlertProfit = 2.5;
 let alertedKeys = new Set(); // вилки, о которых уже «пропищали»
 
+/* ---------- цвета букмекеров ---------- */
+
+const BK_CLASS = {
+  "Fonbet": "bk-fonbet",       // красный
+  "BetBoom": "bk-betboom",     // синий
+  "Winline": "bk-winline",     // оранжевый
+  "Liga Stavok": "bk-liga",    // зелёный
+  "Лига Ставок": "bk-liga",
+};
+const bkClass = (bk) => BK_CLASS[bk] || "bk-other";
+const bkChip = (bk) => `<span class="bk-chip ${bkClass(bk)}">${escapeHtml(bk)}</span>`;
+
 /* ---------- состояние (сохраняется в localStorage) ---------- */
 
 const state = {
-  view: "arbs",                 // arbs | live | odds | live-odds
+  view: "arbs",                 // arbs | live | matches | live-matches
   search: "",
   sport: "",
   bookmaker: "",
+  openMatch: null,              // id открытого матча (страница котировок)
   sort: {
     arbs: { key: "profit_pct", dir: -1 },
     live: { key: "profit_pct", dir: -1 },
-    odds: { key: "start_ts", dir: 1 },
-    "live-odds": { key: "sport", dir: 1 },
+    matches: { key: "start_ts", dir: 1 },
+    "live-matches": { key: "sport", dir: 1 },
   },
 };
 
-// вилки-режимы (прематч и лайв) рисуются в таблицу вилок, а «все матчи» и
-// «лайв-матчи» — в таблицу котировок
 const isArbView = (v) => v === "arbs" || v === "live";
-const isOddsView = (v) => v === "odds" || v === "live-odds";
+const isMatchesView = (v) => v === "matches" || v === "live-matches";
 // лайв-режимы опрашиваются чаще и берут данные из /api/live/*
-const isLiveView = (v) => v === "live" || v === "live-odds";
+const isLiveView = (v) => v === "live" || v === "live-matches";
 
 function loadState() {
   let saved = {};
@@ -61,6 +79,8 @@ function loadState() {
     saved = JSON.parse(localStorage.getItem("arb-scanner-ui") || "{}") || {};
   } catch (_) { /* повреждённое хранилище — игнорируем */ }
   Object.assign(state, saved, { sort: { ...state.sort, ...(saved.sort || {}) } });
+  if (!["arbs", "live", "matches", "live-matches"].includes(state.view)) state.view = "arbs";
+  state.openMatch = null; // страница котировок не восстанавливается
   els.search.value = state.search;
   const minProfit = localStorage.getItem("arb-scanner-minProfit");
   if (minProfit !== null) els.minProfit.value = minProfit;
@@ -77,7 +97,8 @@ function saveState() {
 /* ---------- данные последнего опроса ---------- */
 
 let lastArbs = [];
-let lastOdds = [];
+let lastMatches = [];
+let lastDetail = null;
 
 /* ---------- звук (Web Audio, без файлов) ---------- */
 
@@ -122,9 +143,11 @@ function applyFilters(rows) {
   const q = state.search.trim().toLowerCase();
   return rows.filter((r) => {
     if (state.sport && rootSport(r.sport) !== state.sport) return false;
-    if (state.view === "odds" && state.bookmaker && r.bookmaker !== state.bookmaker) return false;
+    if (isMatchesView(state.view) && state.bookmaker &&
+        !(r.bookmakers || []).includes(state.bookmaker)) return false;
     if (q) {
-      const hay = `${r.match} ${r.sport} ${r.market} ${r.bookmaker || ""} ${r.k1_bookmaker || ""} ${r.k2_bookmaker || ""}`.toLowerCase();
+      const hay = `${r.match} ${r.sport} ${r.market || ""} ` +
+        `${(r.bookmakers || []).join(" ")} ${r.k1_bookmaker || ""} ${r.k2_bookmaker || ""}`.toLowerCase();
       if (!hay.includes(q)) return false;
     }
     return true;
@@ -137,7 +160,7 @@ function applySort(rows) {
 }
 
 function updateSortIndicators() {
-  const table = isOddsView(state.view) ? els.oddsTable : els.arbsTable;
+  const table = isMatchesView(state.view) ? els.matchesTable : els.arbsTable;
   const { key, dir } = state.sort[state.view];
   document.querySelectorAll("th.sortable").forEach((th) => th.classList.remove("sorted-asc", "sorted-desc"));
   table.querySelectorAll("th.sortable").forEach((th) => {
@@ -146,15 +169,16 @@ function updateSortIndicators() {
 }
 
 function refreshFilterOptions() {
-  const rows = isOddsView(state.view) ? lastOdds : lastArbs;
+  const rows = isMatchesView(state.view) ? lastMatches : lastArbs;
   // В фильтре — только корневые виды спорта, без лиг и росписей
   const sports = [...new Set(rows.map((r) => rootSport(r.sport)))].sort((a, b) => a.localeCompare(b, "ru"));
   fillSelect(els.sportFilter, sports, state.sport, "Все");
-  if (isOddsView(state.view)) {
-    const bks = [...new Set(rows.map((r) => r.bookmaker))].sort();
+  if (isMatchesView(state.view)) {
+    const bks = [...new Set(rows.flatMap((r) => r.bookmakers || []))].sort();
     fillSelect(els.bkFilter, bks, state.bookmaker, "Все");
   }
-  els.bkFilterLabel.hidden = !isOddsView(state.view);
+  els.bkFilterLabel.hidden = !isMatchesView(state.view);
+  els.minProfitLabel.hidden = isMatchesView(state.view);
 }
 
 function fillSelect(sel, values, current, allLabel) {
@@ -171,9 +195,9 @@ function escapeHtml(s) {
 
 const fmtMoney = (n) => Number(n).toLocaleString("ru-RU") + " ₽";
 
-function startCell(r) {
-  if (r.kind === "live") return '<span class="kind live-cell">🔴 LIVE</span>';
-  if (!r.start_ts && !r.start_time) return '<span class="muted">—</span>';
+function startLabel(r) {
+  if (r.kind === "live") return null;
+  if (!r.start_ts && !r.start_time) return null;
   let label = r.start_time || "";
   if (r.start_ts) {
     const d = new Date(r.start_ts * 1000);
@@ -185,6 +209,13 @@ function startCell(r) {
     else if (sameDay(d, tomorrow)) label = `Завтра ${hm}`;
     else label = d.toLocaleDateString("ru-RU", { day: "2-digit", month: "2-digit" }) + ` ${hm}`;
   }
+  return label;
+}
+
+function startCell(r) {
+  if (r.kind === "live") return '<span class="kind live-cell">🔴 LIVE</span>';
+  const label = startLabel(r);
+  if (!label) return '<span class="muted">—</span>';
   return `<span class="kind prematch">${escapeHtml(label)}</span>`;
 }
 
@@ -194,22 +225,52 @@ function renderMeta(shown, total) {
     : `Показано: ${shown} из ${total} (фильтры активны)`;
 }
 
-function renderOdds() {
-  const rows = applySort(applyFilters(lastOdds));
-  renderMeta(rows.length, lastOdds.length);
+function renderMatches() {
+  const rows = applySort(applyFilters(lastMatches));
+  renderMeta(rows.length, lastMatches.length);
   if (!rows.length) {
-    els.oddsBody.innerHTML =
-      '<tr><td colspan="7" class="empty">Ни одного матча под текущие фильтры — ждём окончания обхода БК…</td></tr>';
+    els.matchesBody.innerHTML =
+      '<tr><td colspan="5" class="empty">Ни одного матча под текущие фильтры — ждём окончания обхода БК…</td></tr>';
     return;
   }
-  els.oddsBody.innerHTML = rows.map((o) => `<tr>
-      <td><span class="bk-name">${escapeHtml(o.bookmaker)}</span></td>
-      <td>${startCell(o)}</td>
-      <td>${escapeHtml(o.sport)}</td>
-      <td>${escapeHtml(o.match)}</td>
-      <td>${escapeHtml(o.market)}</td>
-      <td><span class="out">${escapeHtml(o.outcome1)}</span> <span class="coef">${o.k1.toFixed(2)}</span></td>
-      <td><span class="out">${escapeHtml(o.outcome2)}</span> <span class="coef">${o.k2.toFixed(2)}</span></td>
+  els.matchesBody.innerHTML = rows.map((m) => `<tr class="match-row" data-id="${escapeHtml(m.id)}">
+      <td>${startCell(m)}</td>
+      <td>${escapeHtml(m.sport)}</td>
+      <td class="match-name">${escapeHtml(m.match)}</td>
+      <td>${(m.bookmakers || []).map(bkChip).join(" ")}</td>
+      <td class="num">${m.markets_count}</td>
+    </tr>`).join("");
+}
+
+function renderDetail() {
+  const d = lastDetail;
+  if (!d) {
+    els.detailTitle.textContent = "Матч не найден";
+    els.detailMeta.textContent = "Возможно, матч уже начался или котировки устарели.";
+    els.detailBody.innerHTML = '<tr><td colspan="3" class="empty">Нет данных</td></tr>';
+    return;
+  }
+  els.detailTitle.textContent = d.match;
+  const when = d.kind === "live" ? "🔴 LIVE" : (startLabel(d) || "");
+  els.detailMeta.innerHTML =
+    `${escapeHtml(d.sport)} · ${escapeHtml(when)} · ` +
+    (d.bookmakers || []).map(bkChip).join(" ");
+  renderMeta(d.markets.length, d.markets.length);
+
+  if (!d.markets.length) {
+    els.detailBody.innerHTML = '<tr><td colspan="3" class="empty">Котировок нет</td></tr>';
+    return;
+  }
+  const cell = (m, side) => (m.quotes || []).map((q) => {
+    const k = side === 1 ? q.k1 : q.k2;
+    if (k == null) return "";
+    return `<span class="quote ${bkClass(q.bookmaker)}" title="${escapeHtml(q.bookmaker)}">` +
+      `${k.toFixed(2)}</span>`;
+  }).join(" ");
+  els.detailBody.innerHTML = d.markets.map((m) => `<tr>
+      <td class="market-name">${escapeHtml(m.market)}</td>
+      <td><span class="out">${escapeHtml(m.outcome1)}</span> ${cell(m, 1)}</td>
+      <td><span class="out">${escapeHtml(m.outcome2)}</span> ${cell(m, 2)}</td>
     </tr>`).join("");
 }
 
@@ -220,10 +281,11 @@ function renderBkCounts(bookmakers) {
     return `${Math.round(s / 60)} мин назад`;
   };
   const parts = Object.entries(bookmakers || {}).map(([bk, v]) => {
-    if (typeof v === "number") return `${bk}: ${v}`;
-    return `${bk}: ${v.count} (${age(v.age_sec)})`;
+    const cls = bkClass(bk);
+    if (typeof v === "number") return `<span class="${cls}">${escapeHtml(bk)}: ${v}</span>`;
+    return `<span class="${cls}">${escapeHtml(bk)}: ${v.count}</span> <span class="muted">(${age(v.age_sec)})</span>`;
   });
-  els.bkCounts.textContent = parts.length ? parts.join(" · ") : "";
+  els.bkCounts.innerHTML = parts.length ? parts.join(" · ") : "";
 }
 
 function renderArbs() {
@@ -246,8 +308,8 @@ function renderArbs() {
       <td>${escapeHtml(a.sport)}</td>
       <td>${escapeHtml(a.match)}</td>
       <td>${escapeHtml(a.market)}</td>
-      <td><span class="out">${escapeHtml(a.outcome1)}</span> <span class="coef">${a.k1_max.toFixed(2)}</span> <span class="bk">${escapeHtml(a.k1_bookmaker)}</span></td>
-      <td><span class="out">${escapeHtml(a.outcome2)}</span> <span class="coef">${a.k2_max.toFixed(2)}</span> <span class="bk">${escapeHtml(a.k2_bookmaker)}</span></td>
+      <td><span class="out">${escapeHtml(a.outcome1)}</span> <span class="coef">${a.k1_max.toFixed(2)}</span> ${bkChip(a.k1_bookmaker)}</td>
+      <td><span class="out">${escapeHtml(a.outcome2)}</span> <span class="coef">${a.k2_max.toFixed(2)}</span> ${bkChip(a.k2_bookmaker)}</td>
       <td class="profit">${a.profit_pct.toFixed(2)} %</td>
       <td class="stake">${fmtMoney(st.stake1)} <span class="bk">${escapeHtml(a.outcome1)} · ${escapeHtml(a.k1_bookmaker)}</span></td>
       <td class="stake">${fmtMoney(st.stake2)} <span class="bk">${escapeHtml(a.outcome2)} · ${escapeHtml(a.k2_bookmaker)}</span></td>
@@ -256,11 +318,23 @@ function renderArbs() {
   }).join("");
 }
 
+function updateVisibility() {
+  const detailOpen = isMatchesView(state.view) && state.openMatch !== null;
+  els.arbsTable.hidden = !isArbView(state.view);
+  els.matchesTable.hidden = !isMatchesView(state.view) || detailOpen;
+  els.matchDetail.hidden = !detailOpen;
+}
+
 function rerender() {
   refreshFilterOptions();
   updateSortIndicators();
-  if (isOddsView(state.view)) renderOdds();
-  else renderArbs();
+  updateVisibility();
+  if (isMatchesView(state.view)) {
+    if (state.openMatch !== null) renderDetail();
+    else renderMatches();
+  } else {
+    renderArbs();
+  }
 }
 
 /* ---------- опрос API ---------- */
@@ -294,7 +368,7 @@ async function poll() {
 
     lastArbs = data.arbs;
 
-    // Звук — только для НОВЫХ вилок (в лайв-режиме вилок, не в списке матчей)
+    // Звук — только для НОВЫХ вилок (в режимах вилок, не в списке матчей)
     if (state.view === "arbs" || state.view === "live") {
       const hot = data.arbs.filter((a) => a.profit_pct > soundAlertProfit);
       const fresh = hot.filter((a) => !alertedKeys.has(a.match_key));
@@ -305,14 +379,46 @@ async function poll() {
     els.lastScan.textContent = "Ошибка связи с сервером…";
   }
 
-  if (isOddsView(state.view)) {
-    const oddsUrl = state.view === "live-odds" ? "/api/live/odds" : "/api/odds";
-    try {
-      const resp = await fetch(oddsUrl);
-      const data = await resp.json();
-      lastOdds = data.odds;
-    } catch (err) { /* статус уже показан выше */ }
+  if (isMatchesView(state.view)) {
+    if (state.openMatch !== null) {
+      await pollDetail();
+    } else {
+      const url = state.view === "live-matches" ? "/api/live/matches" : "/api/matches";
+      try {
+        const resp = await fetch(url);
+        const data = await resp.json();
+        lastMatches = data.matches;
+      } catch (err) { /* статус уже показан выше */ }
+    }
   }
+  rerender();
+}
+
+async function pollDetail() {
+  if (state.openMatch === null) return;
+  const live = state.view === "live-matches" ? 1 : 0;
+  try {
+    const resp = await fetch(`/api/match?id=${encodeURIComponent(state.openMatch)}&live=${live}`);
+    const data = await resp.json();
+    lastDetail = data.match;
+  } catch (err) {
+    lastDetail = null;
+  }
+}
+
+function openMatch(id) {
+  state.openMatch = id;
+  lastDetail = null;
+  updateVisibility();
+  els.detailTitle.textContent = "Загрузка…";
+  els.detailMeta.textContent = "";
+  els.detailBody.innerHTML = '<tr><td colspan="3" class="empty">Загрузка котировок…</td></tr>';
+  pollDetail().then(rerender);
+}
+
+function closeMatch() {
+  state.openMatch = null;
+  lastDetail = null;
   rerender();
 }
 
@@ -345,14 +451,21 @@ els.viewTabs.addEventListener("click", (e) => {
   const btn = e.target.closest("button[data-view]");
   if (!btn) return;
   state.view = btn.dataset.view;
+  state.openMatch = null;
   saveState();
   els.viewTabs.querySelectorAll("button").forEach(
     (b) => b.classList.toggle("active", b === btn));
-  els.arbsTable.hidden = !isArbView(state.view);
-  els.oddsTable.hidden = !isOddsView(state.view);
+  updateVisibility();
   restartPolling();
   poll();
 });
+
+els.matchesBody.addEventListener("click", (e) => {
+  const row = e.target.closest("tr.match-row");
+  if (row && row.dataset.id) openMatch(row.dataset.id);
+});
+
+els.backBtn.addEventListener("click", closeMatch);
 
 document.querySelectorAll("th.sortable").forEach((th) => {
   th.addEventListener("click", () => {
@@ -362,7 +475,7 @@ document.querySelectorAll("th.sortable").forEach((th) => {
     else {
       sort.key = key;
       // числовые — сначала по убыванию, текст/время — по возрастанию
-      sort.dir = ["profit_pct", "k1", "k2", "k1_max", "k2_max"].includes(key) ? -1 : 1;
+      sort.dir = ["profit_pct", "k1_max", "k2_max", "markets_count"].includes(key) ? -1 : 1;
     }
     saveState();
     rerender();
@@ -381,8 +494,7 @@ function restartPolling() {
 loadState();
 els.viewTabs.querySelectorAll("button").forEach(
   (b) => b.classList.toggle("active", b.dataset.view === state.view));
-els.arbsTable.hidden = !isArbView(state.view);
-els.oddsTable.hidden = !isOddsView(state.view);
+updateVisibility();
 
 poll();
 restartPolling();
