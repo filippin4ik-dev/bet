@@ -36,7 +36,7 @@ let alertedKeys = new Set(); // вилки, о которых уже «проп�
 /* ---------- состояние (сохраняется в localStorage) ---------- */
 
 const state = {
-  view: "arbs",                 // arbs | live | odds
+  view: "arbs",                 // arbs | live | odds | live-odds
   search: "",
   sport: "",
   bookmaker: "",
@@ -44,11 +44,16 @@ const state = {
     arbs: { key: "profit_pct", dir: -1 },
     live: { key: "profit_pct", dir: -1 },
     odds: { key: "start_ts", dir: 1 },
+    "live-odds": { key: "sport", dir: 1 },
   },
 };
 
-// вилки-режимы (прематч и лайв) рисуются в одну таблицу вилок
+// вилки-режимы (прематч и лайв) рисуются в таблицу вилок, а «все матчи» и
+// «лайв-матчи» — в таблицу котировок
 const isArbView = (v) => v === "arbs" || v === "live";
+const isOddsView = (v) => v === "odds" || v === "live-odds";
+// лайв-режимы опрашиваются чаще и берут данные из /api/live/*
+const isLiveView = (v) => v === "live" || v === "live-odds";
 
 function loadState() {
   let saved = {};
@@ -132,7 +137,7 @@ function applySort(rows) {
 }
 
 function updateSortIndicators() {
-  const table = isArbView(state.view) ? els.arbsTable : els.oddsTable;
+  const table = isOddsView(state.view) ? els.oddsTable : els.arbsTable;
   const { key, dir } = state.sort[state.view];
   document.querySelectorAll("th.sortable").forEach((th) => th.classList.remove("sorted-asc", "sorted-desc"));
   table.querySelectorAll("th.sortable").forEach((th) => {
@@ -141,15 +146,15 @@ function updateSortIndicators() {
 }
 
 function refreshFilterOptions() {
-  const rows = isArbView(state.view) ? lastArbs : lastOdds;
+  const rows = isOddsView(state.view) ? lastOdds : lastArbs;
   // В фильтре — только корневые виды спорта, без лиг и росписей
   const sports = [...new Set(rows.map((r) => rootSport(r.sport)))].sort((a, b) => a.localeCompare(b, "ru"));
   fillSelect(els.sportFilter, sports, state.sport, "Все");
-  if (state.view === "odds") {
+  if (isOddsView(state.view)) {
     const bks = [...new Set(rows.map((r) => r.bookmaker))].sort();
     fillSelect(els.bkFilter, bks, state.bookmaker, "Все");
   }
-  els.bkFilterLabel.hidden = state.view !== "odds";
+  els.bkFilterLabel.hidden = !isOddsView(state.view);
 }
 
 function fillSelect(sel, values, current, allLabel) {
@@ -167,6 +172,7 @@ function escapeHtml(s) {
 const fmtMoney = (n) => Number(n).toLocaleString("ru-RU") + " ₽";
 
 function startCell(r) {
+  if (r.kind === "live") return '<span class="kind live-cell">🔴 LIVE</span>';
   if (!r.start_ts && !r.start_time) return '<span class="muted">—</span>';
   let label = r.start_time || "";
   if (r.start_ts) {
@@ -253,14 +259,14 @@ function renderArbs() {
 function rerender() {
   refreshFilterOptions();
   updateSortIndicators();
-  if (isArbView(state.view)) renderArbs();
-  else renderOdds();
+  if (isOddsView(state.view)) renderOdds();
+  else renderArbs();
 }
 
 /* ---------- опрос API ---------- */
 
 async function poll() {
-  const live = state.view === "live";
+  const live = isLiveView(state.view);
   const arbsUrl = live ? "/api/live/arbs" : "/api/arbs";
   try {
     const minProfit = parseFloat(els.minProfit.value) || 0;
@@ -288,18 +294,21 @@ async function poll() {
 
     lastArbs = data.arbs;
 
-    // Звук — только для НОВЫХ вилок с доходностью выше порога
-    const hot = data.arbs.filter((a) => a.profit_pct > soundAlertProfit);
-    const fresh = hot.filter((a) => !alertedKeys.has(a.match_key));
-    if (fresh.length && els.soundOn.checked) beep();
-    alertedKeys = new Set(hot.map((a) => a.match_key));
+    // Звук — только для НОВЫХ вилок (в лайв-режиме вилок, не в списке матчей)
+    if (state.view === "arbs" || state.view === "live") {
+      const hot = data.arbs.filter((a) => a.profit_pct > soundAlertProfit);
+      const fresh = hot.filter((a) => !alertedKeys.has(a.match_key));
+      if (fresh.length && els.soundOn.checked) beep();
+      alertedKeys = new Set(hot.map((a) => a.match_key));
+    }
   } catch (err) {
     els.lastScan.textContent = "Ошибка связи с сервером…";
   }
 
-  if (state.view === "odds") {
+  if (isOddsView(state.view)) {
+    const oddsUrl = state.view === "live-odds" ? "/api/live/odds" : "/api/odds";
     try {
-      const resp = await fetch("/api/odds");
+      const resp = await fetch(oddsUrl);
       const data = await resp.json();
       lastOdds = data.odds;
     } catch (err) { /* статус уже показан выше */ }
@@ -340,7 +349,7 @@ els.viewTabs.addEventListener("click", (e) => {
   els.viewTabs.querySelectorAll("button").forEach(
     (b) => b.classList.toggle("active", b === btn));
   els.arbsTable.hidden = !isArbView(state.view);
-  els.oddsTable.hidden = state.view !== "odds";
+  els.oddsTable.hidden = !isOddsView(state.view);
   restartPolling();
   poll();
 });
@@ -365,7 +374,7 @@ document.querySelectorAll("th.sortable").forEach((th) => {
 let pollTimer = null;
 function restartPolling() {
   if (pollTimer) clearInterval(pollTimer);
-  const ms = state.view === "live" ? LIVE_POLL_INTERVAL_MS : POLL_INTERVAL_MS;
+  const ms = isLiveView(state.view) ? LIVE_POLL_INTERVAL_MS : POLL_INTERVAL_MS;
   pollTimer = setInterval(poll, ms);
 }
 
@@ -373,7 +382,7 @@ loadState();
 els.viewTabs.querySelectorAll("button").forEach(
   (b) => b.classList.toggle("active", b.dataset.view === state.view));
 els.arbsTable.hidden = !isArbView(state.view);
-els.oddsTable.hidden = state.view !== "odds";
+els.oddsTable.hidden = !isOddsView(state.view);
 
 poll();
 restartPolling();
