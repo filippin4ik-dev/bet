@@ -286,6 +286,10 @@ def display_market(key: str, fallback: str) -> str:
         scope = parts[1] if len(parts) >= 2 else ""
         lbl = scope_label(scope)
         return "Победитель" + (f" ({lbl})" if lbl else "")
+    if kind == "bothscore":
+        scope = parts[1] if len(parts) >= 2 else ""
+        lbl = scope_label(scope)
+        return "Обе забьют" + (f" ({lbl})" if lbl else "")
     return fallback
 
 

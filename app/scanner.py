@@ -153,9 +153,11 @@ class Scanner:
         markets: dict[str, dict] = {}
         for o in odds:
             # ориентация к team1 события: у БК с перевёрнутым порядком
-            # команд исходы меняются местами (тоталы не зависят от порядка)
+            # команд исходы меняются местами (тоталы и «обе забьют»
+            # от порядка команд не зависят)
             flipped = (norm_team(o.team1) != base_t1
-                       and not o.market_key.startswith("total"))
+                       and not o.market_key.startswith(("total",
+                                                        "bothscore")))
             mg = _market_group(o)
             m = markets.get(mg)
             if m is None:
@@ -181,7 +183,8 @@ class Scanner:
         def _sort_key(item):
             key = item[1]["market_key"]
             cat = 0 if key.startswith("winner") else \
-                1 if key.startswith("total") else 2
+                1 if key.startswith("bothscore") else \
+                2 if key.startswith("total") else 3
             parts = key.split(":")
             scope = parts[1] if len(parts) > 2 else ""
             try:
