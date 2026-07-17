@@ -69,6 +69,44 @@ def get_odds():
     }
 
 
+def _matches_payload(sc: Scanner) -> dict:
+    snap = sc.snapshot()
+    matches = sc.matches_snapshot()
+    matches.sort(key=lambda m: (m["start_ts"] or float("inf"),
+                                m["sport"], m["match"]))
+    return {
+        "scanning": snap["scanning"],
+        "last_scan": snap["last_scan"],
+        "bookmakers": snap["bookmakers"],
+        "matches": matches,
+    }
+
+
+@app.get("/api/matches")
+def get_matches():
+    """Все найденные прематч-матчи, сгруппированные по событию (все БК)."""
+    return _matches_payload(scanner)
+
+
+@app.get("/api/live/matches")
+def get_live_matches():
+    """Все найденные ЛАЙВ-матчи, сгруппированные по событию (все БК)."""
+    return _matches_payload(live_scanner)
+
+
+@app.get("/api/match")
+def get_match(id: str = Query(..., description="id события из /api/matches"),
+              live: int = Query(0, description="1 — искать в лайв-сканере")):
+    """Полная роспись одного события: все рынки всех БК бок о бок."""
+    sc = live_scanner if live else scanner
+    detail = sc.match_detail(id)
+    if detail is None:
+        # событие могло переехать между сканерами (матч начался)
+        other = scanner if live else live_scanner
+        detail = other.match_detail(id)
+    return {"match": detail}
+
+
 @app.get("/api/live/arbs")
 def get_live_arbs(
     min_profit: float = Query(0.0, ge=0, description="Мин. доходность, %"),
