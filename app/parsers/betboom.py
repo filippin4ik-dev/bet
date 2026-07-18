@@ -20,7 +20,8 @@ BetBoom собирает столько же прематч-матчей, ско
   варианты «Исход (с ОТ)», «1-й тайм: Исход» и т.п. тоже разбираем;
 - любой «…Тотал…» (Больше/Меньше) по каждой линии — голов, карт, углов,
   сетов, геймов, таймов и т.п.; предмет/период берём из имени рынка;
-- любая «…Фора…» (двухисходная, привязана к команде и знаку линии).
+- любая «…Фора…» (двухисходная, привязана к команде и знаку линии);
+- «Обе забьют» Да/Нет (без комбинированных вариантов «…и тотал/исход»).
 Индивидуальные (командные) тоталы/форы пропускаем (это не двухисходный
 рынок всего матча в привычном виде). Предмет/период рынка нормализуется
 общим `market_scope`, чтобы совпадать с тем же рынком у других БК.
@@ -45,6 +46,7 @@ log = logging.getLogger("parsers.betboom")
 _WIN_1, _WIN_2 = "П1", "П2"
 _WIN_X = ("X", "Х")
 _TOTAL_OVER, _TOTAL_UNDER = "Больше", "Меньше"
+_BTS_YES, _BTS_NO = "Да", "Нет"
 
 # Варианты ОСНОВНОГО рынка исхода (весь матч): сопоставляются с рынком
 # «Победитель» других БК (у них победитель обычно учитывает ОТ).
@@ -182,6 +184,7 @@ class BetBoomParser(BaseParser):
         winner_names: dict[tuple, str] = {}
         totals: dict[tuple, dict[float, dict[str, float]]] = {}
         hcaps: dict[tuple, dict[float, dict[int, float]]] = {}
+        both_score: dict[tuple, dict[str, float]] = {}
         n1, n2 = team1.strip().lower(), team2.strip().lower()
 
         for stake_raw in match.get(2, []):
@@ -223,6 +226,13 @@ class BetBoomParser(BaseParser):
                 if side:
                     hcaps.setdefault(mk, {}).setdefault(
                         float(line), {})[side] = factor
+            elif "обе" in low and "забьют" in low \
+                    and short in (_BTS_YES, _BTS_NO) \
+                    and "тотал" not in low and "исход" not in low \
+                    and " и " not in low:
+                # чистый рынок «Обе забьют» Да/Нет (комбинированные
+                # варианты «Обе забьют и тотал/исход» — не он)
+                both_score.setdefault(mk, {})[short] = factor
 
         result: list[MarketOdds] = []
         seen_keys: set[str] = set()
@@ -272,6 +282,23 @@ class BetBoomParser(BaseParser):
                     market=f"Тотал {pref}{pt}", market_key=key,
                     outcome1=f"ТБ {pt}", outcome2=f"ТМ {pt}",
                     k1=over, k2=under, **base))
+
+        # «Обе забьют»: Да/Нет — двухисходный рынок. Основной вариант
+        # (весь матч) → ключ bothscore, периодные — bothscore:<scope>.
+        for (period, low), sides in both_score.items():
+            yes, no = sides.get(_BTS_YES), sides.get(_BTS_NO)
+            if not yes or not no:
+                continue
+            scope = market_scope(f"{period} {low}".strip())
+            key = f"bothscore:{scope}" if scope else "bothscore"
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            name = f"Обе забьют ({period})" if period else "Обе забьют"
+            result.append(MarketOdds(
+                market=name, market_key=key,
+                outcome1="Да", outcome2="Нет",
+                k1=yes, k2=no, **base))
 
         # Форы: пара «team1(+L)/team2(-L)» = один двухисходный рынок
         for (period, low), lines in hcaps.items():

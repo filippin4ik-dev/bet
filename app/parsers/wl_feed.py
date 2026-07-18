@@ -11,6 +11,15 @@ Winline (Angular SPA) получает ВСЮ линию не HTML'ом, а че
                       события, линии) + дельты (обновления/удаления);
 - шаг 4  (лайв)     — снапшот и непрерывные обновления лайв-линии.
 
+Снапшот прематча содержит только ТОП-линии каждого события (~10 штук:
+исход, пара тоталов, пара фор). ПОЛНУЮ роспись события (все линии тоталов,
+фор, таймы/периоды — на порядок больше рынков) сайт запрашивает командой
+«event.plus» (текст «event.plus», затем base64 от [id события:4][0:1]);
+ответ приходит шагом 1118 (GET_EVENT_FILL_NEW). Мы делаем то же самое для
+ВСЕХ прематч-событий по кругу с ограничением частоты (WINLINE_PLUS_RATE
+запросов/с, повтор каждые WINLINE_PLUS_REFRESH с) — так Winline отдаёт
+в несколько раз больше котировок на матч.
+
 Протокол снят с бандла main.*.js сайта (DataListener.addMessage и парсеры
 шагов). Формат кадра: [step:2 байта LE][payload]; кадр может быть сжат
 gzip (магия 1f 8b — распаковываем raw deflate с 10-го байта); step 20000 —
@@ -26,14 +35,16 @@ gzip (магия 1f 8b — распаковываем raw deflate с 10-го б�
 с бэкоффом. Парсеры (прематч/лайв-сканеры) просто читают текущее
 состояние из памяти. При смене протокола правьте номера шагов/поля здесь.
 """
+import base64
 import logging
 import struct
 import threading
 import time
 import zlib
 
-from ..config import (WINLINE_FEED_URL, WINLINE_SNAPSHOT_WAIT,
-                      WINLINE_STALE_AFTER)
+from ..config import (WINLINE_FEED_URL, WINLINE_PLUS_ENABLED,
+                      WINLINE_PLUS_RATE, WINLINE_PLUS_REFRESH,
+                      WINLINE_SNAPSHOT_WAIT, WINLINE_STALE_AFTER)
 
 log = logging.getLogger("parsers.wl_feed")
 
@@ -47,6 +58,13 @@ STEP_PACK = 20000
 STEP_MENU = 16       # виды спорта + tipLines (справочник рынков)
 STEP_PREMATCH = 3    # снапшот/дельты прематч-линии
 STEP_LIVE = 4        # снапшот/дельты лайв-линии
+STEP_FILL = 18       # полная роспись события (ответ на «event.plus»)
+STEP_FILL_NEW = 1118  # то же + id команд (новый клиент шлёт этот шаг)
+
+# Типы линий (idTipEventSrc), которые парсер умеет превращать в
+# двухисходные рынки, — только их и храним из полной росписи (остальное —
+# 1X2 и экзотика src=16, хранить их значит зря жечь память на слабом VPS).
+DECODABLE_SRC = frozenset({1, 3, 4, 6, 7, 15, 61, 71, 151})
 
 # Вложенные шаги прематч-кадра (PREMATCH_STEPS из бандла)
 P_COUNTRY, P_CHAMP, P_EVENT, P_LINE = 1, 2, 3, 4
@@ -133,6 +151,14 @@ class WinlineFeed:
         # Прематч
         self.pre_events: dict[int, dict] = {}
         self.pre_lines: dict[int, dict] = {}
+        # Полная роспись прематч-событий («event.plus», шаг 1118):
+        # event_id -> {line_id: line}. Обновляется по кругу с ограничением
+        # частоты; при удалении события/переподключении — очищается.
+        self.plus_lines: dict[int, dict[int, dict]] = {}
+        # event_id -> monotonic-время последнего ЗАПРОСА полной росписи
+        self._plus_asked: dict[int, float] = {}
+        self._plus_budget = 0.0        # накопленный лимит запросов (rate)
+        self._plus_tick = 0.0          # время последнего пополнения лимита
         # Лайв
         self.live_events: dict[int, dict] = {}
         self.live_lines: dict[int, dict] = {}
@@ -162,12 +188,21 @@ class WinlineFeed:
                 and time.time() - self._last_frame < WINLINE_STALE_AFTER)
 
     def prematch_snapshot(self) -> tuple[dict, dict, dict, list, list]:
-        """(sports, tiplines, champs, events, lines) — копии под локом."""
+        """(sports, tiplines, champs, events, lines) — копии под локом.
+
+        Линии — объединение полной росписи («event.plus») и топ-линий
+        снапшота. Топ-линии кладутся ПОВЕРХ: они обновляются дельтами
+        непрерывно, а роспись — по кругу раз в WINLINE_PLUS_REFRESH с.
+        """
         with self._lock:
+            merged: dict[int, dict] = {}
+            for lines in self.plus_lines.values():
+                merged.update(lines)
+            merged.update(self.pre_lines)
             return (dict(self.sports), dict(self.tiplines),
                     dict(self.champs),
                     [dict(e) for e in self.pre_events.values()],
-                    [dict(ln) for ln in self.pre_lines.values()])
+                    [dict(ln) for ln in merged.values()])
 
     def live_snapshot(self) -> tuple[dict, dict, dict, list, list]:
         with self._lock:
@@ -191,6 +226,8 @@ class WinlineFeed:
             with self._lock:
                 self.pre_events.clear()
                 self.pre_lines.clear()
+                self.plus_lines.clear()
+                self._plus_asked.clear()
                 self.live_events.clear()
                 self.live_lines.clear()
             time.sleep(backoff)
@@ -205,12 +242,15 @@ class WinlineFeed:
         try:
             for cmd in INIT_COMMANDS:
                 ws.send(cmd)
+            self._plus_budget = 0.0
+            self._plus_tick = time.monotonic()
             last_send = time.monotonic()
             last_recv = time.monotonic()
             while True:
                 if time.monotonic() - last_send > KEEPALIVE_EVERY:
                     ws.send("getdate")
                     last_send = time.monotonic()
+                self._pump_plus(ws)
                 try:
                     op, frame = ws.recv_data()
                 except websocket.WebSocketTimeoutException:
@@ -253,6 +293,8 @@ class WinlineFeed:
                 self._prematch_ready.set()
             elif step == STEP_LIVE:
                 self._parse_live(payload)
+            elif step in (STEP_FILL, STEP_FILL_NEW):
+                self._parse_event_fill(payload, step)
         except Exception as exc:  # noqa: BLE001 — не роняем поток фида
             log.warning("Winline feed: ошибка разбора шага %d (%d байт): %s",
                         step, len(payload), exc)
@@ -392,10 +434,87 @@ class WinlineFeed:
                     self.pre_lines[ln["id"]] = ln
             for lid in del_lines:
                 self.pre_lines.pop(lid, None)
+                # удаление линии касается и полной росписи события
+                for lines in self.plus_lines.values():
+                    if lid in lines:
+                        lines.pop(lid, None)
+                        break
             if del_events:
                 gone = set(del_events)
                 self.pre_lines = {k: v for k, v in self.pre_lines.items()
                                   if v["event"] not in gone}
+                for eid in gone:
+                    self.plus_lines.pop(eid, None)
+                    self._plus_asked.pop(eid, None)
+
+    # -- полная роспись события («event.plus» -> шаг 18/1118) --
+
+    def _pump_plus(self, ws) -> None:
+        """Запрашивает полную роспись прематч-событий по кругу.
+
+        Частота ограничена WINLINE_PLUS_RATE запросов/с (сайт шлёт такие
+        запросы при каждом открытии события — умеренный поток нормален);
+        каждое событие повторно опрашивается раз в WINLINE_PLUS_REFRESH с.
+        """
+        if not WINLINE_PLUS_ENABLED or not self._prematch_ready.is_set():
+            return
+        now = time.monotonic()
+        self._plus_budget = min(
+            WINLINE_PLUS_RATE,
+            self._plus_budget + (now - self._plus_tick) * WINLINE_PLUS_RATE)
+        self._plus_tick = now
+        if self._plus_budget < 1 or not self.tiplines:
+            return
+        with self._lock:
+            due = [eid for eid in self.pre_events
+                   if now - self._plus_asked.get(eid, 0.0)
+                   > WINLINE_PLUS_REFRESH]
+        if not due:
+            return
+        # сперва события, которых ещё не спрашивали, затем самые давние
+        due.sort(key=lambda eid: self._plus_asked.get(eid, 0.0))
+        for eid in due[:int(self._plus_budget)]:
+            ws.send("event.plus")
+            ws.send(base64.b64encode(
+                struct.pack("<i", eid) + b"\x00").decode())
+            self._plus_asked[eid] = now
+            self._plus_budget -= 1
+
+    def _parse_event_fill(self, p: bytes, step: int) -> None:
+        """Разбирает полную роспись события (формат класса Me из бандла).
+
+        Кадр: [id события:4] (+ [id команды 1:4][id команды 2:4] для шага
+        1118), затем линии до конца кадра: [id:4][tip:2][маржа касс:2]
+        [маржа сайта:2][favorite:1][koef:строка][кол-во кэфов:4]
+        [кэфы: int32/1e4]. Кэфы уже без маржи — применяем её как сайт.
+        """
+        r = _Reader(p)
+        eid = r.i32()
+        if step == STEP_FILL_NEW:
+            r.i32()
+            r.i32()                        # id команд — не нужны
+        lines: dict[int, dict] = {}
+        end = len(p)
+        while r.i < end:
+            lid = r.u32()
+            tid = r.u16()
+            r.u16()                        # маржа для касс — не наша
+            margin = r.u16() / 1e4         # маржа сайта (CUPIS)
+            fav = r.u8()
+            koef = r.utf()
+            count = r.u32()
+            if count > 31:
+                raise ValueError(f"подозрительный countV {count} @{r.i}")
+            v = [_coef(struct.unpack_from("<i", p, r.i + 4 * k)[0] / 1e4,
+                       margin) for k in range(count)]
+            r.i += 4 * count
+            tl = self.tiplines.get(tid)
+            if tl is not None and tl["src"] in DECODABLE_SRC:
+                lines[lid] = {"id": lid, "event": eid, "tid": tid,
+                              "fav": fav, "koef": koef, "v": v}
+        with self._lock:
+            if eid in self.pre_events:
+                self.plus_lines[eid] = lines
 
     # -- лайв --
 

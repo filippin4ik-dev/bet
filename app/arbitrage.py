@@ -87,6 +87,12 @@ def _explode(o: MarketOdds):
             (f"hcap:{norm_team(o.team1)}:{h1}", o.outcome1, o.k1),
             (f"hcap:{norm_team(o.team2)}:{_neg_hcap(h1)}", o.outcome2, o.k2),
         ]
+    if o.market_key.startswith("bothscore"):
+        # «Обе забьют»: исходы Да/Нет не зависят от порядка команд
+        return [
+            ("bts:yes", o.outcome1, o.k1),
+            ("bts:no", o.outcome2, o.k2),
+        ]
     # победитель (в т.ч. дочерние росписи вроде winner:2сет)
     return [
         (f"team:{norm_team(o.team1)}", o.outcome1, o.k1),
@@ -195,7 +201,7 @@ def find_arbs(odds: Iterable[MarketOdds]) -> list[Arb]:
             continue
         # порядок исходов: для победителя выравниваем к team1/team2 образца
         first, second = _order(s, o1, o2)
-        if s.market_key.startswith(("total", "hcap")):
+        if s.market_key.startswith(("total", "hcap", "bothscore")):
             # метки берём у образца (он ориентирован team1→team2), а не у
             # БК с лучшим кэфом — иначе фора team2 подписалась бы как «Ф1»,
             # если у той БК эта команда идёт первой
@@ -224,6 +230,8 @@ def _order(sample: MarketOdds, o1: _Outcome, o2: _Outcome):
     чтобы столбцы в таблице совпадали с отображаемым матчем."""
     if sample.market_key.startswith("total"):
         first = o1 if o1.oid.startswith("over:") else o2
+    elif sample.market_key.startswith("bothscore"):
+        first = o1 if o1.oid == "bts:yes" else o2
     elif sample.market_key.startswith("hcap"):
         want = f"hcap:{norm_team(sample.team1)}:"
         first = o1 if o1.oid.startswith(want) else o2
