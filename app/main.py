@@ -138,9 +138,21 @@ def get_history(limit: int = Query(100, ge=1, le=1000)):
     return {"history": db.get_history(limit)}
 
 
+class _NoCacheStatic(StaticFiles):
+    """Статика с Cache-Control: no-cache: браузер всегда перепроверяет
+    файл на сервере (304, если не менялся) — после обновления на VPS
+    новые app.js/style.css подхватываются обычным F5, без очистки кэша."""
+
+    async def get_response(self, path, scope):
+        resp = await super().get_response(path, scope)
+        resp.headers["Cache-Control"] = "no-cache"
+        return resp
+
+
 @app.get("/")
 def index():
-    return FileResponse(STATIC_DIR / "index.html")
+    return FileResponse(STATIC_DIR / "index.html",
+                        headers={"Cache-Control": "no-cache"})
 
 
-app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+app.mount("/static", _NoCacheStatic(directory=STATIC_DIR), name="static")

@@ -309,23 +309,50 @@ function renderBkCounts(bookmakers) {
   els.bkCounts.innerHTML = parts.length ? parts.join(" · ") : "";
 }
 
+/* Закреплённые вилки: клик по строке «пришпиливает» её к верху таблицы —
+ * она стоит на месте и обведена, пока жива. Пропала из обновления —
+ * исчезает из таблицы (и открепляется). Особенно нужно в лайве, где
+ * список пересортировывается каждые 5 секунд. */
+let pinnedKeys = [];
+
+function togglePin(key) {
+  const i = pinnedKeys.indexOf(key);
+  if (i >= 0) pinnedKeys.splice(i, 1);
+  else pinnedKeys.push(key);
+  renderArbs();
+}
+
 function renderArbs() {
   const bank = els.bank.value;
   els.arbCount.textContent = `Вилок: ${lastArbs.length}`;
   const rows = applySort(applyFilters(lastArbs));
-  renderMeta(rows.length, lastArbs.length);
 
-  if (!rows.length) {
+  // живые закреплённые — всегда сверху, в порядке закрепления и без
+  // фильтров (закрепили — значит следите за ней); мёртвые открепляются
+  const byKey = new Map(lastArbs.map((a) => [a.match_key, a]));
+  pinnedKeys = pinnedKeys.filter((k) => byKey.has(k));
+  const pinnedSet = new Set(pinnedKeys);
+  const all = [
+    ...pinnedKeys.map((k) => byKey.get(k)),
+    ...rows.filter((a) => !pinnedSet.has(a.match_key)),
+  ];
+  renderMeta(all.length, lastArbs.length);
+
+  if (!all.length) {
     els.body.innerHTML =
       '<tr><td colspan="11" class="empty">Вилок нет — ждём следующего обновления…</td></tr>';
     return;
   }
 
-  els.body.innerHTML = rows.map((a) => {
+  els.body.innerHTML = all.map((a) => {
     const st = a.stakes[bank] || {};
-    const hot = a.profit_pct > soundAlertProfit ? " class=\"hot\"" : "";
-    return `<tr${hot}>
-      <td>${startCell(a)}</td>
+    const pinned = pinnedSet.has(a.match_key);
+    const cls = ["arb-row"];
+    if (pinned) cls.push("pinned");
+    if (a.profit_pct > soundAlertProfit) cls.push("hot");
+    return `<tr class="${cls.join(" ")}" data-key="${escapeHtml(a.match_key)}"
+        title="${pinned ? "Клик — открепить" : "Клик — закрепить вилку сверху"}">
+      <td>${pinned ? "📌 " : ""}${startCell(a)}</td>
       <td>${escapeHtml(a.sport)}</td>
       <td>${escapeHtml(a.match)}</td>
       <td>${escapeHtml(a.market)}</td>
@@ -415,7 +442,13 @@ function refreshBetModal() {
 
 els.body.addEventListener("click", (e) => {
   const btn = e.target.closest("button.bet-btn");
-  if (btn) openBetModal(btn.dataset.key);
+  if (btn) {
+    openBetModal(btn.dataset.key);
+    return;
+  }
+  // клик по строке (не по кнопке/ссылке) — закрепить/открепить вилку
+  const tr = e.target.closest("tr.arb-row");
+  if (tr && !e.target.closest("a")) togglePin(tr.dataset.key);
 });
 
 els.betClose.addEventListener("click", closeBetModal);
