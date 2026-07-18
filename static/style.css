@@ -240,6 +240,19 @@ td.num { font-variant-numeric: tabular-nums; }
 .stake { font-variant-numeric: tabular-nums; }
 .stake .bk { display: block; }
 
+/* ---- закреплённые вилки ---- */
+tr.arb-row { cursor: pointer; }
+tbody tr.pinned {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+  background: rgba(74, 222, 128, 0.08);
+}
+tbody tr.pinned:hover { background: rgba(74, 222, 128, 0.14); }
+tbody tr.pinned.hot {
+  outline-color: var(--hot);
+  background: rgba(251, 191, 36, 0.1);
+}
+
 /* ---- кнопка и модалка быстрой ставки ---- */
 .bet-btn {
   background: rgba(74, 222, 128, 0.12);
