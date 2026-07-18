@@ -35,6 +35,23 @@ const els = {
   arbCount: document.getElementById("arb-count"),
   interval: document.getElementById("interval"),
   tableMeta: document.getElementById("table-meta"),
+  betModal: document.getElementById("bet-modal"),
+  betTitle: document.getElementById("bet-title"),
+  betMeta: document.getElementById("bet-meta"),
+  betClose: document.getElementById("bet-close"),
+  betBank: document.getElementById("bet-bank"),
+  betOut1: document.getElementById("bet-out1"),
+  betOut2: document.getElementById("bet-out2"),
+  betK1: document.getElementById("bet-k1"),
+  betK2: document.getElementById("bet-k2"),
+  betBk1: document.getElementById("bet-bk1"),
+  betBk2: document.getElementById("bet-bk2"),
+  betStake1: document.getElementById("bet-stake1"),
+  betStake2: document.getElementById("bet-stake2"),
+  betLink1: document.getElementById("bet-link1"),
+  betLink2: document.getElementById("bet-link2"),
+  betSummary: document.getElementById("bet-summary"),
+  betOpenBoth: document.getElementById("bet-open-both"),
 };
 
 let soundAlertProfit = 2.5;
@@ -264,8 +281,12 @@ function renderDetail() {
   const cell = (m, side) => (m.quotes || []).map((q) => {
     const k = side === 1 ? q.k1 : q.k2;
     if (k == null) return "";
-    return `<span class="quote ${bkClass(q.bookmaker)}" title="${escapeHtml(q.bookmaker)}">` +
+    const body = `<span class="quote ${bkClass(q.bookmaker)}" title="${escapeHtml(q.bookmaker)}">` +
       `${k.toFixed(2)}</span>`;
+    // кэф — ссылка на страницу события у этой БК (если известна)
+    return q.url
+      ? `<a class="quote-link" href="${escapeHtml(q.url)}" target="_blank" rel="noopener">${body}</a>`
+      : body;
   }).join(" ");
   els.detailBody.innerHTML = d.markets.map((m) => `<tr>
       <td class="market-name">${escapeHtml(m.market)}</td>
@@ -296,7 +317,7 @@ function renderArbs() {
 
   if (!rows.length) {
     els.body.innerHTML =
-      '<tr><td colspan="10" class="empty">Вилок нет — ждём следующего обновления…</td></tr>';
+      '<tr><td colspan="11" class="empty">Вилок нет — ждём следующего обновления…</td></tr>';
     return;
   }
 
@@ -314,9 +335,120 @@ function renderArbs() {
       <td class="stake">${fmtMoney(st.stake1)} <span class="bk">${escapeHtml(a.outcome1)} · ${escapeHtml(a.k1_bookmaker)}</span></td>
       <td class="stake">${fmtMoney(st.stake2)} <span class="bk">${escapeHtml(a.outcome2)} · ${escapeHtml(a.k2_bookmaker)}</span></td>
       <td class="stake">+${fmtMoney(st.profit)}</td>
+      <td><button type="button" class="bet-btn" data-key="${escapeHtml(a.match_key)}">Поставить</button></td>
     </tr>`;
   }).join("");
 }
+
+/* ---------- модалка быстрой ставки ---------- */
+
+let betArb = null;   // вилка, открытая в модалке (обновляется при опросе)
+
+function calcBetStakes(k1, k2, bank) {
+  const s = 1 / k1 + 1 / k2;
+  const stake1 = Math.round(bank * (1 / k1) / s);
+  const stake2 = Math.max(0, Math.round(bank) - stake1);
+  // выигрыш при любом исходе (минимум из двух плеч — из-за округления)
+  const payout = Math.min(stake1 * k1, stake2 * k2);
+  return { stake1, stake2, payout, profit: payout - bank };
+}
+
+function renderBetModal() {
+  const a = betArb;
+  if (!a) return;
+  els.betTitle.textContent = a.match;
+  const when = startLabel(a);
+  els.betMeta.innerHTML = `${escapeHtml(a.sport)} · ${escapeHtml(a.market)}` +
+    (when ? ` · ${escapeHtml(when)}` : "") +
+    ` · доходность <span class="profit">${a.profit_pct.toFixed(2)} %</span>`;
+
+  const bank = Math.max(0, parseFloat(els.betBank.value) || 0);
+  const st = calcBetStakes(a.k1_max, a.k2_max, bank);
+
+  els.betOut1.textContent = a.outcome1;
+  els.betOut2.textContent = a.outcome2;
+  els.betK1.textContent = a.k1_max.toFixed(2);
+  els.betK2.textContent = a.k2_max.toFixed(2);
+  els.betBk1.innerHTML = bkChip(a.k1_bookmaker);
+  els.betBk2.innerHTML = bkChip(a.k2_bookmaker);
+  els.betStake1.textContent = fmtMoney(st.stake1);
+  els.betStake2.textContent = fmtMoney(st.stake2);
+
+  for (const [link, url] of [[els.betLink1, a.k1_url], [els.betLink2, a.k2_url]]) {
+    if (url) { link.href = url; link.hidden = false; }
+    else { link.removeAttribute("href"); link.hidden = true; }
+  }
+
+  els.betSummary.innerHTML = bank > 0
+    ? `Выигрыш при любом исходе: <b>${fmtMoney(Math.round(st.payout))}</b> · ` +
+      `чистая прибыль: <b class="profit">+${fmtMoney(Math.round(st.profit))}</b>`
+    : "Укажите сумму ставки";
+}
+
+function openBetModal(matchKey) {
+  const a = lastArbs.find((x) => x.match_key === matchKey);
+  if (!a) return;
+  betArb = a;
+  els.betBank.value = els.bank.value; // стартуем от выбранного банка
+  els.betModal.hidden = false;
+  renderBetModal();
+}
+
+function closeBetModal() {
+  betArb = null;
+  els.betModal.hidden = true;
+}
+
+// при опросе кэфы могли измениться — обновляем открытую модалку;
+// если вилка исчезла, честно сообщаем (ставить по старым кэфам нельзя)
+function refreshBetModal() {
+  if (!betArb) return;
+  const fresh = lastArbs.find((x) => x.match_key === betArb.match_key);
+  if (fresh) {
+    betArb = fresh;
+    renderBetModal();
+  } else {
+    els.betSummary.innerHTML =
+      '<span class="bet-gone">⚠ Вилка пропала из последнего обновления — кэфы изменились, не ставьте.</span>';
+  }
+}
+
+els.body.addEventListener("click", (e) => {
+  const btn = e.target.closest("button.bet-btn");
+  if (btn) openBetModal(btn.dataset.key);
+});
+
+els.betClose.addEventListener("click", closeBetModal);
+els.betModal.addEventListener("click", (e) => {
+  if (e.target === els.betModal) closeBetModal();
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && !els.betModal.hidden) closeBetModal();
+});
+
+els.betBank.addEventListener("input", renderBetModal);
+
+els.betOpenBoth.addEventListener("click", () => {
+  if (!betArb) return;
+  // открываем обе страницы; если браузер заблокировал всплывающие окна,
+  // остаются прямые ссылки «Открыть БК» в каждом плече
+  if (betArb.k2_url) window.open(betArb.k2_url, "_blank", "noopener");
+  if (betArb.k1_url) window.open(betArb.k1_url, "_blank", "noopener");
+});
+
+document.querySelectorAll(".copy-btn").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    if (!betArb) return;
+    const bank = Math.max(0, parseFloat(els.betBank.value) || 0);
+    const st = calcBetStakes(betArb.k1_max, betArb.k2_max, bank);
+    const val = btn.dataset.copy === "1" ? st.stake1 : st.stake2;
+    navigator.clipboard?.writeText(String(val)).then(() => {
+      const orig = btn.textContent;
+      btn.textContent = "✓ Скопировано";
+      setTimeout(() => { btn.textContent = orig; }, 1200);
+    });
+  });
+});
 
 function updateVisibility() {
   const detailOpen = isMatchesView(state.view) && state.openMatch !== null;
@@ -367,6 +499,7 @@ async function poll() {
     renderBkCounts(data.bookmakers);
 
     lastArbs = data.arbs;
+    refreshBetModal();
 
     // Звук — только для НОВЫХ вилок (в режимах вилок, не в списке матчей)
     if (state.view === "arbs" || state.view === "live") {

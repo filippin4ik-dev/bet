@@ -58,6 +58,8 @@ _WINNER_BASE = {
 # Номера полей ModelsMatch.MatchInfo (bb.sport_ws.v1.models)
 _MI_ID = 1
 _MI_TYPE = 3          # 2 = обычный матч
+_MI_CATEGORY = 9      # id категории (страны/раздела) — для ссылки на матч
+_MI_TOURNAMENT = 10   # id турнира — для ссылки на матч
 _MI_START_DTTM = 13   # ISO-строка «2026-07-17T13:00:00.000Z» (UTC)
 _MI_TEAMS = 16
 # ModelsStake
@@ -110,13 +112,13 @@ class BetBoomParser(BaseParser):
                               tree_type=tree_type)
         try:
             # 1) обход дерева: все матчи, но только топ-ставки
-            matches: dict[int, tuple[str, dict]] = {}
-            for sport_name, match in client.crawl():
+            matches: dict[int, tuple[str, str, dict]] = {}
+            for sport_name, sport_slug, match in client.crawl():
                 if 1 not in match:
                     continue
                 mid = _one(_decode(match[1][0]), 1)
                 if mid:
-                    matches[mid] = (sport_name, match)
+                    matches[mid] = (sport_name, sport_slug, match)
 
             # 2) полная роспись каждого матча (все рынки, а не топ-7).
             # Если ответ по матчу не пришёл — остаются топ-ставки из дерева.
@@ -124,14 +126,15 @@ class BetBoomParser(BaseParser):
                 full_got = 0
                 for mid, full in client.subscribe_matches(
                         list(matches), deadline):
-                    sport_name = matches[mid][0]
-                    matches[mid] = (sport_name, full)
+                    sport_name, sport_slug, _ = matches[mid]
+                    matches[mid] = (sport_name, sport_slug, full)
                     full_got += 1
                 log.info("BetBoom feed: полная роспись по %d/%d матчам",
                          full_got, len(matches))
 
-            for sport_name, match in matches.values():
-                for o in self._parse_match(sport_name, match, now, live):
+            for sport_name, sport_slug, match in matches.values():
+                for o in self._parse_match(sport_name, match, now, live,
+                                           sport_slug):
                     by_key[o.match_key] = o
         except FeedError as exc:
             log.warning("BetBoom feed недоступен: %s", exc)
@@ -148,7 +151,8 @@ class BetBoomParser(BaseParser):
     # ---- разбор одного матча ----
 
     def _parse_match(self, sport: str, match: dict, now: float,
-                     live: bool = False) -> list[MarketOdds]:
+                     live: bool = False,
+                     sport_slug: str = "") -> list[MarketOdds]:
         if 1 not in match:
             return []
         info = _decode(match[_MI_ID][0])
@@ -172,7 +176,8 @@ class BetBoomParser(BaseParser):
 
         base = dict(bookmaker=self.name, sport=sport or "Спорт",
                     team1=team1, team2=team2, kind=kind,
-                    start_time=start_time, start_ts=start_ts)
+                    start_time=start_time, start_ts=start_ts,
+                    url=self._event_url(sport_slug, info, live))
 
         # Группируем ставки по рынкам. Ключ mk = (период, имя рынка):
         # у BetBoom период часто НЕ входит в имя («Исход» с периодом
@@ -323,6 +328,25 @@ class BetBoomParser(BaseParser):
                     k1=sides[1], k2=opp[2], **base))
 
         return result
+
+    @staticmethod
+    def _event_url(slug: str, info: dict, live: bool) -> str | None:
+        """Ссылка на страницу матча: /sport/<slug>/<категория>/<турнир>/<id>
+        (роут снят с бандла sport/[[...all]]: DETAILED_EVENT). Для
+        киберспорта дисциплинарного slug'а в фиде нет — ведём в раздел."""
+        mid = _one(info, _MI_ID)
+        if not mid:
+            return None
+        if slug == "esports":
+            return "https://betboom.ru/esport"
+        if not slug:
+            return "https://betboom.ru/sport/live" if live \
+                else "https://betboom.ru/sport"
+        cat = _one(info, _MI_CATEGORY)
+        tour = _one(info, _MI_TOURNAMENT)
+        if not cat or not tour:
+            return f"https://betboom.ru/sport/{slug}"
+        return f"https://betboom.ru/sport/{slug}/{cat}/{tour}/{mid}"
 
     @staticmethod
     def _period(st: dict) -> str:

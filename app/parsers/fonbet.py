@@ -173,19 +173,33 @@ class FonbetParser(BaseParser):
         # Показываем «Вид спорта · Лига», чтобы работал фильтр по спорту.
         raw_sports = {s["id"]: s for s in data.get("sports", [])}
 
-        def sport_name(sport_id) -> str:
+        def sport_root(sport_id) -> dict | None:
             seg = raw_sports.get(sport_id)
             if not seg:
-                return "Спорт"
+                return None
             root, hops = seg, 0
             while root.get("parentId") in raw_sports and hops < 5:
                 root = raw_sports[root["parentId"]]
                 hops += 1
+            return root
+
+        def sport_name(sport_id) -> str:
+            seg = raw_sports.get(sport_id)
+            if not seg:
+                return "Спорт"
+            root = sport_root(sport_id) or seg
             root_name = root.get("name", "Спорт")
             seg_name = seg.get("name", "")
             if seg_name and seg_name != root_name:
                 return f"{root_name} · {seg_name}"
             return root_name
+
+        def event_url(sport_id, event_id) -> str:
+            # Страница события: fon.bet/sports/<alias>/<segmentId>/<eventId>
+            # (роутер SPA ориентируется на числовой id события в конце)
+            root = sport_root(sport_id)
+            alias = (root or {}).get("alias") or "football"
+            return f"https://fon.bet/sports/{alias}/{sport_id}/{event_id}"
 
         events = {e["id"]: e for e in data.get("events", [])}
 
@@ -231,7 +245,8 @@ class FonbetParser(BaseParser):
             base = dict(bookmaker=self.name, sport=sport,
                         team1=team1, team2=team2,
                         kind=kind, start_time=start_time,
-                        start_ts=float(start_ts) if start_ts else None)
+                        start_ts=float(start_ts) if start_ts else None,
+                        url=event_url(root.get("sportId"), root["id"]))
 
             factors = ef.get("factors", [])
             result.extend(self._winner(factors, base, scope))

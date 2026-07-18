@@ -72,10 +72,11 @@
           <th>Ставка 1</th>
           <th>Ставка 2</th>
           <th>Прибыль</th>
+          <th></th>
         </tr>
       </thead>
       <tbody id="arbs-body">
-        <tr><td colspan="10" class="empty">Загрузка данных…</td></tr>
+        <tr><td colspan="11" class="empty">Загрузка данных…</td></tr>
       </tbody>
     </table>
 
@@ -116,6 +117,64 @@
       </table>
     </section>
   </main>
+
+  <!-- Модалка быстрой ставки: расчёт плеч и переход к купонам обеих БК -->
+  <div id="bet-modal" class="modal-backdrop" hidden>
+    <div class="modal">
+      <div class="modal-head">
+        <div>
+          <h2 id="bet-title">—</h2>
+          <div class="detail-meta" id="bet-meta"></div>
+        </div>
+        <button id="bet-close" type="button" title="Закрыть">✕</button>
+      </div>
+
+      <label class="bet-bank-label">
+        Общая сумма, ₽:
+        <input type="number" id="bet-bank" min="100" step="100" value="5000">
+      </label>
+
+      <div class="bet-legs">
+        <div class="bet-leg" id="bet-leg1">
+          <div class="bet-leg-head">
+            <span class="out" id="bet-out1">—</span>
+            <span class="coef" id="bet-k1">—</span>
+            <span id="bet-bk1"></span>
+          </div>
+          <div class="bet-leg-stake" id="bet-stake1">—</div>
+          <div class="bet-leg-actions">
+            <button type="button" class="copy-btn" data-copy="1">📋 Копировать сумму</button>
+            <a id="bet-link1" class="open-bk" target="_blank" rel="noopener" hidden>Открыть БК ↗</a>
+          </div>
+        </div>
+        <div class="bet-leg" id="bet-leg2">
+          <div class="bet-leg-head">
+            <span class="out" id="bet-out2">—</span>
+            <span class="coef" id="bet-k2">—</span>
+            <span id="bet-bk2"></span>
+          </div>
+          <div class="bet-leg-stake" id="bet-stake2">—</div>
+          <div class="bet-leg-actions">
+            <button type="button" class="copy-btn" data-copy="2">📋 Копировать сумму</button>
+            <a id="bet-link2" class="open-bk" target="_blank" rel="noopener" hidden>Открыть БК ↗</a>
+          </div>
+        </div>
+      </div>
+
+      <div class="bet-summary" id="bet-summary">—</div>
+
+      <div class="bet-actions">
+        <button id="bet-open-both" type="button">Открыть обе БК ↗</button>
+      </div>
+
+      <p class="bet-note">
+        Ставки размещаются вручную на сайтах БК: страницы матчей откроются в
+        новых вкладках, суммы уже посчитаны — кликните нужный кэф и вставьте
+        сумму в купон. Перед ставкой сверьте кэфы: если они изменились, вилка
+        могла исчезнуть.
+      </p>
+    </div>
+  </div>
 
   <footer>
     Формула: 1/К1<sub>max</sub> + 1/К2<sub>max</sub> &lt; 1 ·

@@ -178,7 +178,8 @@ class Scanner:
                         m["market"] = display_market(key, o.market)
             k1, k2 = (o.k2, o.k1) if flipped else (o.k1, o.k2)
             if o.bookmaker not in m["quotes"]:
-                m["quotes"][o.bookmaker] = {"k1": k1, "k2": k2}
+                m["quotes"][o.bookmaker] = {"k1": k1, "k2": k2,
+                                            "url": o.url}
 
         def _sort_key(item):
             key = item[1]["market_key"]

@@ -180,6 +180,7 @@ class LigaStavokParser(BaseParser):
                 bookmaker=self.name, sport=sport,
                 team1=team1, team2=team2, kind=kind,
                 start_time=start_time, start_ts=start_ts,
+                url=self._event_url(event),
             )
             coefs = [c.get_text(strip=True)
                      for c in event.select(_COEF_SELECTORS)]
@@ -193,6 +194,21 @@ class LigaStavokParser(BaseParser):
                     outcome1="П1", outcome2="П2", k1=k1, k2=k2, **base))
             result.extend(parse_totals(event, base, _COEF_SELECTORS))
         return result
+
+    @staticmethod
+    def _event_url(event) -> str | None:
+        """Ссылка на страницу события (первый <a href> внутри строки)."""
+        a = event.find("a", href=True)
+        if a is None and event.name == "a" and event.get("href"):
+            a = event
+        if a is None:
+            return None
+        href = a["href"]
+        if href.startswith("http"):
+            return href
+        if href.startswith("/"):
+            return f"https://www.ligastavok.ru{href}"
+        return None
 
     _VS_RE = re.compile(r"^(.{2,60}?)\s+[—–-]\s+(.{2,60}?)$")
 
