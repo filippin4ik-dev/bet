@@ -305,14 +305,18 @@ class BBFeedClient:
                 tsub = _decode(tsub_raw)
                 # field 6 = sport, field 8 = tournament (с матчами)
                 sport_name = ""
+                sport_slug = ""
                 if 6 in tsub:
                     sport_info = _decode(_decode(tsub[6][0]).get(1, [b""])[0])
                     sport_name = _text(sport_info, 2)
+                    # поле 8 — url-slug вида спорта («football», «tennis»…)
+                    # для сборки ссылки на страницу матча
+                    sport_slug = _text(sport_info, 8)
                 if 8 not in tsub:
                     continue
                 tour = _decode(tsub[8][0])
                 for match_raw in tour.get(3, []):
-                    yield sport_name, _decode(match_raw)
+                    yield sport_name, sport_slug, _decode(match_raw)
 
     def subscribe_matches(self, match_ids: list[int], deadline: float):
         """Полная роспись матчей: генератор (match_id, match_dict).
@@ -367,10 +371,11 @@ class BBFeedClient:
     # ---- высокоуровневый обход ----
 
     def crawl(self):
-        """Генератор (sport_name, match_dict) по всей прематч-линии.
+        """Генератор (sport_name, sport_slug, match_dict) по всей линии.
 
         match_dict — разобранный ModelsMatch: {1: [info_bytes...],
         2: [stake_bytes...]}. Разбирает вызывающий (см. betboom.py).
+        sport_slug — url-slug вида спорта для ссылки на страницу матча.
         """
         deadline = time.monotonic() + self.overall_timeout
         self._connect()

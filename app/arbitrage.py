@@ -56,11 +56,13 @@ def calc_stakes(k1: float, k2: float, bank: float) -> dict:
 class _Outcome:
     """Лучший кэф по одному исходу среди всех БК."""
 
-    __slots__ = ("oid", "label", "odds", "bookmaker")
+    __slots__ = ("oid", "label", "odds", "bookmaker", "url")
 
-    def __init__(self, oid: str, label: str, odds: float, bookmaker: str) -> None:
+    def __init__(self, oid: str, label: str, odds: float, bookmaker: str,
+                 url: str | None = None) -> None:
         self.oid, self.label, self.odds = oid, label, odds
         self.bookmaker = bookmaker
+        self.url = url
 
 
 def _explode(o: MarketOdds):
@@ -173,7 +175,8 @@ def find_arbs(odds: Iterable[MarketOdds]) -> list[Arb]:
         for oid, label, k in _explode(o):
             best = g["outcomes"].get(oid)
             if best is None or k > best.odds:
-                g["outcomes"][oid] = _Outcome(oid, label, k, o.bookmaker)
+                g["outcomes"][oid] = _Outcome(oid, label, k, o.bookmaker,
+                                              o.url)
 
     arbs: list[Arb] = []
     for (kind, teams, cluster, market_group), g in groups.items():
@@ -216,6 +219,7 @@ def find_arbs(odds: Iterable[MarketOdds]) -> list[Arb]:
             outcome1=label1, outcome2=label2,
             k1_max=round(first.odds, 3), k1_bookmaker=first.bookmaker,
             k2_max=round(second.odds, 3), k2_bookmaker=second.bookmaker,
+            k1_url=first.url, k2_url=second.url,
             margin=margin, profit_pct=profit_pct,
             kind=kind, start_time=s.start_time, start_ts=s.start_ts,
             stakes={str(b): calc_stakes(first.odds, second.odds, b) for b in BANKS},

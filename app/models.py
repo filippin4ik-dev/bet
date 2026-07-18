@@ -39,6 +39,7 @@ class MarketOdds:
     kind: str = KIND_PREMATCH      # всегда prematch (live отключён)
     start_time: str | None = None  # время начала (как показывает БК)
     start_ts: float | None = None  # время начала, unix-время (если распознано)
+    url: str | None = None         # страница события на сайте БК (deep-link)
 
     def started(self, now: float) -> bool:
         """Матч уже начался (по распознанному времени старта)?"""
@@ -68,6 +69,7 @@ class MarketOdds:
             "kind": self.kind,
             "start_time": self.start_time,
             "start_ts": self.start_ts,
+            "url": self.url,
         }
 
 
@@ -96,6 +98,8 @@ class Arb:
     start_time: str | None = None
     start_ts: float | None = None
     stakes: dict = field(default_factory=dict)  # {банк: {...}}
+    k1_url: str | None = None   # страница события у БК исхода 1
+    k2_url: str | None = None   # страница события у БК исхода 2
 
     def to_dict(self) -> dict:
         return {
@@ -112,8 +116,10 @@ class Arb:
             "outcome2": self.outcome2,
             "k1_max": self.k1_max,
             "k1_bookmaker": self.k1_bookmaker,
+            "k1_url": self.k1_url,
             "k2_max": self.k2_max,
             "k2_bookmaker": self.k2_bookmaker,
+            "k2_url": self.k2_url,
             "margin": round(self.margin, 4),
             "profit_pct": round(self.profit_pct, 2),
             "stakes": self.stakes,
