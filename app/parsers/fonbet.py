@@ -71,6 +71,22 @@ F_HANDICAPS = [(910, 912), (927, 928), (989, 991), (1569, 1572),
 # Порядок проверен сверкой кэфов с тем же рынком Winline.
 F_BTS_YES, F_BTS_NO = 4241, 4242
 
+# ---- Рынки ПО СЕТАМ (ракеточные виды: теннис/наст. теннис/волейбол и т.п.) ----
+# В теннисе Fonbet отдаёт ОТДЕЛЬНО рынки «по геймам» (основные тоталы/форы
+# выше — счёт в геймах, линии ~20 и форы ~2.5-6.5) и рынки «по сетам»
+# (счёт в выигранных сетах). Их нельзя смешивать: «фора −1.5 по сетам» и
+# «фора −1.5 по геймам» — разные рынки. Сет-рынки помечаем scope="sets",
+# чтобы они сшивались с «Фора/Тотал по сетам» BetBoom, а не с геймами.
+# Тотал сетов (917 ТБ / 918 ТМ, линия 2.5/3.5) и фора по сетам
+# (2421/2422 и 2424/2425, линия ±1.5). Проверено на живой линии тенниса:
+# кэфы зеркальны, линии противоположны, значения сходятся с рынком
+# «по сетам» BetBoom.
+F_SET_TOTALS = [(917, 918)]
+F_SET_HANDICAPS = [(2421, 2422), (2424, 2425)]
+# Виды спорта, где счёт идёт по сетам/партиям (для них включаем сет-рынки).
+_SET_SPORTS = {"теннис", "настольный теннис", "волейбол", "бадминтон",
+               "пляжный волейбол", "падел", "сквош", "падел-теннис"}
+
 
 def _candidate_urls() -> list[str]:
     query = "?lang=ru&scopeMarket=1600"
@@ -253,8 +269,53 @@ class FonbetParser(BaseParser):
             result.extend(self._totals(factors, base, scope))
             result.extend(self._handicaps(factors, base, scope))
             result.extend(self._both_score(factors, base, scope))
+            # Рынки «по сетам» — только для ракеточных видов и только у
+            # основного события (не у дочерних росписей типа «1-й сет»,
+            # где scope уже занят периодом).
+            root_sport = (sport_root(root.get("sportId")) or {}).get("name", "")
+            if not scope and root_sport.lower() in _SET_SPORTS:
+                result.extend(self._set_markets(factors, base))
 
         return result
+
+    def _set_markets(self, factors: list, base: dict) -> list[MarketOdds]:
+        """Тоталы и форы ПО СЕТАМ (scope='sets') — теннис и др. сет-виды."""
+        vals = {f["f"]: f for f in factors}
+        out: list[MarketOdds] = []
+        for over_id, under_id in F_SET_TOTALS:
+            fo, fu = vals.get(over_id), vals.get(under_id)
+            if not fo or not fu:
+                continue
+            over, under = fo.get("v"), fu.get("v")
+            raw_o = fo.get("pt") or fo.get("p")
+            raw_u = fu.get("pt") or fu.get("p")
+            if not over or not under or raw_o is None:
+                continue
+            pt = fmt_total(raw_o)
+            if pt != fmt_total(raw_u):
+                continue
+            out.append(MarketOdds(
+                market=f"Тотал {pt} по сетам", market_key=f"total:sets:{pt}",
+                outcome1=f"ТБ {pt}", outcome2=f"ТМ {pt}",
+                k1=float(over), k2=float(under), **base))
+        seen: set[str] = set()
+        for f1_id, f2_id in F_SET_HANDICAPS:
+            f1, f2 = vals.get(f1_id), vals.get(f2_id)
+            if not f1 or not f2:
+                continue
+            k1, k2 = f1.get("v"), f2.get("v")
+            if not k1 or not k2 or f1.get("pt") is None or f2.get("pt") is None:
+                continue
+            h1 = fmt_hcap(f1["pt"])
+            h2 = fmt_hcap(f2["pt"])
+            if h2 != _neg_hcap(h1) or h1 in seen:
+                continue
+            seen.add(h1)
+            out.append(MarketOdds(
+                market=f"Фора {h1} по сетам", market_key=f"hcap:sets:{h1}",
+                outcome1=f"Ф1 {h1}", outcome2=f"Ф2 {h2}",
+                k1=float(k1), k2=float(k2), **base))
+        return out
 
     def _both_score(self, factors: list, base: dict,
                     scope: str) -> list[MarketOdds]:
