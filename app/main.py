@@ -12,7 +12,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import db
-from .config import SOUND_ALERT_PROFIT
+from .config import LIVE_ENABLED, SOUND_ALERT_PROFIT
 from .models import KIND_LIVE, KIND_PREMATCH
 from .scanner import Scanner
 
@@ -23,7 +23,8 @@ logging.basicConfig(
 
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 
-# Два независимых сканера: прематч (медленный) и лайв (быстрый).
+# Два независимых сканера: прематч (основной) и лайв (опциональный —
+# акцент на прематче, лайв отключается переменной LIVE_ENABLED=0).
 scanner = Scanner(mode=KIND_PREMATCH)
 live_scanner = Scanner(mode=KIND_LIVE)
 
@@ -31,8 +32,12 @@ live_scanner = Scanner(mode=KIND_LIVE)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     db.init_db()
-    tasks = [asyncio.create_task(scanner.run()),
-             asyncio.create_task(live_scanner.run())]
+    tasks = [asyncio.create_task(scanner.run())]
+    if LIVE_ENABLED:
+        tasks.append(asyncio.create_task(live_scanner.run()))
+    else:
+        logging.getLogger("main").info(
+            "Лайв-сканер выключен (LIVE_ENABLED=0) — все ресурсы прематчу")
     yield
     scanner.stop()
     live_scanner.stop()

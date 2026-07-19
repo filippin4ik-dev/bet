@@ -290,6 +290,11 @@ def display_market(key: str, fallback: str) -> str:
         scope = parts[1] if len(parts) >= 2 else ""
         lbl = scope_label(scope)
         return "Обе забьют" + (f" ({lbl})" if lbl else "")
+    if kind == "oddeven":
+        scope = parts[1] if len(parts) >= 2 else ""
+        lbl = scope_label(scope)
+        return "Чет/Нечет" + (f" ({lbl})" if lbl else "")
+    # itotal: имя команды есть только в подписи парсера — показываем её
     return fallback
 
 

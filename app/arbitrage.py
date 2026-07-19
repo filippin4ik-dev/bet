@@ -76,6 +76,16 @@ def _explode(o: MarketOdds):
       стороны одного рынка, а team1(+1.5) — уже другой рынок (другой
       фаворит), ложных вилок не будет.
     """
+    if o.market_key.startswith("itotal"):
+        # itotal:<сторона 1|2>:<scope>:<линия> — тотал ОДНОЙ команды.
+        # Исход привязан к нормализованному имени команды: у БК с
+        # перевёрнутым порядком команд тот же рынок сшивается корректно.
+        _, side, scope, pt = o.market_key.split(":", 3)
+        team = norm_team(o.team1 if side == "1" else o.team2)
+        return [
+            (f"itover:{team}:{scope}:{pt}", o.outcome1, o.k1),
+            (f"itunder:{team}:{scope}:{pt}", o.outcome2, o.k2),
+        ]
     if o.market_key.startswith("total"):
         pt = o.market_key.split(":", 1)[1] if ":" in o.market_key else ""
         return [
@@ -95,6 +105,12 @@ def _explode(o: MarketOdds):
             ("bts:yes", o.outcome1, o.k1),
             ("bts:no", o.outcome2, o.k2),
         ]
+    if o.market_key.startswith("oddeven"):
+        # «Чет/Нечет»: исходы не зависят от порядка команд
+        return [
+            ("oe:even", o.outcome1, o.k1),
+            ("oe:odd", o.outcome2, o.k2),
+        ]
     # победитель (в т.ч. дочерние росписи вроде winner:2сет)
     return [
         (f"team:{norm_team(o.team1)}", o.outcome1, o.k1),
@@ -109,7 +125,13 @@ def _market_group(o: MarketOdds) -> str:
     от того, какая команда «первая», поэтому привязываем знак к
     алфавитно-первой нормализованной команде — тогда обе стороны рынка
     (и при перевёрнутом порядке команд у другой БК) попадают в одну группу.
+    Индивидуальный тотал привязываем к нормализованному ИМЕНИ команды —
+    сторона (1/2) у разных БК может быть разной.
     """
+    if o.market_key.startswith("itotal"):
+        _, side, scope, pt = o.market_key.split(":", 3)
+        team = norm_team(o.team1 if side == "1" else o.team2)
+        return f"itotal:{team}:{scope}:{pt}"
     if not o.market_key.startswith("hcap"):
         return o.market_key
     prefix, h1 = o.market_key.rsplit(":", 1)  # prefix = hcap:<scope>
@@ -204,7 +226,8 @@ def find_arbs(odds: Iterable[MarketOdds]) -> list[Arb]:
             continue
         # порядок исходов: для победителя выравниваем к team1/team2 образца
         first, second = _order(s, o1, o2)
-        if s.market_key.startswith(("total", "hcap", "bothscore")):
+        if s.market_key.startswith(("total", "hcap", "bothscore",
+                                    "itotal", "oddeven")):
             # метки берём у образца (он ориентирован team1→team2), а не у
             # БК с лучшим кэфом — иначе фора team2 подписалась бы как «Ф1»,
             # если у той БК эта команда идёт первой
@@ -232,10 +255,14 @@ def find_arbs(odds: Iterable[MarketOdds]) -> list[Arb]:
 def _order(sample: MarketOdds, o1: _Outcome, o2: _Outcome):
     """Ставит первым исход, соответствующий team1 образца (или ТБ),
     чтобы столбцы в таблице совпадали с отображаемым матчем."""
-    if sample.market_key.startswith("total"):
+    if sample.market_key.startswith("itotal"):
+        first = o1 if o1.oid.startswith("itover:") else o2
+    elif sample.market_key.startswith("total"):
         first = o1 if o1.oid.startswith("over:") else o2
     elif sample.market_key.startswith("bothscore"):
         first = o1 if o1.oid == "bts:yes" else o2
+    elif sample.market_key.startswith("oddeven"):
+        first = o1 if o1.oid == "oe:even" else o2
     elif sample.market_key.startswith("hcap"):
         want = f"hcap:{norm_team(sample.team1)}:"
         first = o1 if o1.oid.startswith(want) else o2
