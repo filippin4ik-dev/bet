@@ -139,8 +139,9 @@ class WinlineParser(BaseParser):
                 start_time=format_start(ev["ts"]) if ev.get("ts") else None,
                 start_ts=float(ev["ts"]) if ev.get("ts") else None,
                 # страница события на сайте (роут снят с бандла main.js:
-                # router.navigate(['stavki/event/' + event.id]))
-                url=f"https://winline.ru/stavki/event/{ev['id']}",
+                # isLive ? '/live/event/' : '/stavki/event/' + event.id)
+                url=("https://winline.ru/live/event/" if live
+                     else "https://winline.ru/stavki/event/") + str(ev["id"]),
             )
             o = self._market(ln, tl, sport_info, base)
             if o is not None:

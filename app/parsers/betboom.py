@@ -390,18 +390,21 @@ class BetBoomParser(BaseParser):
     @staticmethod
     def _event_url(slug: str, info: dict, live: bool) -> str | None:
         """Ссылка на страницу матча: /sport/<slug>/<категория>/<турнир>/<id>
-        (роут снят с бандла sport/[[...all]]: DETAILED_EVENT). Для
-        киберспорта дисциплинарного slug'а в фиде нет — ведём в раздел."""
+        (роут снят с бандла sport/[[...all]]: DETAILED_EVENT), киберспорт —
+        /esport/<категория>/<турнир>/<id>. Оба формата проверены запросом:
+        страница матча отдаёт названия команд."""
         mid = _one(info, _MI_ID)
         if not mid:
             return None
+        cat = _one(info, _MI_CATEGORY)
+        tour = _one(info, _MI_TOURNAMENT)
         if slug == "esports":
-            return "https://betboom.ru/esport"
+            if not cat or not tour:
+                return "https://betboom.ru/esport"
+            return f"https://betboom.ru/esport/{cat}/{tour}/{mid}"
         if not slug:
             return "https://betboom.ru/sport/live" if live \
                 else "https://betboom.ru/sport"
-        cat = _one(info, _MI_CATEGORY)
-        tour = _one(info, _MI_TOURNAMENT)
         if not cat or not tour:
             return f"https://betboom.ru/sport/{slug}"
         return f"https://betboom.ru/sport/{slug}/{cat}/{tour}/{mid}"

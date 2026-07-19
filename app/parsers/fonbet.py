@@ -227,9 +227,13 @@ class FonbetParser(BaseParser):
 
         def event_url(sport_id, event_id) -> str:
             # Страница события: fon.bet/sports/<alias>/<segmentId>/<eventId>
-            # (роутер SPA ориентируется на числовой id события в конце)
+            # (роутер SPA ориентируется на числовой id события в конце;
+            # формат сверен с реальными ссылками сайта). Без alias вида
+            # спорта ведём на страницу всех прематчей fon.bet/sports.
             root = sport_root(sport_id)
-            alias = (root or {}).get("alias") or "football"
+            alias = (root or {}).get("alias")
+            if not alias or not sport_id:
+                return "https://fon.bet/sports"
             return f"https://fon.bet/sports/{alias}/{sport_id}/{event_id}"
 
         events = {e["id"]: e for e in data.get("events", [])}
