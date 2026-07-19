@@ -18,8 +18,11 @@
   сторона фаворита в поле favorite, величина линии в поле koef;
 - «исход 12 периода» (src=151) — победитель 1-го периода/сета;
 - «Обе забьют» (src=15) — Да/Нет (проверено: V[0]=Да, V[1]=Нет, подписи
-  в справочнике R=['Да','Нет']; кэфы сходятся с рынком Fonbet).
-Трёхисходные рынки (1X2: src=2/5/51/9) и экзотику (src=16) пропускаем.
+  в справочнике R=['Да','Нет']; кэфы сходятся с рынком Fonbet);
+- разбираемая «экзотика» (src=16, рынок опознаётся по тексту типа линии):
+  индивидуальные тоталы @1/@2 (весь матч, таймы, периоды/сеты/карты),
+  чет/нечет, тотал/фора 2-го тайма, тотал/фора по сетам (теннис).
+Трёхисходные рынки (1X2: src=2/5/51/9) и прочую экзотику пропускаем.
 
 Порядок кэфов проверен на живых данных: V[0] — исход «1»/«Больше»,
 V[1] — «2»/«Меньше» (по возрастанию линии тотала кэф V[0] растёт).
@@ -34,7 +37,7 @@ from ..config import WINLINE_SNAPSHOT_WAIT
 from ..models import KIND_LIVE, KIND_PREMATCH, MarketOdds
 from .base import BaseParser
 from .html_utils import fmt_hcap, fmt_total, format_start, market_scope
-from .wl_feed import get_feed
+from .wl_feed import DECODABLE_EXOTIC, get_feed
 
 log = logging.getLogger("parsers.winline")
 
@@ -52,6 +55,14 @@ SRC_BOTH_SCORE = 15     # обе забьют (Да/Нет)
 SRC_HCAP_P = 61         # фора N-го периода (koef = «N/линия»)
 SRC_TOTAL_P = 71        # тотал N-го периода (koef = «N/линия»)
 SRC_WINNER_P = 151      # исход 12 периода (только 1-й, koef = «1»)
+SRC_EXOTIC = 16         # «экзотика»: рынок опознаётся по ТЕКСТУ типа линии
+                        # (см. DECODABLE_EXOTIC в wl_feed: инд. тоталы,
+                        # чет/нечет, 2-й тайм, сет-рынки)
+
+# сторона индивидуального рынка: текст типа линии кончается на «@1»/«@2»
+_IT_SIDE_RE = re.compile(r"@([12])$")
+# кэш «текст типа линии разбираем как экзотику» (регэкспы дорогие)
+_EXOTIC_OK: dict[int, bool] = {}
 
 # Плейсхолдеры в тексте рынка: @NP@/@FT@/@RT@ — период по умолчанию,
 # @1HT@ — 1-й тайм/половина, @[a]P@ — N-й период (номер в koef), [a]/[b] —
@@ -148,6 +159,9 @@ class WinlineParser(BaseParser):
 
         scope, label = self._scope(tl, ln["koef"], sport_info)
 
+        if src == SRC_EXOTIC:
+            return self._exotic(ln, tl, base, scope, label, k1, k2)
+
         if src in (SRC_WINNER, SRC_WINNER_P):
             if len(v) != 2:
                 return None  # страховка: победитель всегда двухисходный
@@ -180,24 +194,9 @@ class WinlineParser(BaseParser):
             val = self._line_value(src, ln["koef"])
             if val is None:
                 return None
-            fav = ln.get("fav", 0)
-            # Снапшот кодирует линию форы БЕЗ знака (сторона — в fav), а
-            # полная роспись («event.plus») шлёт строку СО знаком: koef
-            # «1/-1.5» fav=1 — это линия team1 как есть (Ф1 -1.5).
-            # Отрицательное значение уже готовая линия team1; с fav=2 оно
-            # противоречиво — такую линию безопаснее пропустить.
-            if val < 0:
-                if fav == 2:
-                    return None
-                h1 = val
-            elif fav == 1:
-                h1 = -val
-            elif fav == 2:
-                h1 = val
-            elif val == 0:
-                h1 = 0.0
-            else:
-                return None  # линия без стороны — не разобрать
+            h1 = self._h1_from(val, ln.get("fav", 0))
+            if h1 is None:
+                return None
             h1s, h2s = fmt_hcap(h1), fmt_hcap(-h1)
             key = f"hcap:{scope}:{h1s}"
             return MarketOdds(
@@ -208,7 +207,103 @@ class WinlineParser(BaseParser):
 
         return None  # 1X2 и спец-рынки не поддерживаем
 
+    def _exotic(self, ln: dict, tl: dict, base: dict, scope: str,
+                label: str, k1: float, k2: float) -> MarketOdds | None:
+        """Разбираемая «экзотика» src=16 — рынок опознаётся по тексту типа
+        линии (белый список DECODABLE_EXOTIC): индивидуальные тоталы
+        @1/@2, чет/нечет, тотал/фора 2-го тайма, тотал/фора по сетам.
+        Подписи исходов сверяются со справочником (R) — при смене
+        семантики типа линия просто не разберётся, ложных рынков не будет.
+        """
+        text = tl["text"]
+        ok = _EXOTIC_OK.get(tl["id"])
+        if ok is None:
+            ok = any(p.match(text) for p in DECODABLE_EXOTIC)
+            _EXOTIC_OK[tl["id"]] = ok
+        if not ok or len(ln["v"]) != 2:
+            return None
+        r = tl.get("R") or ["", ""]
+        low = text.lower()
+
+        # чет/нечет: порядок кэфов в фиде — [Нечет, Чет] (по справочнику)
+        if "чет" in low:
+            if not r[0].startswith("Нечет") or not r[1].startswith("Чет"):
+                return None
+            return MarketOdds(
+                market=f"Чет/Нечет {label}".strip(),
+                market_key=f"oddeven:{scope}" if scope else "oddeven",
+                outcome1="Чет", outcome2="Нечет",
+                k1=k2, k2=k1, **base)
+
+        if "тотал" in low:
+            if r[0] != "Больше" or r[1] != "Меньше":
+                return None
+            val = self._koef_line(ln["koef"])
+            if val is None:
+                return None
+            pt = fmt_total(val)
+            side_m = _IT_SIDE_RE.search(text)
+            if side_m:                       # индивидуальный тотал @1/@2
+                side = side_m.group(1)
+                team = base["team1"] if side == "1" else base["team2"]
+                return MarketOdds(
+                    market=f"Тотал {pt} ({team}) {label}".strip(),
+                    market_key=f"itotal:{side}:{scope}:{pt}",
+                    outcome1=f"ИТБ {pt}", outcome2=f"ИТМ {pt}",
+                    k1=k1, k2=k2, **base)
+            key = f"total:{scope}:{pt}" if scope else f"total:{pt}"
+            return MarketOdds(               # тотал 2-го тайма / по сетам
+                market=f"Тотал {label} {pt}".replace("  ", " "),
+                market_key=key,
+                outcome1=f"ТБ {pt}", outcome2=f"ТМ {pt}",
+                k1=k1, k2=k2, **base)
+
+        if "фора" in low:                    # фора 2-го тайма / по сетам
+            if r[0] != "1" or r[1] != "2":
+                return None
+            val = self._koef_line(ln["koef"])
+            if val is None:
+                return None
+            h1 = self._h1_from(val, ln.get("fav", 0))
+            if h1 is None:
+                return None
+            h1s, h2s = fmt_hcap(h1), fmt_hcap(-h1)
+            return MarketOdds(
+                market=f"Фора {label} {h1s}".replace("  ", " "),
+                market_key=f"hcap:{scope}:{h1s}",
+                outcome1=f"Ф1 {h1s}", outcome2=f"Ф2 {h2s}",
+                k1=k1, k2=k2, **base)
+
+        return None
+
     # ---------- помощники ----------
+
+    @staticmethod
+    def _h1_from(val: float, fav: int) -> float | None:
+        """Знаковая линия форы team1 из величины линии и стороны фаворита.
+
+        Снапшот кодирует линию форы БЕЗ знака (сторона — в fav), а
+        полная роспись («event.plus») шлёт строку СО знаком: koef
+        «1/-1.5» fav=1 — это линия team1 как есть (Ф1 -1.5).
+        Отрицательное значение уже готовая линия team1; с fav=2 оно
+        противоречиво — такую линию безопаснее пропустить."""
+        if val < 0:
+            return None if fav == 2 else val
+        if fav == 1:
+            return -val
+        if fav == 2:
+            return val
+        if val == 0:
+            return 0.0
+        return None  # линия без стороны — не разобрать
+
+    @staticmethod
+    def _koef_line(koef: str) -> float | None:
+        """Числовая линия из koef экзотики: «11.5» или «N/11.5»."""
+        try:
+            return float(koef.split("/")[-1])
+        except (ValueError, IndexError):
+            return None
 
     @staticmethod
     def _line_value(src: int, koef: str) -> float | None:
@@ -236,6 +331,9 @@ class WinlineParser(BaseParser):
         if "@1HT@" in text:
             word = strings[3] or strings[4] or "тайм"
             period_txt = f"1-й {word}"
+        elif "@2HT@" in text:
+            word = strings[3] or strings[4] or "тайм"
+            period_txt = f"2-й {word}"
         elif "@[a]P@" in text:
             num = koef.split("/", 1)[0] or "1"
             word = strings[4] or "период"

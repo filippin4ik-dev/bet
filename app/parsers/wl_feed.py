@@ -37,6 +37,7 @@ gzip (магия 1f 8b — распаковываем raw deflate с 10-го б�
 """
 import base64
 import logging
+import re
 import struct
 import threading
 import time
@@ -63,8 +64,30 @@ STEP_FILL_NEW = 1118  # то же + id команд (новый клиент ш�
 
 # Типы линий (idTipEventSrc), которые парсер умеет превращать в
 # двухисходные рынки, — только их и храним из полной росписи (остальное —
-# 1X2 и экзотика src=16, хранить их значит зря жечь память на слабом VPS).
+# 1X2 и прочая экзотика, хранить её значит зря жечь память на слабом VPS).
 DECODABLE_SRC = frozenset({1, 3, 4, 6, 7, 15, 61, 71, 151})
+
+# Разбираемая «экзотика» src=16: у неё нет отдельного src, рынок опознаётся
+# по ТЕКСТУ типа линии из справочника (шаблоны — как в бандле сайта).
+# Это двухисходные рынки с явными подписями исходов (R):
+# - индивидуальные тоталы @1/@2 (весь матч, таймы, периоды/сеты/карты);
+# - тотал/фора 2-го тайма (для 1-го есть отдельные src 6/7);
+# - чет/нечет (весь матч, таймы, периоды);
+# - фора по сетам (теннис и др.) — сшивается с сет-рынками Fonbet/BetBoom.
+DECODABLE_EXOTIC = tuple(re.compile(p) for p in (
+    r"^Тотал \[a\] \(@NP@\) @[12]$",       # инд. тотал матча
+    r"^@1HT@ тотал \[a\] @[12]$",          # инд. тотал 1-го тайма
+    r"^@2HT@ тотал \[a\] @[12]$",          # инд. тотал 2-го тайма
+    r"^@\[a\]P@ тотал \[b\] @[12]$",       # инд. тотал периода/сета/карты
+    r"^@2HT@ тотал \[a\]$",                # тотал 2-го тайма
+    r"^@2HT@ фора \[a\]$",                 # фора 2-го тайма
+    r"^Чет/Нечет \(@NP@\)$",               # чет/нечет матча
+    r"^@1HT@ чет/нечет$",                  # чет/нечет 1-го тайма
+    r"^@2HT@ чет/нечет$",                  # чет/нечет 2-го тайма
+    r"^@\[a\]P@ чет/нечет$",               # чет/нечет периода
+    r"^Фора по сетам \[a\] \(@FT@\)$",     # фора по сетам (теннис)
+    r"^Тотал по сетам \[a\] \(@FT@\)$",    # тотал по сетам (теннис)
+))
 
 # Вложенные шаги прематч-кадра (PREMATCH_STEPS из бандла)
 P_COUNTRY, P_CHAMP, P_EVENT, P_LINE = 1, 2, 3, 4
@@ -155,6 +178,9 @@ class WinlineFeed:
         # event_id -> {line_id: line}. Обновляется по кругу с ограничением
         # частоты; при удалении события/переподключении — очищается.
         self.plus_lines: dict[int, dict[int, dict]] = {}
+        # Кэш «разбираемая ли экзотика» по id типа линии (регэкспы по
+        # тексту дорогие, а типов всего сотни)
+        self._exotic_ok: dict[int, bool] = {}
         # event_id -> monotonic-время последнего ЗАПРОСА полной росписи
         self._plus_asked: dict[int, float] = {}
         self._plus_budget = 0.0        # накопленный лимит запросов (rate)
@@ -447,6 +473,17 @@ class WinlineFeed:
                     self.plus_lines.pop(eid, None)
                     self._plus_asked.pop(eid, None)
 
+    def _is_exotic(self, tl: dict) -> bool:
+        """Разбираемая экзотика src=16 (инд. тоталы, чет/нечет, 2-й тайм,
+        сет-рынки)? Ответ кэшируется по id типа линии."""
+        if tl["src"] != 16:
+            return False
+        cached = self._exotic_ok.get(tl["id"])
+        if cached is None:
+            cached = any(p.match(tl["text"]) for p in DECODABLE_EXOTIC)
+            self._exotic_ok[tl["id"]] = cached
+        return cached
+
     # -- полная роспись события («event.plus» -> шаг 18/1118) --
 
     def _pump_plus(self, ws) -> None:
@@ -509,7 +546,8 @@ class WinlineFeed:
                        margin) for k in range(count)]
             r.i += 4 * count
             tl = self.tiplines.get(tid)
-            if tl is not None and tl["src"] in DECODABLE_SRC:
+            if tl is not None and (tl["src"] in DECODABLE_SRC
+                                   or self._is_exotic(tl)):
                 lines[lid] = {"id": lid, "event": eid, "tid": tid,
                               "fav": fav, "koef": koef, "v": v}
         with self._lock:

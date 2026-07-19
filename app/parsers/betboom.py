@@ -47,6 +47,7 @@ _WIN_1, _WIN_2 = "П1", "П2"
 _WIN_X = ("X", "Х")
 _TOTAL_OVER, _TOTAL_UNDER = "Больше", "Меньше"
 _BTS_YES, _BTS_NO = "Да", "Нет"
+_OE_EVEN, _OE_ODD = "Чётный", "Нечётный"
 
 # Варианты ОСНОВНОГО рынка исхода (весь матч): сопоставляются с рынком
 # «Победитель» других БК (у них победитель обычно учитывает ОТ).
@@ -190,7 +191,11 @@ class BetBoomParser(BaseParser):
         totals: dict[tuple, dict[float, dict[str, float]]] = {}
         hcaps: dict[tuple, dict[float, dict[int, float]]] = {}
         both_score: dict[tuple, dict[str, float]] = {}
-        n1, n2 = team1.strip().lower(), team2.strip().lower()
+        odd_even: dict[str, dict[str, float]] = {}
+        # инд. тоталы: (период, сторона 1/2) -> линия -> {Больше/Меньше: кэф}
+        itotals: dict[tuple, dict[float, dict[str, float]]] = {}
+        n1 = team1.strip().lower().replace("ё", "е")
+        n2 = team2.strip().lower().replace("ё", "е")
 
         for stake_raw in match.get(2, []):
             st = _decode(stake_raw)
@@ -206,8 +211,26 @@ class BetBoomParser(BaseParser):
                 continue  # экспрессы, интервалы, игроки… — не наши рынки
             if "ком." in low or "мин." in low or "результативн" in low:
                 continue  # командные рынки и отрезки без явной группы
+            # «Тотал чет/нечет» — двухисходный (Чётный/Нечётный)
+            if low == "тотал чет/нечет" and short in (_OE_EVEN, _OE_ODD):
+                odd_even.setdefault(self._period(st), {})[short] = factor
+                continue
+            # «Тотал <команда>» — индивидуальный тотал (двухисходный).
+            # Берём только рынки, где после «Тотал» стоит РОВНО имя команды
+            # (без предмета): «Тотал геймов <игрок>» — другой рынок, мимо.
+            if low.startswith("тотал ") \
+                    and short in (_TOTAL_OVER, _TOTAL_UNDER):
+                rem = low[len("тотал "):].strip()
+                side = self._team_side(rem, n1, n2)
+                line = _one(st, _ST_ARGUMENT)
+                if side and line is not None \
+                        and len(rem) <= len(n1 if side == 1 else n2) + 3:
+                    itotals.setdefault(
+                        (self._period(st), side), {}).setdefault(
+                        float(line), {})[short] = factor
+                    continue
             if self._mentions_team(low, n1, n2):
-                continue  # командный (индивидуальный) рынок — пропускаем
+                continue  # прочие командные рынки — не разбираем
             period = self._period(st)
             mk = (period, low)
 
@@ -305,6 +328,41 @@ class BetBoomParser(BaseParser):
                 outcome1="Да", outcome2="Нет",
                 k1=yes, k2=no, **base))
 
+        # «Чет/Нечет»: Чётный/Нечётный — двухисходный рынок
+        for period, sides in odd_even.items():
+            even, odd = sides.get(_OE_EVEN), sides.get(_OE_ODD)
+            if not even or not odd:
+                continue
+            scope = market_scope(period)
+            key = f"oddeven:{scope}" if scope else "oddeven"
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            name = f"Чет/Нечет ({period})" if period else "Чет/Нечет"
+            result.append(MarketOdds(
+                market=name, market_key=key,
+                outcome1="Чет", outcome2="Нечет",
+                k1=even, k2=odd, **base))
+
+        # Индивидуальные тоталы: «Тотал <команда>» по каждой линии
+        for (period, side), lines in itotals.items():
+            scope = market_scope(period)
+            team = team1 if side == 1 else team2
+            for line, sides in lines.items():
+                over, under = sides.get(_TOTAL_OVER), sides.get(_TOTAL_UNDER)
+                if not over or not under:
+                    continue
+                pt = fmt_total(line)
+                key = f"itotal:{side}:{scope}:{pt}"
+                if key in seen_keys:
+                    continue
+                seen_keys.add(key)
+                pref = f"{period}: " if period else ""
+                result.append(MarketOdds(
+                    market=f"{pref}Тотал {pt} ({team})", market_key=key,
+                    outcome1=f"ИТБ {pt}", outcome2=f"ИТМ {pt}",
+                    k1=over, k2=under, **base))
+
         # Форы: пара «team1(+L)/team2(-L)» = один двухисходный рынок
         for (period, low), lines in hcaps.items():
             scope = market_scope(f"{period} {low}".strip())
@@ -389,7 +447,7 @@ class BetBoomParser(BaseParser):
     @staticmethod
     def _team_side(short: str, n1: str, n2: str) -> int | None:
         """Определяет, чья это фора: 1 (team1), 2 (team2) или None."""
-        s = short.strip().lower()
+        s = short.strip().lower().replace("ё", "е")
         if not s:
             return None
         if s == n1:
