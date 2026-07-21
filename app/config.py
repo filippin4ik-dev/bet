@@ -84,6 +84,14 @@ USE_SELENIUM = os.getenv("USE_SELENIUM", "1") not in ("0", "false", "no", "")
 # челлендж отклоняется (403) — тогда Лига Ставок отдаст 0 котировок.
 LIGASTAVOK_CHALLENGE_WAIT = float(os.getenv("LIGASTAVOK_CHALLENGE_WAIT",
                                             "45"))
+# Внутренний JSON-API линии Лиги Ставок (быстрый путь: структурированные
+# данные вместо парсинга HTML). Требует пройденного Qrator-cookie (их
+# добывает браузер). Хост можно переопределить, если сменится.
+LIGASTAVOK_API_HOST = os.getenv(
+    "LIGASTAVOK_API_HOST", "https://lds-api-sites.ligastavok.ru").rstrip("/")
+# Сколько страниц линии максимум забирать (по LIGASTAVOK_API_PAGE событий).
+LIGASTAVOK_API_MAX_PAGES = int(os.getenv("LIGASTAVOK_API_MAX_PAGES", "40"))
+LIGASTAVOK_API_PAGE = int(os.getenv("LIGASTAVOK_API_PAGE", "100"))
 
 # Сколько секунд максимум прокручивать страницу, чтобы SPA дорисовала ВСЕ
 # матчи (динамические сайты рендерят список лениво — без прокрутки видна
