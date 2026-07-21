@@ -102,6 +102,21 @@ BETBOOM_LIVE_FEED_TIMEOUT = float(os.getenv("BETBOOM_LIVE_FEED_TIMEOUT", "30"))
 BETBOOM_FULL_MARKETS = os.getenv("BETBOOM_FULL_MARKETS", "1") not in (
     "0", "false", "no")
 
+# ---- bc.game: публичный REST-фид BetBy (sptpub) ----
+# bc.game использует спортивную платформу BetBy. Российское «зеркало» фида
+# отдаёт линию без авторизации. Хост/brand периодически меняются: brand_id
+# парсер пытается узнать с сайта, а хост можно переопределить здесь.
+BCGAME_API_HOST = os.getenv("BCGAME_API_HOST",
+                            "https://cocoesports.com").rstrip("/")
+# brand_id BetBy по умолчанию (актуализируется автоматически с bc.game).
+BCGAME_BRAND_ID = os.getenv("BCGAME_BRAND_ID", "2103509236163162112")
+# Эндпоинт bc.game, отдающий актуальный brand_id провайдера BetBy.
+BCGAME_PROVIDER_URL = os.getenv(
+    "BCGAME_PROVIDER_URL",
+    "https://bc.game/api/platform-sports/v14/home/sport/provider/support/")
+# Язык линии (ru — русские названия команд/рынков для сопоставления с БК РФ).
+BCGAME_LANG = os.getenv("BCGAME_LANG", "ru")
+
 # ---- Лайв-режим (матчи в игре) ----
 # Лайв сканируется ОТДЕЛЬНЫМ быстрым циклом: коэффициенты в игре меняются
 # ежесекундно, поэтому опрос чаще и котировки живут недолго.

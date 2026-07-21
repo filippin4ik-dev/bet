@@ -65,6 +65,7 @@ const BK_CLASS = {
   "Winline": "bk-winline",     // оранжевый
   "Liga Stavok": "bk-liga",    // зелёный
   "Лига Ставок": "bk-liga",
+  "bc.game": "bk-bcgame",      // фиолетовый
 };
 const bkClass = (bk) => BK_CLASS[bk] || "bk-other";
 const bkChip = (bk) => `<span class="bk-chip ${bkClass(bk)}">${escapeHtml(bk)}</span>`;
