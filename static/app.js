@@ -163,8 +163,12 @@ function applyFilters(rows) {
     if (isMatchesView(state.view) && state.bookmaker &&
         !(r.bookmakers || []).includes(state.bookmaker)) return false;
     if (q) {
-      const hay = `${r.match} ${r.sport} ${r.market || ""} ` +
-        `${(r.bookmakers || []).join(" ")} ${r.k1_bookmaker || ""} ${r.k2_bookmaker || ""}`.toLowerCase();
+      // ВАЖНО: .toLowerCase() должен охватывать ВСЮ строку. Без внешних
+      // скобок он применялся только ко второму литералу, а имена команд
+      // (r.match) оставались в верхнем регистре — поиск «синнер» не находил
+      // «Синнер». Оборачиваем всю склейку в скобки.
+      const hay = (`${r.match} ${r.sport} ${r.market || ""} ` +
+        `${(r.bookmakers || []).join(" ")} ${r.k1_bookmaker || ""} ${r.k2_bookmaker || ""}`).toLowerCase();
       if (!hay.includes(q)) return false;
     }
     return true;
