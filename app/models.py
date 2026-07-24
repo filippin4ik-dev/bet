@@ -100,6 +100,10 @@ class Arb:
     stakes: dict = field(default_factory=dict)  # {банк: {...}}
     k1_url: str | None = None   # страница события у БК исхода 1
     k2_url: str | None = None   # страница события у БК исхода 2
+    # Когда вилка ВПЕРВЫЕ появилась (unix-время). Сканер сохраняет момент
+    # первого обнаружения по match_key, пока вилка жива между обновлениями;
+    # пропала и появилась снова — таймер начинается заново.
+    first_seen: float | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -123,4 +127,5 @@ class Arb:
             "margin": round(self.margin, 4),
             "profit_pct": round(self.profit_pct, 2),
             "stakes": self.stakes,
+            "first_seen": self.first_seen,
         }

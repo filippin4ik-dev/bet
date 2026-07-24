@@ -52,6 +52,9 @@ class Scanner:
         self._quotes_checked = 0   # всего котировок (событие x БК)
         # ключи вилок прошлого цикла — чтобы писать в историю только новые
         self._prev_keys: set[str] = set()
+        # когда каждая живая вилка появилась впервые (match_key → unix-время);
+        # пока вилка держится между обновлениями, её таймер не сбрасывается
+        self._first_seen: dict[str, float] = {}
         self._executor = ThreadPoolExecutor(max_workers=len(self.parsers),
                                             thread_name_prefix=f"scan-{mode}")
         self._stop = asyncio.Event()
@@ -271,6 +274,13 @@ class Scanner:
 
         arbs = find_arbs(all_odds)
         with self._lock:
+            # таймер жизни вилки: сохраняем момент первого обнаружения,
+            # исчезнувшие вилки забываем (появятся снова — таймер с нуля)
+            prev_seen = self._first_seen
+            self._first_seen = {}
+            for a in arbs:
+                a.first_seen = prev_seen.get(a.match_key, now)
+                self._first_seen[a.match_key] = a.first_seen
             self._arbs = arbs
             self._last_scan = now
             self._events_checked = len({o.event_key for o in all_odds})

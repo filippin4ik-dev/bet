@@ -65,6 +65,7 @@ const BK_CLASS = {
   "Winline": "bk-winline",     // оранжевый
   "Liga Stavok": "bk-liga",    // зелёный
   "Лига Ставок": "bk-liga",
+  "bc.game": "bk-bcgame",      // фиолетовый
 };
 const bkClass = (bk) => BK_CLASS[bk] || "bk-other";
 const bkChip = (bk) => `<span class="bk-chip ${bkClass(bk)}">${escapeHtml(bk)}</span>`;
@@ -163,8 +164,12 @@ function applyFilters(rows) {
     if (isMatchesView(state.view) && state.bookmaker &&
         !(r.bookmakers || []).includes(state.bookmaker)) return false;
     if (q) {
-      const hay = `${r.match} ${r.sport} ${r.market || ""} ` +
-        `${(r.bookmakers || []).join(" ")} ${r.k1_bookmaker || ""} ${r.k2_bookmaker || ""}`.toLowerCase();
+      // ВАЖНО: .toLowerCase() должен охватывать ВСЮ строку. Без внешних
+      // скобок он применялся только ко второму литералу, а имена команд
+      // (r.match) оставались в верхнем регистре — поиск «синнер» не находил
+      // «Синнер». Оборачиваем всю склейку в скобки.
+      const hay = (`${r.match} ${r.sport} ${r.market || ""} ` +
+        `${(r.bookmakers || []).join(" ")} ${r.k1_bookmaker || ""} ${r.k2_bookmaker || ""}`).toLowerCase();
       if (!hay.includes(q)) return false;
     }
     return true;
@@ -235,6 +240,26 @@ function startCell(r) {
   if (!label) return '<span class="muted">—</span>';
   return `<span class="kind prematch">${escapeHtml(label)}</span>`;
 }
+
+/* Таймер жизни вилки: сколько времени она уже видна сканеру.
+ * Сервер присылает first_seen (unix-время первого обнаружения); ячейки
+ * с классом .arb-age обновляются раз в секунду без перерисовки таблицы. */
+function fmtAge(ts) {
+  if (!ts) return "—";
+  let s = Math.max(0, Math.floor(Date.now() / 1000 - ts));
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  s %= 60;
+  const two = (n) => String(n).padStart(2, "0");
+  return h ? `${h}:${two(m)}:${two(s)}` : `${m}:${two(s)}`;
+}
+
+setInterval(() => {
+  document.querySelectorAll(".arb-age[data-first-seen]").forEach((el) => {
+    const ts = parseFloat(el.dataset.firstSeen);
+    if (ts) el.textContent = fmtAge(ts);
+  });
+}, 1000);
 
 function renderMeta(shown, total) {
   els.tableMeta.textContent = shown === total
@@ -340,7 +365,7 @@ function renderArbs() {
 
   if (!all.length) {
     els.body.innerHTML =
-      '<tr><td colspan="11" class="empty">Вилок нет — ждём следующего обновления…</td></tr>';
+      '<tr><td colspan="12" class="empty">Вилок нет — ждём следующего обновления…</td></tr>';
     return;
   }
 
@@ -359,6 +384,7 @@ function renderArbs() {
       <td><span class="out">${escapeHtml(a.outcome1)}</span> <span class="coef">${a.k1_max.toFixed(2)}</span> ${bkChip(a.k1_bookmaker)}</td>
       <td><span class="out">${escapeHtml(a.outcome2)}</span> <span class="coef">${a.k2_max.toFixed(2)}</span> ${bkChip(a.k2_bookmaker)}</td>
       <td class="profit">${a.profit_pct.toFixed(2)} %</td>
+      <td class="num arb-age" data-first-seen="${a.first_seen || ""}">${fmtAge(a.first_seen)}</td>
       <td class="stake">${fmtMoney(st.stake1)} <span class="bk">${escapeHtml(a.outcome1)} · ${escapeHtml(a.k1_bookmaker)}</span></td>
       <td class="stake">${fmtMoney(st.stake2)} <span class="bk">${escapeHtml(a.outcome2)} · ${escapeHtml(a.k2_bookmaker)}</span></td>
       <td class="stake">+${fmtMoney(st.profit)}</td>
@@ -387,7 +413,10 @@ function renderBetModal() {
   const when = startLabel(a);
   els.betMeta.innerHTML = `${escapeHtml(a.sport)} · ${escapeHtml(a.market)}` +
     (when ? ` · ${escapeHtml(when)}` : "") +
-    ` · доходность <span class="profit">${a.profit_pct.toFixed(2)} %</span>`;
+    ` · доходность <span class="profit">${a.profit_pct.toFixed(2)} %</span>` +
+    (a.first_seen
+      ? ` · ⏱ живёт <span class="arb-age" data-first-seen="${a.first_seen}">${fmtAge(a.first_seen)}</span>`
+      : "");
 
   const bank = Math.max(0, parseFloat(els.betBank.value) || 0);
   const st = calcBetStakes(a.k1_max, a.k2_max, bank);

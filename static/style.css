@@ -169,11 +169,19 @@ tbody tr.hot .profit { color: var(--hot); }
 
 td.empty { text-align: center; color: var(--muted); padding: 32px; }
 
+/* Таймер жизни вилки (сколько она уже видна сканеру) */
+.arb-age {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
 /* ---- фирменные цвета букмекеров ---- */
 .bk-fonbet  { color: #f87171; }   /* Fonbet — красный */
 .bk-betboom { color: #60a5fa; }   /* BetBoom — синий */
 .bk-winline { color: #fb923c; }   /* Winline — оранжевый */
 .bk-liga    { color: #4ade80; }   /* Лига Ставок — зелёный */
+.bk-bcgame  { color: #c084fc; }   /* bc.game — фиолетовый */
 .bk-other   { color: var(--muted); }
 
 .bk-chip {
