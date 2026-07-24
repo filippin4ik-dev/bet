@@ -14,3 +14,7 @@ selenium>=4.21
 # (бинарные протоколы разобраны вручную), браузер им не нужен —
 # только клиент websocket.
 websocket-client>=1.7
+
+# SOCKS-прокси для requests (LIGASTAVOK_PROXY=socks5://...):
+# Qrator Лиги Ставок блокирует IP дата-центров, нужен резидентный прокси.
+pysocks>=1.7

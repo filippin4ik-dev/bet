@@ -92,6 +92,13 @@ LIGASTAVOK_API_HOST = os.getenv(
 # Сколько страниц линии максимум забирать (по LIGASTAVOK_API_PAGE событий).
 LIGASTAVOK_API_MAX_PAGES = int(os.getenv("LIGASTAVOK_API_MAX_PAGES", "40"))
 LIGASTAVOK_API_PAGE = int(os.getenv("LIGASTAVOK_API_PAGE", "100"))
+# Резидентный («жилой») российский прокси ТОЛЬКО для Лиги Ставок: Qrator
+# жёстко блокирует IP дата-центров (403-заглушка даже настоящему браузеру,
+# проверено на московском VPS). Формат: http://user:pass@host:port или
+# socks5://user:pass@host:port. Применяется к HTTP-запросам парсера и к
+# браузеру (браузеру — только host:port, логин/пароль Chrome не умеет:
+# берите прокси с авторизацией по IP, это стандартная опция провайдеров).
+LIGASTAVOK_PROXY = os.getenv("LIGASTAVOK_PROXY", "").strip()
 
 # Сколько секунд максимум прокручивать страницу, чтобы SPA дорисовала ВСЕ
 # матчи (динамические сайты рендерят список лениво — без прокрутки видна

@@ -10,8 +10,9 @@ import os
 import random
 import shutil
 import threading
+from urllib.parse import urlsplit
 
-from ..config import USE_SELENIUM
+from ..config import LIGASTAVOK_PROXY, USE_SELENIUM
 
 log = logging.getLogger("parsers.selenium")
 
@@ -132,6 +133,23 @@ def _make_driver():
         options.add_argument(arg)
     options.add_experimental_option(
         "prefs", {"profile.managed_default_content_settings.images": 2})
+    # Резидентный прокси для Лиги Ставок: браузер сейчас используется
+    # ТОЛЬКО ею (Winline/BetBoom/Fonbet/bc.game ходят без браузера),
+    # поэтому проксируем весь Chrome. Chrome не умеет логин/пароль в
+    # --proxy-server — работает только авторизация по IP.
+    if LIGASTAVOK_PROXY:
+        u = urlsplit(LIGASTAVOK_PROXY)
+        if u.hostname and u.port:
+            scheme = u.scheme or "http"
+            options.add_argument(
+                f"--proxy-server={scheme}://{u.hostname}:{u.port}")
+            if u.username:
+                log.warning(
+                    "Selenium: у прокси задан логин/пароль — браузер их "
+                    "НЕ передаст (ограничение Chrome). Включите у "
+                    "прокси-провайдера авторизацию по IP сервера, иначе "
+                    "Qrator-челлендж не пройдёт (HTTP-API парсера при "
+                    "этом работает с логином/паролем как обычно).")
     # Живые страницы БК грузятся «бесконечно» (websocket, лента ставок) —
     # не ждём полной загрузки, забираем DOM после паузы. Иначе на слабом
     # VPS driver.get() падает с «Timed out receiving message from renderer».
