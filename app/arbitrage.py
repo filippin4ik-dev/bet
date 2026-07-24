@@ -17,7 +17,8 @@ import re
 from collections import defaultdict
 from typing import Iterable
 
-from .config import ARB_MAX_PROFIT, BANKS, START_TS_TOLERANCE
+from .config import (ARB_MAX_PROFIT, BANKS, START_TS_TOLERANCE,
+                     START_TS_TOLERANCE_COMBAT)
 from .models import Arb, KIND_PREMATCH, MarketOdds
 from .parsers.html_utils import display_market, neg_hcap as _neg_hcap
 
@@ -143,6 +144,21 @@ def _market_group(o: MarketOdds) -> str:
     return f"{prefix}:{anchor}"
 
 
+# Корневые виды спорта, где время начала — ОЦЕНОЧНОЕ (бой на карде MMA/
+# бокса начинается «после предыдущего») и у разных БК расходится на часы.
+# Для них действует большой допуск START_TS_TOLERANCE_COMBAT: одна пара
+# бойцов не дерётся дважды за день, ложной склейки не будет.
+_COMBAT_ROOTS = {"единоборства", "смешанные единоборства", "бокс", "mma",
+                 "ufc", "кикбоксинг", "муай-тай", "бои без правил"}
+
+
+def _start_tolerance(sport: str) -> float:
+    """Допуск расхождения времени старта для вида спорта котировки."""
+    root = sport.split("·")[0].strip().lower().replace("ё", "е")
+    return START_TS_TOLERANCE_COMBAT if root in _COMBAT_ROOTS \
+        else START_TS_TOLERANCE
+
+
 def _time_clusters(odds: list[MarketOdds]) -> dict[tuple, dict]:
     """Кластеры времени старта по каждому событию (kind, пара команд).
 
@@ -150,19 +166,26 @@ def _time_clusters(odds: list[MarketOdds]) -> dict[tuple, dict]:
     ответный, мужской и женский в один день, разные лиги). Если у двух БК
     время старта различается больше допуска — это разные матчи, их кэфы
     нельзя сшивать в одну вилку. Часовые пояса БК уже приведены к общему
-    unix-времени, поэтому допуск маленький (START_TS_TOLERANCE).
+    unix-времени, поэтому допуск маленький (START_TS_TOLERANCE); для
+    единоборств — большой (см. _COMBAT_ROOTS): там время боя оценочное.
     """
     ts_by_event: dict[tuple, set] = defaultdict(set)
+    tol_by_event: dict[tuple, float] = {}
     for o in odds:
         if o.kind == KIND_PREMATCH and o.start_ts:
             teams = frozenset((norm_team(o.team1), norm_team(o.team2)))
-            ts_by_event[(o.kind, teams)].add(o.start_ts)
+            key = (o.kind, teams)
+            ts_by_event[key].add(o.start_ts)
+            tol = _start_tolerance(o.sport)
+            if tol > tol_by_event.get(key, 0.0):
+                tol_by_event[key] = tol
     clusters: dict[tuple, dict] = {}
     for key, ts_set in ts_by_event.items():
+        tol = tol_by_event.get(key, START_TS_TOLERANCE)
         mapping: dict[float, int] = {}
         cluster, prev = 0, None
         for ts in sorted(ts_set):
-            if prev is not None and ts - prev > START_TS_TOLERANCE:
+            if prev is not None and ts - prev > tol:
                 cluster += 1
             mapping[ts] = cluster
             prev = ts
