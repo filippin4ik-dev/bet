@@ -92,6 +92,26 @@ LIGASTAVOK_API_HOST = os.getenv(
 # Сколько страниц линии максимум забирать (по LIGASTAVOK_API_PAGE событий).
 LIGASTAVOK_API_MAX_PAGES = int(os.getenv("LIGASTAVOK_API_MAX_PAGES", "40"))
 LIGASTAVOK_API_PAGE = int(os.getenv("LIGASTAVOK_API_PAGE", "100"))
+# Резидентный («жилой») российский прокси ТОЛЬКО для Лиги Ставок: Qrator
+# жёстко блокирует IP дата-центров (403-заглушка даже настоящему браузеру,
+# проверено на московском VPS). Формат: http://user:pass@host:port или
+# socks5://user:pass@host:port. Применяется к HTTP-запросам парсера и к
+# браузеру (браузеру — только host:port, логин/пароль Chrome не умеет:
+# берите прокси с авторизацией по IP, это стандартная опция провайдеров).
+LIGASTAVOK_PROXY = os.getenv("LIGASTAVOK_PROXY", "").strip()
+
+# Включена ли Лига Ставок. По умолчанию — АВТО: парсер работает, только
+# если задан резидентный прокси (LIGASTAVOK_PROXY). Без прокси с серверного
+# IP Qrator всё равно отдаёт заглушку, а каждый цикл впустую тратил ~50 с
+# на рендер браузером. Явное значение: LIGASTAVOK_ENABLED=1 — включить
+# всегда (например, «жилой» IP без прокси), 0 — выключить всегда.
+_LS_RAW = os.getenv("LIGASTAVOK_ENABLED", "").strip().lower()
+if _LS_RAW in ("1", "true", "yes"):
+    LIGASTAVOK_ENABLED = True
+elif _LS_RAW in ("0", "false", "no"):
+    LIGASTAVOK_ENABLED = False
+else:
+    LIGASTAVOK_ENABLED = bool(LIGASTAVOK_PROXY)
 
 # Сколько секунд максимум прокручивать страницу, чтобы SPA дорисовала ВСЕ
 # матчи (динамические сайты рендерят список лениво — без прокрутки видна

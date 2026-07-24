@@ -29,7 +29,7 @@ from bs4 import BeautifulSoup
 
 from ..config import (LIGASTAVOK_API_HOST, LIGASTAVOK_API_MAX_PAGES,
                       LIGASTAVOK_API_PAGE, LIGASTAVOK_CHALLENGE_WAIT,
-                      SCROLL_SECONDS)
+                      LIGASTAVOK_PROXY, SCROLL_SECONDS)
 from ..models import KIND_LIVE, KIND_PREMATCH, MarketOdds
 from .base import BaseParser
 from .html_utils import (SOUP_PARSER, fmt_hcap, fmt_total, format_start,
@@ -64,6 +64,12 @@ class LigaStavokParser(BaseParser):
         super().__init__()
         self._qrator_warned = False
         self._have_cookies = False
+        if LIGASTAVOK_PROXY:
+            # Все HTTP-запросы Лиги Ставок — через резидентный прокси
+            # (сам сайт и его API; остальных БК это не касается).
+            self.session.proxies.update({"http": LIGASTAVOK_PROXY,
+                                         "https": LIGASTAVOK_PROXY})
+            log.info("Liga Stavok: HTTP-запросы идут через прокси")
 
     # ---------- публичный интерфейс ----------
 
@@ -74,11 +80,14 @@ class LigaStavokParser(BaseParser):
 
     def _fetch(self, live: bool) -> list[MarketOdds]:
         kind = KIND_LIVE if live else KIND_PREMATCH
-        # 1) быстрый путь: JSON-API с уже добытой Qrator-cookie
+        # 1) быстрый путь: JSON-API. Пробуем ДАЖЕ без Qrator-cookie:
+        # с «жилого» российского IP (или через резидентный прокси,
+        # LIGASTAVOK_PROXY) мобильный API отвечает и так — тогда браузер
+        # вообще не нужен.
+        odds = self._fetch_via_api(kind)
+        if odds:
+            return odds
         if self._have_cookies:
-            odds = self._fetch_via_api(kind)
-            if odds:
-                return odds
             log.info("Liga Stavok: API не отдал линию с текущими cookie — "
                      "обновляю через браузер")
             self._have_cookies = False
@@ -97,9 +106,24 @@ class LigaStavokParser(BaseParser):
                 return odds
             log.warning(
                 "Liga Stavok: страница загрузилась, но ни API, ни HTML не "
-                "дали событий — вероятно, сменились API/вёрстка или IP не "
-                "«жилой» российский")
+                "дали событий (%s) — вероятно, IP не «жилой» российский "
+                "(Qrator отдаёт заглушку) либо сменились API/вёрстка. "
+                "Поможет резидентный прокси: LIGASTAVOK_PROXY (см. README).",
+                self._page_hint(snaps[-1]))
         return []
+
+    @staticmethod
+    def _page_hint(html: str) -> str:
+        """Короткая подсказка, ЧТО за страницу отдал сайт (для логов):
+        заголовок + признак заглушки «доступ ограничен»."""
+        m = re.search(r"<title[^>]*>(.*?)</title>", html,
+                      re.IGNORECASE | re.DOTALL)
+        title = " ".join(m.group(1).split())[:80] if m else "без <title>"
+        low = html.lower()
+        blocked = any(w in low for w in ("error-img", "block-info",
+                                         "доступ ограничен", "access denied"))
+        return f"страница: «{title}»" + (", похоже на заглушку блокировки"
+                                         if blocked else "")
 
     # ---------- JSON-API ----------
 
