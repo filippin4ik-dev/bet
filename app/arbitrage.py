@@ -7,7 +7,10 @@
 - событие идентифицируется НЕупорядоченной парой нормализованных команд;
 - исход привязан не к позиции (1/2), а к конкретной команде (для победителя)
   или к стороне тотала (over/under для линии pt);
-- лучшие кэфы берутся по каждому исходу среди РАЗНЫХ БК.
+- перебираются ВСЕ комбинации пар БК (кэф исхода 1 у одной БК × кэф
+  исхода 2 у другой): выводится каждая комбинация с 1/К1 + 1/К2 < 1,
+  а не только лучшая — пользователь видит все вилки, включая те, где
+  кэф ниже максимального.
 """
 import logging
 import re
@@ -54,7 +57,7 @@ def calc_stakes(k1: float, k2: float, bank: float) -> dict:
 
 
 class _Outcome:
-    """Лучший кэф по одному исходу среди всех БК."""
+    """Лучший кэф по одному исходу у ОДНОЙ БК."""
 
     __slots__ = ("oid", "label", "odds", "bookmaker", "url")
 
@@ -195,58 +198,74 @@ def find_arbs(odds: Iterable[MarketOdds]) -> list[Arb]:
         g["sample"] = g["sample"] or o
         g["books"].add(o.bookmaker)
         for oid, label, k in _explode(o):
-            best = g["outcomes"].get(oid)
-            if best is None or k > best.odds:
-                g["outcomes"][oid] = _Outcome(oid, label, k, o.bookmaker,
-                                              o.url)
+            # по каждому исходу храним лучший кэф КАЖДОЙ БК отдельно —
+            # дальше перебираются все комбинации пар БК
+            per_bk = g["outcomes"].setdefault(oid, {})
+            cur = per_bk.get(o.bookmaker)
+            if cur is None or k > cur.odds:
+                per_bk[o.bookmaker] = _Outcome(oid, label, k, o.bookmaker,
+                                               o.url)
 
     arbs: list[Arb] = []
     for (kind, teams, cluster, market_group), g in groups.items():
         outs = g["outcomes"]
         if len(outs) != 2 or len(g["books"]) < 2:
             continue  # нужен ровно двухисходный рынок и минимум 2 БК
-        o1, o2 = outs.values()
-        if o1.bookmaker == o2.bookmaker:
-            continue  # обе стороны из одной БК — не вилка (маржа)
-
-        margin = 1 / o1.odds + 1 / o2.odds
-        if margin >= 1:
-            continue
-
+        side_a, side_b = outs.values()
         s = g["sample"]
-        profit_pct = (1 / margin - 1) * 100
-        # Аномально высокая «доходность» — почти наверняка не вилка, а
-        # ошибка сопоставления (разные рынки/матчи у БК). Не показываем:
-        # ставка по ней приведёт к потере денег.
-        if profit_pct > ARB_MAX_PROFIT:
-            log.info("Отброшена подозрительная вилка %.1f%% (%s — %s, %s: "
-                     "%s@%s / %s@%s) — похоже на ошибку сопоставления",
-                     profit_pct, s.team1, s.team2, s.market,
-                     o1.odds, o1.bookmaker, o2.odds, o2.bookmaker)
-            continue
-        # порядок исходов: для победителя выравниваем к team1/team2 образца
-        first, second = _order(s, o1, o2)
-        if s.market_key.startswith(("total", "hcap", "bothscore",
-                                    "itotal", "oddeven")):
-            # метки берём у образца (он ориентирован team1→team2), а не у
-            # БК с лучшим кэфом — иначе фора team2 подписалась бы как «Ф1»,
-            # если у той БК эта команда идёт первой
-            label1, label2 = s.outcome1, s.outcome2
-        else:
-            label1, label2 = "П1", "П2"
-        arbs.append(Arb(
-            match_key=(f"{kind}|{'|'.join(sorted(teams))}|{cluster}|"
-                       f"{market_group}"),
-            sport=s.sport, team1=s.team1, team2=s.team2,
-            market=display_market(s.market_key, s.market),
-            outcome1=label1, outcome2=label2,
-            k1_max=round(first.odds, 3), k1_bookmaker=first.bookmaker,
-            k2_max=round(second.odds, 3), k2_bookmaker=second.bookmaker,
-            k1_url=first.url, k2_url=second.url,
-            margin=margin, profit_pct=profit_pct,
-            kind=kind, start_time=s.start_time, start_ts=s.start_ts,
-            stakes={str(b): calc_stakes(first.odds, second.odds, b) for b in BANKS},
-        ))
+        warned = False
+        # ВСЕ комбинации «исход 1 у БК X × исход 2 у БК Y» (X ≠ Y):
+        # показываем каждую вилку, а не только пару с максимальными кэфами
+        for o1 in side_a.values():
+            for o2 in side_b.values():
+                if o1.bookmaker == o2.bookmaker:
+                    continue  # обе стороны из одной БК — не вилка (маржа)
+                margin = 1 / o1.odds + 1 / o2.odds
+                if margin >= 1:
+                    continue
+                profit_pct = (1 / margin - 1) * 100
+                # Аномально высокая «доходность» — почти наверняка не
+                # вилка, а ошибка сопоставления (разные рынки/матчи у БК).
+                # Не показываем: ставка по ней приведёт к потере денег.
+                if profit_pct > ARB_MAX_PROFIT:
+                    if not warned:
+                        log.info(
+                            "Отброшена подозрительная вилка %.1f%% "
+                            "(%s — %s, %s: %s@%s / %s@%s) — похоже на "
+                            "ошибку сопоставления",
+                            profit_pct, s.team1, s.team2, s.market,
+                            o1.odds, o1.bookmaker, o2.odds, o2.bookmaker)
+                        warned = True
+                    continue
+                # порядок исходов: для победителя выравниваем к
+                # team1/team2 образца
+                first, second = _order(s, o1, o2)
+                if s.market_key.startswith(("total", "hcap", "bothscore",
+                                            "itotal", "oddeven")):
+                    # метки берём у образца (он ориентирован team1→team2),
+                    # а не у БК с лучшим кэфом — иначе фора team2
+                    # подписалась бы как «Ф1», если у той БК эта команда
+                    # идёт первой
+                    label1, label2 = s.outcome1, s.outcome2
+                else:
+                    label1, label2 = "П1", "П2"
+                arbs.append(Arb(
+                    # пара БК — часть ключа: у одного рынка может быть
+                    # несколько вилок одновременно (разные пары БК)
+                    match_key=(f"{kind}|{'|'.join(sorted(teams))}|{cluster}|"
+                               f"{market_group}|"
+                               f"{first.bookmaker}|{second.bookmaker}"),
+                    sport=s.sport, team1=s.team1, team2=s.team2,
+                    market=display_market(s.market_key, s.market),
+                    outcome1=label1, outcome2=label2,
+                    k1_max=round(first.odds, 3), k1_bookmaker=first.bookmaker,
+                    k2_max=round(second.odds, 3), k2_bookmaker=second.bookmaker,
+                    k1_url=first.url, k2_url=second.url,
+                    margin=margin, profit_pct=profit_pct,
+                    kind=kind, start_time=s.start_time, start_ts=s.start_ts,
+                    stakes={str(b): calc_stakes(first.odds, second.odds, b)
+                            for b in BANKS},
+                ))
 
     arbs.sort(key=lambda a: a.profit_pct, reverse=True)
     return arbs
