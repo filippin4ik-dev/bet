@@ -19,7 +19,7 @@ from collections import defaultdict
 from typing import Iterable
 
 from .config import (ARB_MAX_PROFIT, BANKS, START_TS_TOLERANCE,
-                     START_TS_TOLERANCE_COMBAT)
+                     START_TS_TOLERANCE_COMBAT, START_TS_TOLERANCE_RAPID)
 from .models import Arb, Arb3, KIND_PREMATCH, MarketOdds
 from .parsers.html_utils import display_market, neg_hcap as _neg_hcap
 
@@ -168,23 +168,37 @@ def _market_group(o: MarketOdds) -> str:
 _COMBAT_ROOTS = {"единоборства", "смешанные единоборства", "бокс", "mma",
                  "ufc", "кикбоксинг", "муай-тай", "бои без правил"}
 
+# «Быстрые» турниры/лиги, где одна и та же пара соперников играет НЕСКОЛЬКО
+# матчей за вечер с интервалом в минуты — виртуальный футбол и похожие
+# скоростные форматы обычно прямо указывают длительность матча в названии
+# турнира/чемпионата, например «FC 26. ... 2x3 мин.» или «H2H LIGA-3. 2x4
+# мин.». Для них НЕЛЬЗЯ расширять START_TS_TOLERANCE (см. ниже) — иначе два
+# разных матча той же пары в одну сессию склеятся в одну «вилку».
+_RAPID_FIXTURE_RE = re.compile(r"(?i)\d+\s*[xх]\s*\d+\s*мин")
+
 
 def _start_tolerance(sport: str) -> float:
     """Допуск расхождения времени старта для вида спорта котировки."""
     root = sport.split("·")[0].strip().lower().replace("ё", "е")
-    return START_TS_TOLERANCE_COMBAT if root in _COMBAT_ROOTS \
-        else START_TS_TOLERANCE
+    if root in _COMBAT_ROOTS:
+        return START_TS_TOLERANCE_COMBAT
+    if _RAPID_FIXTURE_RE.search(sport):
+        return START_TS_TOLERANCE_RAPID
+    return START_TS_TOLERANCE
 
 
 def _time_clusters(odds: list[MarketOdds]) -> dict[tuple, dict]:
     """Кластеры времени старта по каждому событию (kind, пара команд).
 
     Одна и та же пара команд может играть НЕСКОЛЬКО матчей (первый и
-    ответный, мужской и женский в один день, разные лиги). Если у двух БК
-    время старта различается больше допуска — это разные матчи, их кэфы
-    нельзя сшивать в одну вилку. Часовые пояса БК уже приведены к общему
-    unix-времени, поэтому допуск маленький (START_TS_TOLERANCE); для
-    единоборств — большой (см. _COMBAT_ROOTS): там время боя оценочное.
+    ответный, мужской и женский в один день, разные лиги, повторы у
+    «быстрых» турниров — см. _RAPID_FIXTURE_RE). Если у двух БК время
+    старта различается больше допуска — это разные матчи, их кэфы нельзя
+    сшивать в одну вилку. Часовые пояса БК уже приведены к общему
+    unix-времени; для обычных видов спорта допуск умеренный
+    (START_TS_TOLERANCE), для «быстрых» турниров с повторами пары —
+    строгий (START_TS_TOLERANCE_RAPID), для единоборств — большой
+    (START_TS_TOLERANCE_COMBAT): там время боя оценочное.
     """
     ts_by_event: dict[tuple, set] = defaultdict(set)
     tol_by_event: dict[tuple, float] = {}
