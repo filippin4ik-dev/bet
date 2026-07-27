@@ -1,4 +1,4 @@
-"""SQLite: история найденных вилок."""
+"""SQLite: история найденных вилок, аккаунты БК и журнал авто-ставок."""
 import json
 import sqlite3
 import threading
@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 
 from .config import DB_PATH
 from .models import Arb, Arb3
+from .security import decrypt_str, encrypt_str
 
 _lock = threading.Lock()
 
@@ -76,6 +77,42 @@ def init_db() -> None:
             )
         """)
 
+        # Аккаунты БК, подключённые в админке. Логин/пароль хранятся
+        # ТОЛЬКО в зашифрованном виде (см. app/security.py).
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS bk_accounts (
+                id                INTEGER PRIMARY KEY AUTOINCREMENT,
+                bookmaker         TEXT NOT NULL,
+                label             TEXT NOT NULL DEFAULT '',
+                login_enc         TEXT NOT NULL,
+                password_enc      TEXT NOT NULL,
+                enabled           INTEGER NOT NULL DEFAULT 1,
+                balance           REAL,
+                balance_updated_at TEXT,
+                last_error        TEXT,
+                created_at        TEXT NOT NULL
+            )
+        """)
+
+        # Журнал попыток авто-ставки (реальных и в режиме имитации) —
+        # для аудита: что, когда и с каким результатом бот пытался поставить.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS bet_log (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts            TEXT NOT NULL,
+                match_key     TEXT NOT NULL,
+                kind3         INTEGER NOT NULL DEFAULT 0,
+                sport         TEXT,
+                match         TEXT,
+                market        TEXT,
+                profit_pct    REAL,
+                dry_run       INTEGER NOT NULL DEFAULT 1,
+                ok            INTEGER NOT NULL DEFAULT 0,
+                legs_json     TEXT NOT NULL,
+                error         TEXT
+            )
+        """)
+
 
 def save_arbs(arbs: list[Arb]) -> None:
     if not arbs:
@@ -110,6 +147,148 @@ def get_history(limit: int = 100) -> list[dict]:
         d = dict(r)
         d["stakes"] = json.loads(d.pop("stakes_json"))
         d["match"] = f"{d['team1']} — {d['team2']}"
+        result.append(d)
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Аккаунты БК (админка)
+# ---------------------------------------------------------------------------
+
+def add_account(bookmaker: str, login: str, password: str,
+                label: str = "") -> int:
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    with _lock, _connect() as conn:
+        cur = conn.execute(
+            """INSERT INTO bk_accounts
+               (bookmaker, label, login_enc, password_enc, enabled,
+                created_at)
+               VALUES (?,?,?,?,1,?)""",
+            (bookmaker, label, encrypt_str(login), encrypt_str(password),
+             now),
+        )
+        return cur.lastrowid
+
+
+def _account_row_to_dict(r: sqlite3.Row, reveal: bool = False) -> dict:
+    d = dict(r)
+    if reveal:
+        d["login"] = decrypt_str(d.pop("login_enc"))
+        d["password"] = decrypt_str(d.pop("password_enc"))
+    else:
+        login = decrypt_str(d.pop("login_enc"))
+        d.pop("password_enc")
+        d["login"] = _mask(login)
+    d["enabled"] = bool(d["enabled"])
+    return d
+
+
+def _mask(s: str) -> str:
+    if not s:
+        return s
+    if len(s) <= 3:
+        return "*" * len(s)
+    return s[:2] + "*" * (len(s) - 3) + s[-1]
+
+
+def list_accounts(reveal: bool = False) -> list[dict]:
+    with _lock, _connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM bk_accounts ORDER BY id").fetchall()
+    return [_account_row_to_dict(r, reveal=reveal) for r in rows]
+
+
+def get_account(account_id: int, reveal: bool = False) -> dict | None:
+    with _lock, _connect() as conn:
+        r = conn.execute(
+            "SELECT * FROM bk_accounts WHERE id=?", (account_id,)).fetchone()
+    return _account_row_to_dict(r, reveal=reveal) if r else None
+
+
+def get_account_credentials(account_id: int) -> tuple[str, str] | None:
+    """(login, password) в открытом виде — только для внутреннего
+    использования коннекторами, никогда не отдаётся по API."""
+    with _lock, _connect() as conn:
+        r = conn.execute(
+            "SELECT login_enc, password_enc FROM bk_accounts WHERE id=?",
+            (account_id,)).fetchone()
+    if not r:
+        return None
+    return decrypt_str(r["login_enc"]), decrypt_str(r["password_enc"])
+
+
+def update_account(account_id: int, *, enabled: bool | None = None,
+                   label: str | None = None,
+                   login: str | None = None,
+                   password: str | None = None) -> None:
+    fields, params = [], []
+    if enabled is not None:
+        fields.append("enabled=?")
+        params.append(1 if enabled else 0)
+    if label is not None:
+        fields.append("label=?")
+        params.append(label)
+    if login is not None:
+        fields.append("login_enc=?")
+        params.append(encrypt_str(login))
+    if password is not None:
+        fields.append("password_enc=?")
+        params.append(encrypt_str(password))
+    if not fields:
+        return
+    params.append(account_id)
+    with _lock, _connect() as conn:
+        conn.execute(
+            f"UPDATE bk_accounts SET {', '.join(fields)} WHERE id=?", params)
+
+
+def set_account_balance(account_id: int, balance: float | None,
+                        error: str | None) -> None:
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    with _lock, _connect() as conn:
+        conn.execute(
+            """UPDATE bk_accounts
+               SET balance=?, balance_updated_at=?, last_error=?
+               WHERE id=?""",
+            (balance, now, error, account_id))
+
+
+def delete_account(account_id: int) -> None:
+    with _lock, _connect() as conn:
+        conn.execute("DELETE FROM bk_accounts WHERE id=?", (account_id,))
+
+
+# ---------------------------------------------------------------------------
+# Журнал авто-ставок
+# ---------------------------------------------------------------------------
+
+def log_bet_attempt(*, match_key: str, kind3: bool, sport: str, match: str,
+                    market: str, profit_pct: float, dry_run: bool, ok: bool,
+                    legs: list[dict], error: str | None = None) -> None:
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    with _lock, _connect() as conn:
+        conn.execute(
+            """INSERT INTO bet_log
+               (ts, match_key, kind3, sport, match, market, profit_pct,
+                dry_run, ok, legs_json, error)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+            (now, match_key, 1 if kind3 else 0, sport, match, market,
+             profit_pct, 1 if dry_run else 0, 1 if ok else 0,
+             json.dumps(legs, ensure_ascii=False), error))
+
+
+def get_bet_log(limit: int = 200) -> list[dict]:
+    with _lock, _connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM bet_log ORDER BY id DESC LIMIT ?",
+            (limit,)).fetchall()
+    result = []
+    for r in rows:
+        d = dict(r)
+        d["legs"] = json.loads(d.pop("legs_json"))
+        d["kind3"] = bool(d["kind3"])
+        d["dry_run"] = bool(d["dry_run"])
+        d["ok"] = bool(d["ok"])
         result.append(d)
     return result
 
