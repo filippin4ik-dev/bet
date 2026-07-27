@@ -75,9 +75,14 @@ def check_one(bookmaker: str, login: str, password: str) -> bool:
         return True
     except Exception as exc:  # noqa: BLE001
         print(f"ОШИБКА чтения баланса: {exc}")
-        print("Это ожидаемо для неверифицированных селекторов — см. "
-              "app/connectors/selenium_generic.py::SELECTORS и поправьте "
-              "их под актуальную вёрстку личного кабинета этой БК.")
+        print("Смотрите текст ошибки выше — это может быть: неверный "
+              "селектор (см. app/connectors/selenium_generic.py::SELECTORS "
+              "и докстринг файла — там статус по каждой БК), капча на "
+              "форме входа (автоматически не проходится) или анти-бот-"
+              "блок IP этой машины (подтверждено на Fonbet — см. "
+              "докстринг selenium_generic.py; попробуйте резидентный/"
+              "мобильный российский прокси через `<БК>_PROXY`, напр. "
+              "FONBET_PROXY=socks5://host:port).")
         return False
     finally:
         connector.close()
