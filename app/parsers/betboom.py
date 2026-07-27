@@ -15,8 +15,11 @@ BetBoom собирает столько же прематч-матчей, ско
 роспись: сотни ставок — таймы/периоды, карты, тоталы и форы по всем линиям
 и т.д. Это быстро: ~2700 матчей за несколько секунд, ~10 МБ на цикл.
 
-Разбираем ВСЕ двухисходные рынки события:
-- «Исход…» (П1/П2) — только если нет ничьей (X): рынки 1X2 пропускаем;
+Разбираем ВСЕ двухисходные рынки события, а также трёхисходный «Исход 1X2»:
+- «Исход…» (П1/П2) без ничьей — двухисходный рынок «Победитель»;
+- «Исход…» (П1/X/П2) С ничьей — рынок «Исход 1X2» (market_key=winner1x2),
+  вилки по нему ищет отдельный движок arbitrage.find_arbs_1x2 (самый частый
+  рынок футбола/хоккея — раньше пропускался целиком);
   варианты «Исход (с ОТ)», «1-й тайм: Исход» и т.п. тоже разбираем;
 - любой «…Тотал…» (Больше/Меньше) по каждой линии — голов, карт, углов,
   сетов, геймов, таймов и т.п.; предмет/период берём из имени рынка;
@@ -37,7 +40,8 @@ from ..models import KIND_LIVE, KIND_PREMATCH, MarketOdds
 from .base import BaseParser
 from .bb_feed import (TREE_LIVE, TREE_PREMATCH, BBFeedClient, FeedError,
                       _decode, _one, _text)
-from .html_utils import fmt_hcap, fmt_total, format_start, market_scope
+from .html_utils import (fmt_hcap, fmt_total, format_start, market_scope,
+                         sane_1x2_margin)
 
 log = logging.getLogger("parsers.betboom")
 
@@ -273,16 +277,34 @@ class BetBoomParser(BaseParser):
         for mk in sorted(winners, key=self._winner_rank):
             period, low = mk
             sides = winners[mk]
-            if "X" in sides or _WIN_1 not in sides or _WIN_2 not in sides:
+            if _WIN_1 not in sides or _WIN_2 not in sides:
                 continue
+            has_draw = "X" in sides
             if not period and low in _WINNER_BASE:
                 scope = ""
             else:
                 scope = market_scope(f"{period} {low}".strip())
-            key = f"winner:{scope}" if scope else "winner"
+            key = (f"winner1x2:{scope}" if scope else "winner1x2") \
+                if has_draw else (f"winner:{scope}" if scope else "winner")
             if key in seen_keys:
                 continue
             seen_keys.add(key)
+            if has_draw:
+                # Рынок «Исход 1X2» (с ничьей) — самый частый рынок футбола/
+                # хоккея. Раньше пропускался целиком, вилки по нему не
+                # находились совсем.
+                if not sane_1x2_margin(sides[_WIN_1], sides["X"],
+                                       sides[_WIN_2]):
+                    continue
+                name = "Исход (1X2)" if not scope else \
+                    f"Исход 1X2 ({period}: {winner_names[mk]})" if period \
+                    else f"Исход 1X2 ({winner_names[mk]})"
+                result.append(MarketOdds(
+                    market=name, market_key=key,
+                    outcome1="П1", outcome2="П2", outcome3="X",
+                    k1=sides[_WIN_1], k2=sides[_WIN_2], k3=sides["X"],
+                    **base))
+                continue
             if not scope:
                 name = "Победитель"
             else:

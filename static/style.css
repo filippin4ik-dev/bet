@@ -336,7 +336,8 @@ tbody tr.pinned.hot {
   grid-template-columns: 1fr 1fr;
   gap: 12px;
 }
-@media (max-width: 560px) { .bet-legs { grid-template-columns: 1fr; } }
+.bet-legs-3 { grid-template-columns: 1fr 1fr 1fr; }
+@media (max-width: 560px) { .bet-legs, .bet-legs-3 { grid-template-columns: 1fr; } }
 
 .bet-leg {
   background: var(--bg);

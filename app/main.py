@@ -52,9 +52,15 @@ app = FastAPI(title="Сканер вилок (двухисходные рынк�
 def get_arbs(
     min_profit: float = Query(0.0, ge=0, description="Мин. доходность, %"),
 ):
-    """Текущие вилки по прематчу (обновляются фоновым сканером)."""
+    """Текущие вилки по прематчу (обновляются фоновым сканером).
+
+    Включает и двухисходные вилки (arbs), и трёхисходные по рынку
+    «Исход 1X2» (arbs_1x2, П1/X/П2) — самый частый рынок футбола/хоккея.
+    """
     snap = scanner.snapshot()
     snap["arbs"] = [a for a in snap["arbs"] if a["profit_pct"] >= min_profit]
+    snap["arbs_1x2"] = [a for a in snap["arbs_1x2"]
+                        if a["profit_pct"] >= min_profit]
     snap["sound_alert_profit"] = SOUND_ALERT_PROFIT
     return snap
 
@@ -119,6 +125,8 @@ def get_live_arbs(
     """Текущие ЛАЙВ-вилки (быстрый цикл, матчи в игре)."""
     snap = live_scanner.snapshot()
     snap["arbs"] = [a for a in snap["arbs"] if a["profit_pct"] >= min_profit]
+    snap["arbs_1x2"] = [a for a in snap["arbs_1x2"]
+                        if a["profit_pct"] >= min_profit]
     snap["sound_alert_profit"] = SOUND_ALERT_PROFIT
     return snap
 
@@ -141,6 +149,12 @@ def get_live_odds():
 def get_history(limit: int = Query(100, ge=1, le=1000)):
     """История найденных вилок из SQLite."""
     return {"history": db.get_history(limit)}
+
+
+@app.get("/api/history_1x2")
+def get_history_1x2(limit: int = Query(100, ge=1, le=1000)):
+    """История найденных трёхисходных вилок («Исход 1X2») из SQLite."""
+    return {"history": db.get_history_1x2(limit)}
 
 
 class _NoCacheStatic(StaticFiles):

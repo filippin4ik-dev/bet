@@ -33,7 +33,8 @@ from ..config import (LIGASTAVOK_API_HOST, LIGASTAVOK_API_MAX_PAGES,
 from ..models import KIND_LIVE, KIND_PREMATCH, MarketOdds
 from .base import BaseParser
 from .html_utils import (SOUP_PARSER, fmt_hcap, fmt_total, format_start,
-                         neg_hcap, num, pair, parse_start_ts, parse_totals)
+                         neg_hcap, num, pair, parse_start_ts, parse_totals,
+                         sane_1x2_margin)
 from .selenium_helper import SeleniumSession
 
 log = logging.getLogger("parsers.ligastavok")
@@ -251,11 +252,23 @@ class LigaStavokParser(BaseParser):
             titles = {str(o.get("title") or "").strip() for o in outs}
             by_title = {str(o.get("title") or "").strip().lower(): o
                         for o in outs}
-            # --- Победитель (1 / 2 без ничьей) ---
-            if {"1", "2"} <= titles and not (titles & {"X", "Х"}):
+            # --- Победитель (1 / 2, c ничьей или без) ---
+            if {"1", "2"} <= titles:
                 k1 = num(str(by_title["1"].get("value")))
                 k2 = num(str(by_title["2"].get("value")))
-                if self._ok(k1, k2):
+                draw_key = next((t for t in ("x", "х") if t in by_title),
+                                None)
+                if draw_key:
+                    # Рынок «Исход 1X2» — самый частый рынок футбола/хоккея,
+                    # раньше пропускался целиком (искали только без ничьей).
+                    kx = num(str(by_title[draw_key].get("value")))
+                    if self._ok(k1, k2) and kx and kx > 1 \
+                            and sane_1x2_margin(k1, kx, k2):
+                        result.append(MarketOdds(
+                            market="Исход (1X2)", market_key="winner1x2",
+                            outcome1="П1", outcome2="П2", outcome3="X",
+                            k1=k1, k2=k2, k3=kx, **base))
+                elif self._ok(k1, k2):
                     result.append(MarketOdds(
                         market="Победитель", market_key="winner",
                         outcome1="П1", outcome2="П2", k1=k1, k2=k2, **base))

@@ -21,8 +21,12 @@
   в справочнике R=['Да','Нет']; кэфы сходятся с рынком Fonbet);
 - разбираемая «экзотика» (src=16, рынок опознаётся по тексту типа линии):
   индивидуальные тоталы @1/@2 (весь матч, таймы, периоды/сеты/карты),
-  чет/нечет, тотал/фора 2-го тайма, тотал/фора по сетам (теннис).
-Трёхисходные рынки (1X2: src=2/5/51/9) и прочую экзотику пропускаем.
+  чет/нечет, тотал/фора 2-го тайма, тотал/фора по сетам (теннис);
+- «Исход 1X2» (src=2 — весь матч, src=51 — период) — трёхисходный рынок
+  (П1/X/П2), вилки по нему ищет отдельный движок arbitrage.find_arbs_1x2
+  (см. предупреждение о порядке кэфов у SRC_WINNER_1X2 в коде: НЕ
+  верифицирован на живом фиде, защищён sane_1x2_margin).
+Прочую экзотику (src=5/9 — неясная семантика) и прочие спец-рынки пропускаем.
 
 Порядок кэфов проверен на живых данных: V[0] — исход «1»/«Больше»,
 V[1] — «2»/«Меньше» (по возрастанию линии тотала кэф V[0] растёт).
@@ -36,7 +40,8 @@ import time
 from ..config import WINLINE_SNAPSHOT_WAIT
 from ..models import KIND_LIVE, KIND_PREMATCH, MarketOdds
 from .base import BaseParser
-from .html_utils import fmt_hcap, fmt_total, format_start, market_scope
+from .html_utils import (fmt_hcap, fmt_total, format_start, market_scope,
+                         sane_1x2_margin)
 from .wl_feed import DECODABLE_EXOTIC, get_feed
 
 log = logging.getLogger("parsers.winline")
@@ -45,19 +50,30 @@ log = logging.getLogger("parsers.winline")
 # заглушкой вида 50. Всё вне разумного коридора отбрасываем.
 MIN_K, MAX_K = 1.01, 45.0
 
-# Типы линий (idTipEventSrc), которые умеем превращать в двухисходные рынки
+# Типы линий (idTipEventSrc), которые умеем превращать в рынки
 SRC_WINNER = 1          # исход 12 (без ничьей)
+SRC_WINNER_1X2 = 2      # исход 1X2 (с ничьей), весь матч
 SRC_HCAP = 3            # фора матча
 SRC_TOTAL = 4           # тотал матча
 SRC_HCAP_HT = 6         # фора 1-го тайма
 SRC_TOTAL_HT = 7        # тотал 1-го тайма
 SRC_BOTH_SCORE = 15     # обе забьют (Да/Нет)
+SRC_WINNER_1X2_P = 51   # исход 1X2 периода (только 1-й, koef = «1»)
 SRC_HCAP_P = 61         # фора N-го периода (koef = «N/линия»)
 SRC_TOTAL_P = 71        # тотал N-го периода (koef = «N/линия»)
 SRC_WINNER_P = 151      # исход 12 периода (только 1-й, koef = «1»)
 SRC_EXOTIC = 16         # «экзотика»: рынок опознаётся по ТЕКСТУ типа линии
                         # (см. DECODABLE_EXOTIC в wl_feed: инд. тоталы,
                         # чет/нечет, 2-й тайм, сет-рынки)
+
+# ВНИМАНИЕ: порядок кэфов для SRC_WINNER_1X2/_P (v[0]=П1, v[1]=X, v[2]=П2)
+# принят ПО АНАЛОГИИ с порядком id у Fonbet (921=П1, 922=X, 923=П2) и
+# порядком отображения «1 X 2» на сайтах БК, но НЕ подтверждён на живом
+# фиде Winline (в песочнице разработки нет доступа к российскому IP).
+# Каждая котировка проходит sane_1x2_margin() — эвристическую проверку
+# собственной маржи БК; в норме она отбросит котировку с перепутанным
+# порядком исходов, но перед боевым использованием (особенно с
+# автоматической ставкой) сверьте пример из /api/odds с сайтом winline.ru.
 
 # сторона индивидуального рынка: текст типа линии кончается на «@1»/«@2»
 _IT_SIDE_RE = re.compile(r"@([12])$")
@@ -170,6 +186,21 @@ class WinlineParser(BaseParser):
                 market_key=f"winner:{scope}" if scope else "winner",
                 outcome1="П1", outcome2="П2", k1=k1, k2=k2, **base)
 
+        if src in (SRC_WINNER_1X2, SRC_WINNER_1X2_P):
+            if len(v) != 3:
+                return None  # страховка: 1X2 всегда трёхисходный
+            k1x, kx, k2x = v[0], v[1], v[2]
+            if not (MIN_K < k1x < MAX_K and MIN_K < kx < MAX_K
+                    and MIN_K < k2x < MAX_K):
+                return None
+            if not sane_1x2_margin(k1x, kx, k2x):
+                return None  # см. предупреждение у SRC_WINNER_1X2 выше
+            return MarketOdds(
+                market=f"Исход (1X2) {label}".strip(),
+                market_key=f"winner1x2:{scope}" if scope else "winner1x2",
+                outcome1="П1", outcome2="П2", outcome3="X",
+                k1=k1x, k2=k2x, k3=kx, **base)
+
         if src == SRC_BOTH_SCORE:
             if len(v) != 2:
                 return None
@@ -205,7 +236,7 @@ class WinlineParser(BaseParser):
                 outcome1=f"Ф1 {h1s}", outcome2=f"Ф2 {h2s}",
                 k1=k1, k2=k2, **base)   # V[0]=team1, V[1]=team2
 
-        return None  # 1X2 и спец-рынки не поддерживаем
+        return None  # прочие спец-рынки не поддерживаем
 
     def _exotic(self, ln: dict, tl: dict, base: dict, scope: str,
                 label: str, k1: float, k2: float) -> MarketOdds | None:
