@@ -16,6 +16,7 @@
       <span id="coverage"></span>
       <span id="bk-counts"></span>
       <span id="arb-count"></span>
+      <a href="/admin" class="badge" id="admin-link">⚙ Админка</a>
     </div>
   </header>
 
@@ -189,10 +190,13 @@
       </div>
 
       <div class="bet-summary" id="bet-summary">—</div>
+      <div class="bet-limit" id="bet-limit" hidden></div>
 
       <div class="bet-actions">
         <button id="bet-open-both" type="button">Открыть обе БК ↗</button>
+        <button id="bet-autobet" type="button" class="autobet-btn" hidden>⚡ Авто-ставка (лайв)</button>
       </div>
+      <div class="autobet-result" id="bet-autobet-result" hidden></div>
 
       <p class="bet-note">
         Ставки размещаются вручную на сайтах БК: страницы матчей откроются в
@@ -259,10 +263,13 @@
       </div>
 
       <div class="bet-summary" id="bet3-summary">—</div>
+      <div class="bet-limit" id="bet3-limit" hidden></div>
 
       <div class="bet-actions">
         <button id="bet3-open-all" type="button">Открыть все 3 БК ↗</button>
+        <button id="bet3-autobet" type="button" class="autobet-btn" hidden>⚡ Авто-ставка (лайв)</button>
       </div>
+      <div class="autobet-result" id="bet3-autobet-result" hidden></div>
 
       <p class="bet-note">
         Три плеча — на исход 1, ничью и исход 2 (рынок «Исход 1X2»). Ставки

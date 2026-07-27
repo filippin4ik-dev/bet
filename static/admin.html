@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Админка — Сканер вилок</title>
+<link rel="stylesheet" href="/static/style.css">
+<link rel="stylesheet" href="/static/admin.css">
+</head>
+<body>
+<header>
+  <h1>Админка <span class="accent">Сканер вилок</span></h1>
+  <div class="status-bar">
+    <span id="whoami" class="badge"></span>
+    <a href="/" class="badge">← к вилкам</a>
+    <button id="logout-btn" class="badge" hidden>Выйти</button>
+  </div>
+</header>
+
+<section id="login-view" class="admin-panel">
+  <h2>Вход в админку</h2>
+  <form id="login-form" class="admin-form">
+    <label>Логин
+      <input type="text" id="login-username" autocomplete="username" required>
+    </label>
+    <label>Пароль
+      <input type="password" id="login-password" autocomplete="current-password" required>
+    </label>
+    <button type="submit">Войти</button>
+    <div id="login-error" class="admin-error" hidden></div>
+  </form>
+</section>
+
+<main id="admin-view" hidden>
+  <section class="admin-panel">
+    <h2>Аккаунты букмекеров</h2>
+    <p class="admin-hint">
+      Логин/пароль хранятся в базе в зашифрованном виде. Баланс аккаунта
+      используется для расчёта индивидуального лимита ставки (max_stake)
+      на каждую вилку и для авто-ставок. Реальное получение баланса через
+      браузер — экспериментальная функция (см. README), пока не проверена
+      на живых аккаунтах: если чтение баланса упадёт с ошибкой — это
+      ожидаемо, поправьте селекторы в <code>app/connectors/selenium_generic.py</code>.
+    </p>
+    <table class="admin-table" id="accounts-table">
+      <thead>
+        <tr>
+          <th>БК</th><th>Метка</th><th>Логин</th><th>Баланс</th>
+          <th>Обновлён</th><th>Статус</th><th>Вкл</th><th></th>
+        </tr>
+      </thead>
+      <tbody id="accounts-body"></tbody>
+    </table>
+    <button id="add-account-btn">+ Добавить аккаунт</button>
+  </section>
+
+  <section class="admin-panel">
+    <h2>Авто-ставки</h2>
+    <p class="admin-hint admin-warning">
+      ⚠️ Автоматическая постановка ставки — риск бана аккаунта у
+      букмекера (вилочников банят/лимитируют почти все БК) и риск ошибки
+      автоматизации (см. предупреждения в коде коннекторов). По умолчанию
+      включён режим имитации (dry-run): бот считает суммы и «нажимает»
+      кнопки в логике, но реального запроса на сайт БК не делает.
+    </p>
+    <div class="admin-form-row">
+      <label><input type="checkbox" id="setting-enabled"> Разрешить авто-ставки (AUTOBET_ENABLED)</label>
+      <label><input type="checkbox" id="setting-dry-run"> Режим имитации, без реальных ставок (AUTOBET_DRY_RUN)</label>
+      <button id="save-settings-btn">Сохранить</button>
+    </div>
+    <p class="admin-hint">
+      Лимит одной ставки: не более <span id="limit-fraction"></span> от
+      баланса аккаунта БК и не более <span id="limit-max"></span> ₽.
+      Настраивается переменными окружения AUTOBET_MAX_BALANCE_FRACTION /
+      AUTOBET_MAX_STAKE.
+    </p>
+  </section>
+
+  <section class="admin-panel">
+    <h2>Журнал ставок</h2>
+    <table class="admin-table" id="betlog-table">
+      <thead>
+        <tr>
+          <th>Время</th><th>Матч</th><th>Рынок</th><th>Доходность</th>
+          <th>Режим</th><th>Итог</th><th>Ноги</th>
+        </tr>
+      </thead>
+      <tbody id="betlog-body"></tbody>
+    </table>
+  </section>
+</main>
+
+<div id="account-modal" class="modal-backdrop" hidden>
+  <div class="modal">
+    <h3>Добавить аккаунт БК</h3>
+    <form id="account-form" class="admin-form">
+      <label>Букмекер
+        <select id="account-bookmaker"></select>
+      </label>
+      <label>Метка (необязательно)
+        <input type="text" id="account-label" placeholder="напр. основной">
+      </label>
+      <label>Логин/телефон/email
+        <input type="text" id="account-login" required>
+      </label>
+      <label>Пароль
+        <input type="password" id="account-password" required>
+      </label>
+      <div class="modal-actions">
+        <button type="button" id="account-cancel">Отмена</button>
+        <button type="submit">Добавить</button>
+      </div>
+      <div id="account-error" class="admin-error" hidden></div>
+    </form>
+  </div>
+</div>
+
+<script src="/static/admin.js"></script>
+</body>
+</html>

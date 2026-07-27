@@ -53,7 +53,10 @@ const els = {
   betLink1: document.getElementById("bet-link1"),
   betLink2: document.getElementById("bet-link2"),
   betSummary: document.getElementById("bet-summary"),
+  betLimit: document.getElementById("bet-limit"),
   betOpenBoth: document.getElementById("bet-open-both"),
+  betAutobet: document.getElementById("bet-autobet"),
+  betAutobetResult: document.getElementById("bet-autobet-result"),
   bet3Modal: document.getElementById("bet3-modal"),
   bet3Title: document.getElementById("bet3-title"),
   bet3Meta: document.getElementById("bet3-meta"),
@@ -72,7 +75,10 @@ const els = {
   bet3Linkx: document.getElementById("bet3-linkx"),
   bet3Link2: document.getElementById("bet3-link2"),
   bet3Summary: document.getElementById("bet3-summary"),
+  bet3Limit: document.getElementById("bet3-limit"),
   bet3OpenAll: document.getElementById("bet3-open-all"),
+  bet3Autobet: document.getElementById("bet3-autobet"),
+  bet3AutobetResult: document.getElementById("bet3-autobet-result"),
 };
 
 let soundAlertProfit = 2.5;
@@ -531,6 +537,56 @@ function renderBetModal() {
     ? `Выигрыш при любом исходе: <b>${fmtMoney(Math.round(st.payout))}</b> · ` +
       `чистая прибыль: <b class="profit">+${fmtMoney(Math.round(st.profit))}</b>`
     : "Укажите сумму ставки";
+
+  renderLimit(els.betLimit, a.max_stake);
+  els.betAutobet.hidden = !isLiveView(state.view);
+  els.betAutobetResult.hidden = true;
+}
+
+/* Лимит ставки (max_stake) — минимальный известный баланс среди БК ноги
+ * вилки. Считается на сервере из аккаунтов, подключённых в админке. */
+function renderLimit(el, maxStake) {
+  if (maxStake === null || maxStake === undefined) {
+    el.hidden = false;
+    el.innerHTML = '<span class="limit-unknown">Лимит ставки неизвестен — ' +
+      'подключите аккаунты БК в <a href="/admin" target="_blank">админке</a>.</span>';
+    return;
+  }
+  el.hidden = false;
+  el.innerHTML = `Лимит по балансу подключённых аккаунтов: ` +
+    `<span class="limit-known">${fmtMoney(Math.round(maxStake))}</span>`;
+}
+
+async function autobetApi(path, body) {
+  const resp = await fetch(path, {
+    method: "POST",
+    credentials: "same-origin",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  let data = {};
+  try { data = await resp.json(); } catch (_) { /* ignore */ }
+  if (!resp.ok) {
+    const detail = data.detail || resp.statusText;
+    if (resp.status === 401) {
+      throw new Error(`Требуется вход в админку — откройте /admin и авторизуйтесь.`);
+    }
+    throw new Error(detail);
+  }
+  return data;
+}
+
+function renderAutobetResult(el, res) {
+  el.hidden = false;
+  const modeLabel = res.dry_run
+    ? '<b style="color:var(--hot)">РЕЖИМ ИМИТАЦИИ</b> (реальный запрос не отправлялся)'
+    : '<b style="color:#ef4444">РЕАЛЬНАЯ СТАВКА</b>';
+  const legsHtml = res.legs.map((l) =>
+    `<div class="${l.ok ? "leg-ok" : "leg-fail"}">${l.ok ? "✓" : "✗"} ` +
+    `${escapeHtml(l.bookmaker)} · ${escapeHtml(l.outcome)} · ${fmtMoney(l.stake)}@${l.odds} — ` +
+    `${escapeHtml(l.message)}</div>`).join("");
+  const note = res.note ? `<div class="leg-fail">${escapeHtml(res.note)}</div>` : "";
+  el.innerHTML = `${modeLabel}<br>${legsHtml}${note}`;
 }
 
 function openBetModal(matchKey) {
@@ -558,6 +614,7 @@ function refreshBetModal() {
   } else {
     els.betSummary.innerHTML =
       '<span class="bet-gone">⚠ Вилка пропала из последнего обновления — кэфы изменились, не ставьте.</span>';
+    els.betAutobet.hidden = true;
   }
 }
 
@@ -588,6 +645,24 @@ els.betOpenBoth.addEventListener("click", () => {
   // остаются прямые ссылки «Открыть БК» в каждом плече
   if (betArb.k2_url) window.open(betArb.k2_url, "_blank", "noopener");
   if (betArb.k1_url) window.open(betArb.k1_url, "_blank", "noopener");
+});
+
+els.betAutobet.addEventListener("click", async () => {
+  if (!betArb) return;
+  els.betAutobet.disabled = true;
+  els.betAutobet.textContent = "Ставим…";
+  try {
+    const res = await autobetApi("/api/autobet/place", {
+      match_key: betArb.match_key, kind3: false, live: true,
+    });
+    renderAutobetResult(els.betAutobetResult, res);
+  } catch (err) {
+    els.betAutobetResult.hidden = false;
+    els.betAutobetResult.innerHTML = `<span class="leg-fail">${escapeHtml(err.message)}</span>`;
+  } finally {
+    els.betAutobet.disabled = false;
+    els.betAutobet.textContent = "⚡ Авто-ставка (лайв)";
+  }
 });
 
 document.querySelectorAll(".copy-btn").forEach((btn) => {
@@ -651,6 +726,10 @@ function renderBet3Modal() {
     ? `Выигрыш при любом исходе: <b>${fmtMoney(Math.round(st.payout))}</b> · ` +
       `чистая прибыль: <b class="profit">+${fmtMoney(Math.round(st.profit))}</b>`
     : "Укажите сумму ставки";
+
+  renderLimit(els.bet3Limit, a.max_stake);
+  els.bet3Autobet.hidden = !isLiveView(state.view);
+  els.bet3AutobetResult.hidden = true;
 }
 
 function openBet3Modal(matchKey) {
@@ -676,6 +755,7 @@ function refreshBet3Modal() {
   } else {
     els.bet3Summary.innerHTML =
       '<span class="bet-gone">⚠ Вилка пропала из последнего обновления — кэфы изменились, не ставьте.</span>';
+    els.bet3Autobet.hidden = true;
   }
 }
 
@@ -704,6 +784,24 @@ els.bet3OpenAll.addEventListener("click", () => {
   if (bet3Arb.k2_url) window.open(bet3Arb.k2_url, "_blank", "noopener");
   if (bet3Arb.kx_url) window.open(bet3Arb.kx_url, "_blank", "noopener");
   if (bet3Arb.k1_url) window.open(bet3Arb.k1_url, "_blank", "noopener");
+});
+
+els.bet3Autobet.addEventListener("click", async () => {
+  if (!bet3Arb) return;
+  els.bet3Autobet.disabled = true;
+  els.bet3Autobet.textContent = "Ставим…";
+  try {
+    const res = await autobetApi("/api/autobet/place", {
+      match_key: bet3Arb.match_key, kind3: true, live: true,
+    });
+    renderAutobetResult(els.bet3AutobetResult, res);
+  } catch (err) {
+    els.bet3AutobetResult.hidden = false;
+    els.bet3AutobetResult.innerHTML = `<span class="leg-fail">${escapeHtml(err.message)}</span>`;
+  } finally {
+    els.bet3Autobet.disabled = false;
+    els.bet3Autobet.textContent = "⚡ Авто-ставка (лайв)";
+  }
 });
 
 document.querySelectorAll(".copy-btn3").forEach((btn) => {
