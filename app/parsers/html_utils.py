@@ -150,12 +150,12 @@ _SUBJECT_TOKENS = [
 # рынок — ложная вилка.
 _PERIOD_RE = re.compile(
     r"(\d+)\s*-?\s*(?:й|я|е|ый|ой|ая|ое|го|ой)?\s*"
-    r"(тайм|сет|период|четверт|половин|иннинг|карт"
+    r"(овертайм|тайм|сет|период|четверт|половин|иннинг|карт"
     r"|гейм(?:а|е)?(?![а-я])|раунд(?:а|е)?(?![а-я]))")
 _PERIOD_ROOT = {
     "тайм": "half", "период": "period", "четверт": "quarter",
     "половин": "half", "иннинг": "inning", "сет": "set", "карт": "map",
-    "гейм": "game", "раунд": "round",
+    "гейм": "game", "раунд": "round", "овертайм": "ot",
 }
 
 # Слова, которые НЕ являются предметом рынка: вид рынка, основная единица
@@ -243,10 +243,10 @@ _TOKEN_RU = {
 _PERIOD_RU = {
     "half": "тайм", "period": "период", "quarter": "четверть",
     "set": "сет", "map": "карта", "inning": "иннинг", "game": "гейм",
-    "round": "раунд",
+    "round": "раунд", "ot": "овертайм",
 }
 _PERIOD_TOKEN_RE = re.compile(
-    r"^(half|period|quarter|set|map|inning|game|round)(\d+)$")
+    r"^(half|period|quarter|set|map|inning|game|round|ot)(\d+)$")
 
 
 def scope_label(scope: str) -> str:
