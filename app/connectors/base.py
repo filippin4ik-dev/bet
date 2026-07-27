@@ -29,13 +29,19 @@ class BookmakerConnector(ABC):
     """Интерфейс коннектора к личному кабинету одной БК."""
 
     def __init__(self, bookmaker: str, login: str, password: str,
-                 account_id: int | None = None):
+                 account_id: int | None = None,
+                 cookies: str | None = None):
         self.bookmaker = bookmaker
         self.login = login
         self.password = password
         # id аккаунта в базе — нужен коннекторам, умеющим запрашивать
         # SMS/OTP-код через app/otp.py (ретрансляция кода из админки).
         self.account_id = account_id
+        # Сырая строка сессионной cookie («name1=v1; name2=v2»), вставленная
+        # оператором из своего браузера, где вход уже пройден вручную (см.
+        # README «Вход по cookie» и selenium_generic.py). None/"" — нет
+        # сохранённой сессии, коннектор идёт по обычному сценарию логина.
+        self.cookies = cookies or None
 
     @abstractmethod
     def get_balance(self) -> float:

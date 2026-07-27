@@ -74,6 +74,50 @@ def test_account_crud_and_balance():
     print("OK: test_account_crud_and_balance")
 
 
+def test_account_cookies_roundtrip():
+    """Cookie — опциональная альтернатива автологину (см. README «Вход по
+    cookie»): хранится зашифрованной, никогда не отдаётся по API как
+    значение (только признак has_cookies), можно очистить пустой строкой."""
+    account_id = db.add_account("BetBoom", "u-cookie", "p-cookie",
+                                label="cookie-test",
+                                cookies="sid=abc123; other=xyz")
+    acc = db.get_account(account_id)
+    assert acc["has_cookies"] is True
+    assert "cookies" not in acc and "cookies_enc" not in acc
+    assert db.get_account_cookies(account_id) == "sid=abc123; other=xyz"
+
+    # обновление на другое значение
+    db.update_account(account_id, cookies="new=1")
+    assert db.get_account_cookies(account_id) == "new=1"
+    assert db.get_account(account_id)["has_cookies"] is True
+
+    # явная очистка пустой строкой
+    db.update_account(account_id, cookies="")
+    assert db.get_account_cookies(account_id) is None
+    assert db.get_account(account_id)["has_cookies"] is False
+
+    # аккаунт без cookies изначально
+    account_id2 = db.add_account("Winline", "u2", "p2")
+    assert db.get_account_cookies(account_id2) is None
+    assert db.get_account(account_id2)["has_cookies"] is False
+
+    db.delete_account(account_id)
+    db.delete_account(account_id2)
+    print("OK: test_account_cookies_roundtrip")
+
+
+def test_parse_cookie_string():
+    from app.connectors.selenium_generic import _parse_cookie_string
+    assert _parse_cookie_string("a=1; b=2") == [
+        {"name": "a", "value": "1"}, {"name": "b", "value": "2"}]
+    assert _parse_cookie_string("") == []
+    assert _parse_cookie_string("garbage;;  ; c=") == [{"name": "c", "value": ""}]
+    # значение может содержать "=" (напр. base64 с паддингом)
+    assert _parse_cookie_string("t=abc=def==") == [
+        {"name": "t", "value": "abc=def=="}]
+    print("OK: test_parse_cookie_string")
+
+
 def test_autobet_plan_without_accounts_is_zero():
     """Без подключённых аккаунтов план не должен «придумывать» ставку —
     честно возвращает stake=0 и пояснение."""
@@ -181,6 +225,8 @@ if __name__ == "__main__":
     test_admin_password_check()
     test_session_token_roundtrip()
     test_account_crud_and_balance()
+    test_account_cookies_roundtrip()
+    test_parse_cookie_string()
     test_autobet_plan_without_accounts_is_zero()
     test_autobet_plan_with_balances_caps_stake()
     test_place_on_arb_logs_bet()

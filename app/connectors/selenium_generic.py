@@ -48,6 +48,17 @@ BetBoom — капчей, для Winline/Liga Stavok/bc.game не было те�
 3. Проверьте вход и чтение баланса на тестовом аккаунте с BALANCE-ONLY
    операцией (без ставок), прежде чем доверять авто-лимитам.
 
+💡 **Вход по cookie** (обходит и капчу BetBoom, и упростит повтор входа
+у остальных БК): капча/анти-бот/СМС-код нужны только В МОМЕНТ входа, а не
+для уже авторизованной сессии. Если задать `self.cookies` (сырая строка
+«name1=v1; name2=v2», как заголовок `Cookie` из DevTools — см. README
+«Вход по cookie») — `_login()` СНАЧАЛА подставляет её в браузер, и только
+если это не похоже на успешный вход (см. `_try_cookie_session()`),
+откатывается на обычный сценарий формы. Cookie нужно один раз получить
+из реального браузера, где вход выполнил человек (пройдя капчу/2FA сам),
+и она не решает проблему Fonbet — анти-бот там блокирует ЛЮБОЙ запрос
+с этого IP, включая уже авторизованные (сначала нужен `FONBET_PROXY`).
+
 Автоматическая ПОСТАНОВКА СТАВКИ (place_bet) для всех БК НЕ реализована —
 DOM ставочного слипа у каждой БК свой, часто с капчей/доп. подтверждением,
 и без ЗАВЕРШЁННОГО живого входа (см. статусы выше — ни для одной БК вход
@@ -164,6 +175,19 @@ _CLICK_BY_TEXT_JS = """
     return true;
 """
 
+# Проверка «виден ли на странице элемент с таким текстом» — без клика,
+# используется, чтобы понять, вернул ли сайт форму логина (значит, cookie
+# не подошла) или нет (значит, похоже, что уже залогинены).
+_FIND_TEXT_VISIBLE_JS = """
+    const want = arguments[0];
+    const norm = s => (s || '').replace(/\\s+/g, ' ').trim();
+    return Array.from(document.querySelectorAll('*')).some(el => {
+        if (norm(el.textContent) !== want) return false;
+        const r = el.getBoundingClientRect();
+        return r.width > 0 && r.height > 0;
+    });
+"""
+
 
 def _selector(bookmaker: str, key: str) -> str:
     env_key = f"{bookmaker.upper().replace(' ', '_').replace('.', '')}_{key.upper()}_SELECTOR"
@@ -185,6 +209,29 @@ def _click_by_text(driver, text: str) -> bool:
         return bool(driver.execute_script(_CLICK_BY_TEXT_JS, text))
     except Exception:  # noqa: BLE001
         return False
+
+
+def _text_visible(driver, text: str) -> bool:
+    try:
+        return bool(driver.execute_script(_FIND_TEXT_VISIBLE_JS, text))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _parse_cookie_string(raw: str) -> list[dict]:
+    """«name1=v1; name2=v2» (как в заголовке Cookie/DevTools) → список
+    словарей для driver.add_cookie(). Пустые/битые пары пропускаются."""
+    cookies: list[dict] = []
+    for part in raw.split(";"):
+        part = part.strip()
+        if not part or "=" not in part:
+            continue
+        name, _, value = part.partition("=")
+        name = name.strip()
+        value = value.strip()
+        if name:
+            cookies.append({"name": name, "value": value})
+    return cookies
 
 
 def _fill_username(user_el, login: str) -> None:
@@ -245,8 +292,10 @@ class SeleniumGenericConnector(BookmakerConnector):
     закрывает свой собственный браузер: медленнее, но безопасно."""
 
     def __init__(self, bookmaker: str, login: str, password: str,
-                account_id: int | None = None):
-        super().__init__(bookmaker, login, password, account_id=account_id)
+                account_id: int | None = None,
+                cookies: str | None = None):
+        super().__init__(bookmaker, login, password, account_id=account_id,
+                         cookies=cookies)
         self._driver = None
 
     def _ensure_driver(self):
@@ -271,6 +320,10 @@ class SeleniumGenericConnector(BookmakerConnector):
                 f"Для {self.bookmaker} не настроен URL входа — заполните "
                 f"app/connectors/selenium_generic.py::SELECTORS.")
         driver = self._ensure_driver()
+
+        if self.cookies and self._try_cookie_session(driver, cfg_url):
+            return  # вошли по сохранённой cookie — форма логина не нужна
+
         driver.get(cfg_url)
         wait = WebDriverWait(driver, 20)
 
@@ -344,6 +397,50 @@ class SeleniumGenericConnector(BookmakerConnector):
                 f"{self.bookmaker} (селектор {submit_sel!r}, текст "
                 f"{submit_text!r}) — сайт изменил вёрстку?")
         self._maybe_handle_otp(driver)
+
+    def _try_cookie_session(self, driver, cfg_url: str) -> bool:
+        """Пытается войти по сохранённой cookie вместо сценария логина —
+        см. `self.cookies` (докстринг base.BookmakerConnector) и раздел
+        README «Вход по cookie». Так обходится: капча BetBoom (она нужна
+        только при самом входе, не для уже авторизованной сессии) и
+        повторный СМС-код при каждом запуске.
+
+        Возвращает True, если сессия похожа на залогиненную (или БК не
+        даёт способа это проверить — см. `login_button_text`) — тогда
+        `_login()` дальше не идёт по форме. False — cookie не подошла
+        или протухла, откатываемся на обычный сценарий входа."""
+        cookies = _parse_cookie_string(self.cookies or "")
+        if not cookies:
+            return False
+        # add_cookie() требует, чтобы браузер уже был на нужном домене —
+        # иначе Selenium отклонит cookie с несовпадающим доменом.
+        driver.get(cfg_url)
+        added = 0
+        for c in cookies:
+            try:
+                driver.add_cookie(c)
+                added += 1
+            except Exception as exc:  # noqa: BLE001
+                log.debug("%s: cookie %s не принята браузером: %s",
+                         self.bookmaker, c.get("name"), exc)
+        if not added:
+            log.warning("%s: ни одна cookie из сохранённой сессии не "
+                       "принята браузером (не тот домен/формат?) — "
+                       "использую обычный сценарий входа.", self.bookmaker)
+            return False
+        driver.get(cfg_url)  # перезагрузка — чтобы сайт увидел новые cookie
+        time.sleep(2.0)
+        login_button_text = SELECTORS.get(self.bookmaker, {}).get(
+            "login_button_text")
+        if login_button_text and _text_visible(driver, login_button_text):
+            log.info("%s: сохранённая cookie не даёт вход (кнопка «%s» "
+                     "всё ещё видна на странице) — сессия протухла, "
+                     "переоформите её в браузере и вставьте заново.",
+                     self.bookmaker, login_button_text)
+            return False
+        log.info("%s: вход по сохранённой cookie — форма логина/капча "
+                 "не потребовались.", self.bookmaker)
+        return True
 
     def _maybe_handle_otp(self, driver) -> None:
         """Если после входа сайт показал поле кода подтверждения (СМС/пуш)

@@ -15,7 +15,10 @@
   требует проверки CSS-селекторов оператором перед использованием.
 
 get_connector(bookmaker, login, password) возвращает подходящий
-коннектор для указанной БК.
+коннектор для указанной БК. Опциональный `cookies` — сырая строка
+сессионной cookie («name1=v1; name2=v2»), вставленная оператором из
+СВОЕГО браузера (где вход уже пройден вручную, в т.ч. капча/СМС) — см.
+раздел «Вход по cookie» README и docstring selenium_generic.py.
 """
 from .base import BetLeg, BetResult, BookmakerConnector
 from .mock import MockConnector
@@ -23,11 +26,14 @@ from .selenium_generic import BOOKMAKER_CONNECTORS
 
 
 def get_connector(bookmaker: str, login: str, password: str,
-                  account_id: int | None = None) -> BookmakerConnector:
+                  account_id: int | None = None,
+                  cookies: str | None = None) -> BookmakerConnector:
     cls = BOOKMAKER_CONNECTORS.get(bookmaker)
     if cls is None:
-        return MockConnector(bookmaker, login, password, account_id=account_id)
-    return cls(bookmaker, login, password, account_id=account_id)
+        return MockConnector(bookmaker, login, password, account_id=account_id,
+                             cookies=cookies)
+    return cls(bookmaker, login, password, account_id=account_id,
+              cookies=cookies)
 
 
 __all__ = [

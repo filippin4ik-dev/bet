@@ -24,13 +24,15 @@
   font-size: 0.85rem;
   color: var(--muted);
 }
-.admin-form input, .admin-form select {
+.admin-form input, .admin-form select, .admin-form textarea {
   background: var(--bg);
   border: 1px solid var(--border);
   border-radius: 8px;
   padding: 8px 10px;
   color: var(--text);
   font-size: 0.95rem;
+  font-family: inherit;
+  resize: vertical;
 }
 .admin-form button, #add-account-btn, #logout-btn, #save-settings-btn {
   background: var(--accent);

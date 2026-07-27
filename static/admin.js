@@ -17,6 +17,7 @@ const els = {
   accountLabel: document.getElementById("account-label"),
   accountLogin: document.getElementById("account-login"),
   accountPassword: document.getElementById("account-password"),
+  accountCookies: document.getElementById("account-cookies"),
   accountCancel: document.getElementById("account-cancel"),
   accountError: document.getElementById("account-error"),
   settingEnabled: document.getElementById("setting-enabled"),
@@ -117,12 +118,14 @@ async function loadAccounts() {
       <td>${escapeHtml(a.bookmaker)}</td>
       <td>${escapeHtml(a.label || "")}</td>
       <td>${escapeHtml(a.login)}</td>
+      <td>${a.has_cookies ? '<span class="ok-text" title="Cookie задана — вход по ней, минуя форму/капчу">есть</span>' : "—"}</td>
       <td>${fmtMoney(a.balance)}</td>
       <td>${fmtDate(a.balance_updated_at)}</td>
       <td>${status}</td>
       <td><input type="checkbox" data-id="${a.id}" class="acc-enabled" ${a.enabled ? "checked" : ""}></td>
       <td>
         <button class="acc-refresh" data-id="${a.id}">Обновить баланс</button>
+        <button class="acc-cookies" data-id="${a.id}">🍪 Cookie</button>
         <button class="acc-delete" data-id="${a.id}">Удалить</button>
       </td>`;
     els.accountsBody.appendChild(tr);
@@ -148,6 +151,23 @@ els.accountsBody.addEventListener("click", async (e) => {
     if (!confirm("Удалить аккаунт?")) return;
     await api(`/api/admin/accounts/${id}`, { method: "DELETE" });
     await loadAccounts();
+  } else if (e.target.classList.contains("acc-cookies")) {
+    const raw = window.prompt(
+      "Вставьте cookie из СВОЕГО браузера (залогиненная сессия этой БК).\n" +
+      "DevTools → Network → любой запрос к сайту БК → Headers → Request " +
+      "Headers → Cookie — скопируйте всё значение.\n" +
+      "Пустое значение — убрать сохранённую cookie (вернуться к обычному входу):"
+    );
+    if (raw === null) return;  // отмена
+    try {
+      await api(`/api/admin/accounts/${id}`, {
+        method: "PUT",
+        body: JSON.stringify({ cookies: raw }),
+      });
+    } catch (err) {
+      alert(err.message || "Не удалось сохранить cookie");
+    }
+    await loadAccounts();
   }
 });
 
@@ -167,6 +187,7 @@ els.addAccountBtn.addEventListener("click", async () => {
   els.accountLabel.value = "";
   els.accountLogin.value = "";
   els.accountPassword.value = "";
+  els.accountCookies.value = "";
   els.accountError.hidden = true;
   els.accountModal.hidden = false;
 });
@@ -186,6 +207,7 @@ els.accountForm.addEventListener("submit", async (e) => {
         label: els.accountLabel.value,
         login: els.accountLogin.value,
         password: els.accountPassword.value,
+        cookies: els.accountCookies.value,
       }),
     });
     els.accountModal.hidden = true;

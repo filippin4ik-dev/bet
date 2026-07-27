@@ -78,6 +78,11 @@ class AccountBody(BaseModel):
     login: str
     password: str
     label: str = ""
+    # Опционально: сессионная cookie, скопированная оператором из СВОЕГО
+    # браузера (где вход уже пройден вручную — в т.ч. капча/СМС-код). См.
+    # README «Вход по cookie». Формат — как заголовок Cookie в DevTools:
+    # "name1=v1; name2=v2".
+    cookies: str = ""
 
 
 @router.post("/accounts")
@@ -87,7 +92,7 @@ def add_account(body: AccountBody, username: str = Depends(require_admin)):
     if not body.login or not body.password:
         raise HTTPException(status_code=400, detail="Логин и пароль обязательны")
     account_id = db.add_account(body.bookmaker, body.login, body.password,
-                                body.label)
+                                body.label, body.cookies)
     accounts_manager.refresh_balance_async(account_id)
     return {"ok": True, "id": account_id}
 
@@ -97,6 +102,9 @@ class AccountUpdateBody(BaseModel):
     label: str | None = None
     login: str | None = None
     password: str | None = None
+    # "" — явно очистить сохранённую cookie (напр. протухла); None — не
+    # трогать текущее значение.
+    cookies: str | None = None
 
 
 @router.put("/accounts/{account_id}")
@@ -105,8 +113,10 @@ def update_account(account_id: int, body: AccountUpdateBody,
     if db.get_account(account_id) is None:
         raise HTTPException(status_code=404, detail="Аккаунт не найден")
     db.update_account(account_id, enabled=body.enabled, label=body.label,
-                      login=body.login, password=body.password)
-    if body.login is not None or body.password is not None:
+                      login=body.login, password=body.password,
+                      cookies=body.cookies)
+    if body.login is not None or body.password is not None \
+            or body.cookies is not None:
         accounts_manager.refresh_balance_async(account_id)
     return {"ok": True}
 

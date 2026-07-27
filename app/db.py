@@ -93,6 +93,14 @@ def init_db() -> None:
                 created_at        TEXT NOT NULL
             )
         """)
+        # cookies_enc — опциональная сессионная cookie (зашифровано так же,
+        # как пароль), вставленная оператором вручную из СВОЕГО браузера,
+        # где вход (в т.ч. капча/СМС-код) уже пройден человеком. Коннектор
+        # пробует её ПЕРЕД сценарием автологина — см. README и docstring
+        # app/connectors/selenium_generic.py.
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(bk_accounts)")}
+        if "cookies_enc" not in cols:
+            conn.execute("ALTER TABLE bk_accounts ADD COLUMN cookies_enc TEXT")
 
         # Журнал попыток авто-ставки (реальных и в режиме имитации) —
         # для аудита: что, когда и с каким результатом бот пытался поставить.
@@ -156,16 +164,16 @@ def get_history(limit: int = 100) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 def add_account(bookmaker: str, login: str, password: str,
-                label: str = "") -> int:
+               label: str = "", cookies: str = "") -> int:
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     with _lock, _connect() as conn:
         cur = conn.execute(
             """INSERT INTO bk_accounts
-               (bookmaker, label, login_enc, password_enc, enabled,
-                created_at)
-               VALUES (?,?,?,?,1,?)""",
+               (bookmaker, label, login_enc, password_enc, cookies_enc,
+                enabled, created_at)
+               VALUES (?,?,?,?,?,1,?)""",
             (bookmaker, label, encrypt_str(login), encrypt_str(password),
-             now),
+             encrypt_str(cookies) if cookies else None, now),
         )
         return cur.lastrowid
 
@@ -179,6 +187,9 @@ def _account_row_to_dict(r: sqlite3.Row, reveal: bool = False) -> dict:
         login = decrypt_str(d.pop("login_enc"))
         d.pop("password_enc")
         d["login"] = _mask(login)
+    # Cookie никогда не отдаём по API (как и пароль) — только признак,
+    # что она задана, чтобы фронтенд мог показать «cookie: есть/нет».
+    d["has_cookies"] = bool(d.pop("cookies_enc", None))
     d["enabled"] = bool(d["enabled"])
     return d
 
@@ -217,10 +228,24 @@ def get_account_credentials(account_id: int) -> tuple[str, str] | None:
     return decrypt_str(r["login_enc"]), decrypt_str(r["password_enc"])
 
 
+def get_account_cookies(account_id: int) -> str | None:
+    """Сырая строка cookie в открытом виде («name1=v1; name2=v2») — только
+    для внутреннего использования коннекторами, никогда не отдаётся по
+    API. None, если cookie не задана оператором."""
+    with _lock, _connect() as conn:
+        r = conn.execute(
+            "SELECT cookies_enc FROM bk_accounts WHERE id=?",
+            (account_id,)).fetchone()
+    if not r or not r["cookies_enc"]:
+        return None
+    return decrypt_str(r["cookies_enc"])
+
+
 def update_account(account_id: int, *, enabled: bool | None = None,
                    label: str | None = None,
                    login: str | None = None,
-                   password: str | None = None) -> None:
+                   password: str | None = None,
+                   cookies: str | None = None) -> None:
     fields, params = [], []
     if enabled is not None:
         fields.append("enabled=?")
@@ -234,6 +259,10 @@ def update_account(account_id: int, *, enabled: bool | None = None,
     if password is not None:
         fields.append("password_enc=?")
         params.append(encrypt_str(password))
+    if cookies is not None:
+        # Пустая строка — оператор явно очистил cookie (напр. протухла).
+        fields.append("cookies_enc=?")
+        params.append(encrypt_str(cookies) if cookies else None)
     if not fields:
         return
     params.append(account_id)
