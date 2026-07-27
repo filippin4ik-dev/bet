@@ -26,11 +26,24 @@ place_bet честно возвращает ошибку с прямой ссы�
 import logging
 import os
 import re
+import time
 
+from .. import otp
 from ..parsers import selenium_helper
 from .base import BetLeg, BetResult, BookmakerConnector
 
 log = logging.getLogger("connectors.selenium")
+
+# Эвристика поля СМС/OTP-кода — типовые атрибуты формы подтверждения
+# входа. НЕ проверено на живом запросе кода ни у одной БК (см. общее
+# предупреждение в докстринге модуля выше и в app/otp.py).
+OTP_SELECTORS = (
+    "input[autocomplete='one-time-code'], input[name*='otp' i], "
+    "input[name*='code' i], input[id*='otp' i], input[id*='code' i], "
+    "input[placeholder*='код' i]"
+)
+OTP_WAIT_SECONDS = 8.0        # сколько ждать появления поля кода после логина
+OTP_RELAY_TIMEOUT = 180.0     # сколько ждать, пока оператор введёт код в админке
 
 # Best-effort: типовые селекторы форм входа. НЕ проверены на реальных
 # аккаунтах (см. предупреждение в докстринге модуля).
@@ -132,6 +145,49 @@ class SeleniumGenericConnector(BookmakerConnector):
                 f"Не удалось найти форму входа {self.bookmaker} по "
                 f"настроенным селекторам (сайт изменил вёрстку?): {exc}"
             ) from exc
+        self._maybe_handle_otp(driver)
+
+    def _maybe_handle_otp(self, driver) -> None:
+        """Если после входа сайт показал поле кода подтверждения (СМС/пуш)
+        — просит код у оператора через админку (app/otp.py) и вписывает
+        его в форму. Если аккаунт не привязан к записи в базе
+        (account_id=None) или поле не появилось за OTP_WAIT_SECONDS —
+        считаем, что код не запрошен, и продолжаем как обычно."""
+        if self.account_id is None:
+            return
+        from selenium.webdriver.common.by import By
+
+        deadline = time.monotonic() + OTP_WAIT_SECONDS
+        otp_input = None
+        while time.monotonic() < deadline:
+            time.sleep(1.0)
+            try:
+                els = driver.find_elements(By.CSS_SELECTOR, OTP_SELECTORS)
+            except Exception:  # noqa: BLE001
+                els = []
+            visible = [e for e in els if e.is_displayed()]
+            if visible:
+                otp_input = visible[0]
+                break
+        if otp_input is None:
+            return  # обычный вход без доп. подтверждения
+
+        log.info("%s запросил код подтверждения — жду ввода в админке "
+                 "(до %.0f с)", self.bookmaker, OTP_RELAY_TIMEOUT)
+        code = otp.request_otp(self.account_id, self.bookmaker,
+                               timeout=OTP_RELAY_TIMEOUT)
+        otp_input.clear()
+        otp_input.send_keys(code)
+        # кнопка подтверждения кода часто та же форма — пробуем тот же
+        # submit-селектор БК, а если не сработает, форма может уходить
+        # по Enter (send_keys уже это не делает, поэтому пробуем явно)
+        try:
+            submit_sel = _selector(self.bookmaker, "submit")
+            driver.find_element(By.CSS_SELECTOR, submit_sel).click()
+        except Exception as exc:  # noqa: BLE001
+            log.info("%s: не удалось нажать подтверждение кода "
+                     "автоматически (%s) — если это критично, "
+                     "донастройте selenium_generic.py", self.bookmaker, exc)
 
     def get_balance(self) -> float:
         import time

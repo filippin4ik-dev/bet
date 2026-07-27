@@ -22,11 +22,12 @@ from .mock import MockConnector
 from .selenium_generic import BOOKMAKER_CONNECTORS
 
 
-def get_connector(bookmaker: str, login: str, password: str) -> BookmakerConnector:
+def get_connector(bookmaker: str, login: str, password: str,
+                  account_id: int | None = None) -> BookmakerConnector:
     cls = BOOKMAKER_CONNECTORS.get(bookmaker)
     if cls is None:
-        return MockConnector(bookmaker, login, password)
-    return cls(bookmaker, login, password)
+        return MockConnector(bookmaker, login, password, account_id=account_id)
+    return cls(bookmaker, login, password, account_id=account_id)
 
 
 __all__ = [

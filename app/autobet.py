@@ -135,7 +135,8 @@ def execute_plan(plan: BetPlan, dry_run: bool) -> list[dict]:
         else:
             creds = db.get_account_credentials(acc["id"])
             login, password = creds if creds else ("", "")
-            connector = get_connector(leg.bookmaker, login, password)
+            connector = get_connector(leg.bookmaker, login, password,
+                                      account_id=acc["id"])
         try:
             res = connector.place_bet(bet_leg)
             results.append({

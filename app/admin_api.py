@@ -10,7 +10,7 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel
 
-from . import accounts_manager, config, db
+from . import accounts_manager, config, db, otp
 from .security import create_session_token, verify_admin_password, \
     verify_session_token
 
@@ -124,6 +124,29 @@ def refresh_balance(account_id: int, username: str = Depends(require_admin)):
     accounts_manager.refresh_balance(account_id)
     acc = db.get_account(account_id)
     return {"ok": acc.get("last_error") is None, "account": acc}
+
+
+@router.get("/otp_pending")
+def otp_pending(username: str = Depends(require_admin)):
+    """Аккаунты, у которых сейчас идёт вход и БК запросила код
+    подтверждения (СМС/пуш) — фронтенд опрашивает это и показывает
+    диалог для ввода кода."""
+    return {"pending": otp.pending_accounts()}
+
+
+class OtpCodeBody(BaseModel):
+    code: str
+
+
+@router.post("/accounts/{account_id}/otp")
+def submit_otp_code(account_id: int, body: OtpCodeBody,
+                    username: str = Depends(require_admin)):
+    if not otp.submit_otp(account_id, body.code):
+        raise HTTPException(
+            status_code=404,
+            detail="Нет ожидающего запроса кода для этого аккаунта "
+                   "(возможно, уже истёк таймаут)")
+    return {"ok": True}
 
 
 @router.get("/limits")

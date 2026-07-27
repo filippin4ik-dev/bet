@@ -49,6 +49,7 @@ function showLoggedIn(username) {
   els.adminView.hidden = false;
   els.whoami.textContent = `Вы: ${username}`;
   els.logoutBtn.hidden = false;
+  sessionActive = true;
 }
 
 function showLoggedOut() {
@@ -56,6 +57,7 @@ function showLoggedOut() {
   els.adminView.hidden = true;
   els.whoami.textContent = "";
   els.logoutBtn.hidden = true;
+  sessionActive = false;
 }
 
 async function checkSession() {
@@ -236,5 +238,41 @@ async function loadBetLog() {
 async function loadAll() {
   await Promise.all([loadAccounts(), loadSettings(), loadBetLog()]);
 }
+
+/* ---------- ретрансляция СМС/OTP-кода при входе ---------- */
+/* Если БК запросила код при входе, коннектор ждёт его в фоновом потоке
+ * (см. app/otp.py). Раз в несколько секунд проверяем, не ждёт ли
+ * какой-то аккаунт код, и показываем диалог для его ввода. */
+
+const otpPrompted = new Set();
+let sessionActive = false;
+
+async function pollOtp() {
+  if (!sessionActive) return;
+  try {
+    const { pending } = await api("/api/admin/otp_pending");
+    for (const p of pending) {
+      if (otpPrompted.has(p.account_id)) continue;
+      otpPrompted.add(p.account_id);
+      const code = window.prompt(
+        `БК «${p.bookmaker}» запросила код подтверждения (СМС/пуш) при входе.\n` +
+        `Введите код — бот впишет его на сайте автоматически:`);
+      if (code) {
+        try {
+          await api(`/api/admin/accounts/${p.account_id}/otp`, {
+            method: "POST",
+            body: JSON.stringify({ code }),
+          });
+        } catch (err) {
+          alert(`Не удалось передать код: ${err.message}`);
+        }
+      }
+      otpPrompted.delete(p.account_id);
+    }
+  } catch (_) {
+    // не залогинены / нет прав — просто не показываем диалог
+  }
+}
+setInterval(pollOtp, 4000);
 
 checkSession();

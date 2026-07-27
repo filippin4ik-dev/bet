@@ -14,7 +14,10 @@ _tmpdir = tempfile.mkdtemp()
 os.environ["DB_PATH"] = str(Path(_tmpdir) / "test.sqlite3")
 os.environ["SECRET_KEY"] = "test-secret-key-not-for-prod"
 
-from app import accounts_manager, autobet, config, db  # noqa: E402
+import threading  # noqa: E402
+import time  # noqa: E402
+
+from app import accounts_manager, autobet, config, db, otp  # noqa: E402
 from app.security import (create_session_token, decrypt_str, encrypt_str,  # noqa: E402
                           verify_admin_password, verify_session_token)
 
@@ -135,6 +138,44 @@ def test_place_on_arb_logs_bet():
     print("OK: test_place_on_arb_logs_bet")
 
 
+def test_otp_relay_roundtrip():
+    """Коннектор (фоновый поток) ждёт код, админка вводит его — код
+    должен дойти обратно до заблокированного потока."""
+    result = {}
+
+    def worker():
+        result["code"] = otp.request_otp(999, "Fonbet", timeout=5)
+
+    t = threading.Thread(target=worker)
+    t.start()
+    time.sleep(0.3)
+    pending = otp.pending_accounts()
+    assert any(p["account_id"] == 999 for p in pending)
+    assert otp.submit_otp(999, "654321")
+    t.join(3)
+    assert result.get("code") == "654321"
+    assert not any(p["account_id"] == 999 for p in otp.pending_accounts())
+    print("OK: test_otp_relay_roundtrip")
+
+
+def test_otp_relay_timeout():
+    """Если оператор не успел ввести код — поток коннектора должен
+    получить понятную ошибку, а не зависнуть навечно."""
+    raised = {}
+
+    def worker():
+        try:
+            otp.request_otp(998, "BetBoom", timeout=0.3)
+        except TimeoutError as exc:
+            raised["msg"] = str(exc)
+
+    t = threading.Thread(target=worker)
+    t.start()
+    t.join(2)
+    assert "msg" in raised
+    print("OK: test_otp_relay_timeout")
+
+
 if __name__ == "__main__":
     test_encrypt_roundtrip()
     test_admin_password_check()
@@ -143,4 +184,6 @@ if __name__ == "__main__":
     test_autobet_plan_without_accounts_is_zero()
     test_autobet_plan_with_balances_caps_stake()
     test_place_on_arb_logs_bet()
+    test_otp_relay_roundtrip()
+    test_otp_relay_timeout()
     print("Все тесты прошли.")

@@ -28,10 +28,14 @@ class BetResult:
 class BookmakerConnector(ABC):
     """Интерфейс коннектора к личному кабинету одной БК."""
 
-    def __init__(self, bookmaker: str, login: str, password: str):
+    def __init__(self, bookmaker: str, login: str, password: str,
+                 account_id: int | None = None):
         self.bookmaker = bookmaker
         self.login = login
         self.password = password
+        # id аккаунта в базе — нужен коннекторам, умеющим запрашивать
+        # SMS/OTP-код через app/otp.py (ретрансляция кода из админки).
+        self.account_id = account_id
 
     @abstractmethod
     def get_balance(self) -> float:
