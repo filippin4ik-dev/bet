@@ -158,6 +158,44 @@ def test_market_wrong_vector_length_rejected():
     assert o is None
 
 
+# ---------- @1P@/@2P@/@1OT@/@2OT@ — период с номером ПРЯМО в тексте ----------
+# Раньше эти плейсхолдеры не распознавались вообще (только @1HT@/@2HT@/
+# @[a]P@) и молча вырезались как «период по умолчанию» — фора/тотал
+# конкретного периода теряли метку периода и ЛОЖНО сшивались с тем же
+# рынком всего матча (see PR с фиксом _NUM_PERIOD_RE/_NUM_OT_RE).
+
+def test_market_numeric_period_placeholder_hcap_differs_from_main():
+    """«Фора угловых 1-го периода» и «Фора угловых» (весь матч) — РАЗНЫЕ
+    рынки, market_key не должен совпадать."""
+    tl_main = _tl("Фора угловых [a] (@NP@)", "1", "2")
+    tl_period1 = _tl("Фора угловых [a] (@1P@)", "1", "2")
+    o_main = _market([1.9, 1.9], tl_main, koef="1.5", fav=1)
+    o_period1 = _market([1.9, 1.9], tl_period1, koef="1.5", fav=1)
+    assert o_main is not None and o_period1 is not None
+    assert o_main.market_key != o_period1.market_key
+    assert "period1" in o_period1.market_key
+    assert "1-й период" in o_period1.market
+
+
+def test_market_numeric_period_placeholder_second_period():
+    tl = _tl("Тотал угловых [a] (@2P@)", "Больше", "Меньше")
+    o = _market([1.85, 1.95], tl, koef="4.5")
+    assert o is not None
+    assert "period2" in o.market_key
+    assert "2-й период" in o.market
+
+
+def test_market_overtime_placeholder_differs_from_main():
+    tl_main = _tl("Фора угловых [a] (@NP@)", "1", "2")
+    tl_ot = _tl("Фора угловых [a] (@1OT@)", "1", "2")
+    o_main = _market([1.9, 1.9], tl_main, koef="1.5", fav=1)
+    o_ot = _market([1.9, 1.9], tl_ot, koef="1.5", fav=1)
+    assert o_main is not None and o_ot is not None
+    assert o_main.market_key != o_ot.market_key
+    assert "ot1" in o_ot.market_key
+    assert "овертайм" in o_ot.market
+
+
 if __name__ == "__main__":
     test_decodable_exotic_accepts_any_subject_total()
     test_decodable_exotic_accepts_any_subject_hcap()
@@ -175,4 +213,7 @@ if __name__ == "__main__":
     test_market_individual_oddeven_not_supported_but_no_crash()
     test_market_multi_outcome_still_rejected()
     test_market_wrong_vector_length_rejected()
+    test_market_numeric_period_placeholder_hcap_differs_from_main()
+    test_market_numeric_period_placeholder_second_period()
+    test_market_overtime_placeholder_differs_from_main()
     print("OK: all winline exotic tests passed")
