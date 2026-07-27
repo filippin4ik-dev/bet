@@ -21,7 +21,21 @@ app/diagnose_account.py):
   a robot»). Автоматически решать капчу коннектор не пытается (это не
   просто «другой селектор» — это отдельная защита от ботов, которую
   умышленно не обходим): при обнаружении капчи `_login()` поднимает явную
-  ошибку вместо тихого зависания на неактивной кнопке.
+  ошибку вместо тихого зависания на неактивной кнопке. Селектор баланса
+  подтверждён по реальному DOM (мобильная вёрстка, кнопка баланса в
+  хедере — `[class*='MobileBalanceText']`, см. SELECTORS ниже).
+  **Важно:** авторизация у BetBoom — не браузерная cookie, а JWT-токен
+  (обычно лежит в `window.localStorage`, а не в cookie), см. «Вход по
+  cookie» ниже про формат `ls:key=value`. При этом сайт защищён Qrator
+  (заметная JS-фингерпринт-отправка на `/api/fl` при каждой загрузке
+  страницы) — проверка `POST /api/auth/check-token` с токеном, снятым в
+  ОДНОМ браузере/IP, но отправленным С ДРУГОГО IP (из этой облачной
+  песочницы), вернула `{"isNeedLogout": true}`, т.е. сайт считает сессию
+  недействительной при смене IP/фингерпринта. Это значит, что просто
+  скопировать токен недостаточно — скорее всего, нужен резидентный/
+  мобильный российский IP того же региона, что и исходный вход (через
+  `BETBOOM_PROXY`, аналогично Fonbet), иначе даже валидный токен не
+  примется.
 - **Winline** — форма входа ОТКРЫВАЕТСЯ и поля логина/пароля/кнопка входа
   найдены и подтверждены (`input[name='auth-phone-base']` /
   `input[name='auth-password-base']` / `button.ww-login__btn[type=
@@ -58,6 +72,13 @@ BetBoom — капчей, для Winline/Liga Stavok/bc.game не было те�
 из реального браузера, где вход выполнил человек (пройдя капчу/2FA сам),
 и она не решает проблему Fonbet — анти-бот там блокирует ЛЮБОЙ запрос
 с этого IP, включая уже авторизованные (сначала нужен `FONBET_PROXY`).
+У BetBoom, чья сессия — JWT в `localStorage`, а не cookie, в ту же
+строку можно добавить запись `ls:key=value` (напр. `ls:token=eyJ...`) —
+ключ подсмотрите в DevTools → Application → Local Storage у себя в
+браузере (присылайте сюда ТОЛЬКО имя ключа, не значение). Но см. выше:
+даже с правильным ключом BetBoom, похоже, привязывает токен к
+IP/фингерпринту (Qrator), так что без `BETBOOM_PROXY` под тот же регион
+сессия может не приняться.
 
 Автоматическая ПОСТАНОВКА СТАВКИ (place_bet) для всех БК НЕ реализована —
 DOM ставочного слипа у каждой БК свой, часто с капчей/доп. подтверждением,
@@ -121,7 +142,13 @@ SELECTORS: dict[str, dict[str, str]] = {
         "username": "input[name='phone'], input[name='login']",
         "password": "input[name='password']",
         "submit_text": "Войти",
-        "balance": "[class*='balance'], [class*='Balance']",
+        # "[class*='MobileBalanceText']" — подтверждено по реальному DOM
+        # (мобильная вёрстка: `<button class="MobileBalance...">…<p
+        # class="…MobileBalanceText…">0 ₽</p></button>` в хедере). Хеш-суффикс
+        # styled-components (после "-sc-...-N") может смениться при редеплое
+        # сайта, поэтому селектор — по префиксу класса, не по полному имени.
+        "balance": "[class*='MobileBalanceText'], [class*='balance'], "
+                  "[class*='Balance']",
     },
     "Fonbet": {
         "login_url": "https://fonbet.ru/",
@@ -220,11 +247,12 @@ def _text_visible(driver, text: str) -> bool:
 
 def _parse_cookie_string(raw: str) -> list[dict]:
     """«name1=v1; name2=v2» (как в заголовке Cookie/DevTools) → список
-    словарей для driver.add_cookie(). Пустые/битые пары пропускаются."""
+    словарей для driver.add_cookie(). Пустые/битые пары и записи с
+    префиксом «ls:» (см. _parse_local_storage_string) пропускаются."""
     cookies: list[dict] = []
     for part in raw.split(";"):
         part = part.strip()
-        if not part or "=" not in part:
+        if not part or "=" not in part or part.startswith("ls:"):
             continue
         name, _, value = part.partition("=")
         name = name.strip()
@@ -232,6 +260,25 @@ def _parse_cookie_string(raw: str) -> list[dict]:
         if name:
             cookies.append({"name": name, "value": value})
     return cookies
+
+
+def _parse_local_storage_string(raw: str) -> dict[str, str]:
+    """Записи вида «ls:key=value» в той же строке, что и cookie (через
+    «;») — для БК, где сессия хранится не в cookie браузера, а в
+    window.localStorage (подтверждено на BetBoom: авторизация — JWT-токен,
+    а не cookie, см. докстринг файла выше). Обычные записи без префикса
+    «ls:» здесь игнорируются (это cookie, см. _parse_cookie_string)."""
+    items: dict[str, str] = {}
+    for part in raw.split(";"):
+        part = part.strip()
+        if not part.startswith("ls:") or "=" not in part[len("ls:"):]:
+            continue
+        name, _, value = part[len("ls:"):].partition("=")
+        name = name.strip()
+        value = value.strip()
+        if name:
+            items[name] = value
+    return items
 
 
 def _fill_username(user_el, login: str) -> None:
@@ -408,12 +455,20 @@ class SeleniumGenericConnector(BookmakerConnector):
         Возвращает True, если сессия похожа на залогиненную (или БК не
         даёт способа это проверить — см. `login_button_text`) — тогда
         `_login()` дальше не идёт по форме. False — cookie не подошла
-        или протухла, откатываемся на обычный сценарий входа."""
-        cookies = _parse_cookie_string(self.cookies or "")
-        if not cookies:
+        или протухла, откатываемся на обычный сценарий входа.
+
+        Поддержаны два формата в `self.cookies` (можно смешивать через
+        «;»): обычные cookie «name=value» и «ls:key=value» — запись в
+        window.localStorage (нужна БК типа BetBoom, у которых сессия —
+        JWT-токен в localStorage, а не браузерная cookie)."""
+        raw = self.cookies or ""
+        cookies = _parse_cookie_string(raw)
+        local_storage = _parse_local_storage_string(raw)
+        if not cookies and not local_storage:
             return False
-        # add_cookie() требует, чтобы браузер уже был на нужном домене —
-        # иначе Selenium отклонит cookie с несовпадающим доменом.
+        # add_cookie()/localStorage требуют, чтобы браузер уже был на нужном
+        # домене — иначе Selenium отклонит cookie с несовпадающим доменом,
+        # а localStorage окажется недоступен (SecurityError на about:blank).
         driver.get(cfg_url)
         added = 0
         for c in cookies:
@@ -423,12 +478,22 @@ class SeleniumGenericConnector(BookmakerConnector):
             except Exception as exc:  # noqa: BLE001
                 log.debug("%s: cookie %s не принята браузером: %s",
                          self.bookmaker, c.get("name"), exc)
+        for key, value in local_storage.items():
+            try:
+                driver.execute_script(
+                    "window.localStorage.setItem(arguments[0], arguments[1]);",
+                    key, value)
+                added += 1
+            except Exception as exc:  # noqa: BLE001
+                log.debug("%s: localStorage[%s] не удалось установить: %s",
+                         self.bookmaker, key, exc)
         if not added:
-            log.warning("%s: ни одна cookie из сохранённой сессии не "
-                       "принята браузером (не тот домен/формат?) — "
-                       "использую обычный сценарий входа.", self.bookmaker)
+            log.warning("%s: ни одна cookie/localStorage-запись из "
+                       "сохранённой сессии не принята браузером (не тот "
+                       "домен/формат?) — использую обычный сценарий "
+                       "входа.", self.bookmaker)
             return False
-        driver.get(cfg_url)  # перезагрузка — чтобы сайт увидел новые cookie
+        driver.get(cfg_url)  # перезагрузка — чтобы сайт увидел новую сессию
         time.sleep(2.0)
         login_button_text = SELECTORS.get(self.bookmaker, {}).get(
             "login_button_text")

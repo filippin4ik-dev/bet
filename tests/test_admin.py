@@ -115,7 +115,29 @@ def test_parse_cookie_string():
     # значение может содержать "=" (напр. base64 с паддингом)
     assert _parse_cookie_string("t=abc=def==") == [
         {"name": "t", "value": "abc=def=="}]
+    # записи "ls:key=value" (localStorage, напр. JWT-токен BetBoom) — не
+    # обычные cookie, _parse_cookie_string их пропускает
+    assert _parse_cookie_string("a=1; ls:token=eyJ.x.y; b=2") == [
+        {"name": "a", "value": "1"}, {"name": "b", "value": "2"}]
     print("OK: test_parse_cookie_string")
+
+
+def test_parse_local_storage_string():
+    """"ls:key=value" — сессия БК типа BetBoom, хранящаяся не в cookie, а
+    в window.localStorage (JWT-токен) — см. докстринг selenium_generic.py
+    про Qrator/BetBoom и README «Вход по cookie»."""
+    from app.connectors.selenium_generic import _parse_local_storage_string
+    assert _parse_local_storage_string("ls:token=eyJ.x.y") == {
+        "token": "eyJ.x.y"}
+    # смешанная строка: обычные cookie игнорируются, ls: — разбираются
+    assert _parse_local_storage_string("a=1; ls:token=abc; ls:other=xyz") == {
+        "token": "abc", "other": "xyz"}
+    assert _parse_local_storage_string("") == {}
+    assert _parse_local_storage_string("a=1; b=2") == {}
+    # значение с "=" (base64-паддинг) сохраняется целиком
+    assert _parse_local_storage_string("ls:t=abc=def==") == {
+        "t": "abc=def=="}
+    print("OK: test_parse_local_storage_string")
 
 
 def test_autobet_plan_without_accounts_is_zero():
@@ -227,6 +249,7 @@ if __name__ == "__main__":
     test_account_crud_and_balance()
     test_account_cookies_roundtrip()
     test_parse_cookie_string()
+    test_parse_local_storage_string()
     test_autobet_plan_without_accounts_is_zero()
     test_autobet_plan_with_balances_caps_stake()
     test_place_on_arb_logs_bet()
