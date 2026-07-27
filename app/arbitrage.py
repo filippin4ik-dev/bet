@@ -12,6 +12,7 @@
   а не только лучшая — пользователь видит все вилки, включая те, где
   кэф ниже максимального.
 """
+import itertools
 import logging
 import re
 from collections import defaultdict
@@ -19,7 +20,7 @@ from typing import Iterable
 
 from .config import (ARB_MAX_PROFIT, BANKS, START_TS_TOLERANCE,
                      START_TS_TOLERANCE_COMBAT)
-from .models import Arb, KIND_PREMATCH, MarketOdds
+from .models import Arb, Arb3, KIND_PREMATCH, MarketOdds
 from .parsers.html_utils import display_market, neg_hcap as _neg_hcap
 
 log = logging.getLogger("arbitrage")
@@ -51,6 +52,22 @@ def calc_stakes(k1: float, k2: float, bank: float) -> dict:
     payout = stake1 * k1
     return {
         "stake1": round(stake1),
+        "stake2": round(stake2),
+        "payout": round(payout, 2),
+        "profit": round(payout - bank, 2),
+    }
+
+
+def calc_stakes3(k1: float, kx: float, k2: float, bank: float) -> dict:
+    """То же для трёхисходной вилки (рынок «Исход 1X2»: П1/X/П2)."""
+    s = 1 / k1 + 1 / kx + 1 / k2
+    stake1 = bank * (1 / k1) / s
+    stakex = bank * (1 / kx) / s
+    stake2 = bank - stake1 - stakex
+    payout = stake1 * k1
+    return {
+        "stake1": round(stake1),
+        "stakex": round(stakex),
         "stake2": round(stake2),
         "payout": round(payout, 2),
         "profit": round(payout - bank, 2),
@@ -204,6 +221,13 @@ def find_arbs(odds: Iterable[MarketOdds]) -> list[Arb]:
     })
 
     for o in odds:
+        if o.market_key.startswith("winner1x2"):
+            # Трёхисходный рынок «Исход 1X2» — отдельный движок
+            # find_arbs_1x2. Смешивать его сюда ОПАСНО: если считать вилку
+            # только по П1/П2, игнорируя цену на ничью, ставка не покрывает
+            # исход «ничья» — это НЕ гарантированная прибыль, а обычная
+            # игра на «без ничьей», хоть маржа 1/К1+1/К2 и меньше 1.
+            continue
         if not (o.k1 and o.k2 and o.k1 > 1 and o.k2 > 1):
             continue
         teams = frozenset((norm_team(o.team1), norm_team(o.team2)))
@@ -289,6 +313,101 @@ def find_arbs(odds: Iterable[MarketOdds]) -> list[Arb]:
                     stakes={str(b): calc_stakes(first.odds, second.odds, b)
                             for b in BANKS},
                 ))
+
+    arbs.sort(key=lambda a: a.profit_pct, reverse=True)
+    return arbs
+
+
+def find_arbs_1x2(odds: Iterable[MarketOdds]) -> list[Arb3]:
+    """Ищет ТРЁХисходные вилки на рынке «Исход 1X2» (П1/X/П2).
+
+    Отдельный движок от find_arbs: рынок с тремя взаимоисключающими
+    исходами требует перебора троек кэфов (а не пар), поэтому логика
+    группировки/сопоставления событий дублирует find_arbs, но подбор
+    комбинаций и формула маржи — трёхсторонние.
+    """
+    odds = list(odds)
+    time_clusters = _time_clusters(odds)
+
+    groups: dict[tuple, dict] = defaultdict(lambda: {
+        "outcomes": {}, "sample": None, "books": set(),
+    })
+
+    for o in odds:
+        if not o.market_key.startswith("winner1x2"):
+            continue
+        if not (o.k1 and o.k2 and o.k3
+                and o.k1 > 1 and o.k2 > 1 and o.k3 > 1):
+            continue
+        teams = frozenset((norm_team(o.team1), norm_team(o.team2)))
+        if len(teams) < 2:
+            continue
+        cluster = 0
+        if o.kind == KIND_PREMATCH and o.start_ts:
+            cluster = time_clusters.get((o.kind, teams), {}).get(o.start_ts, 0)
+        key = (o.kind, teams, cluster, o.market_key)
+        g = groups[key]
+        g["sample"] = g["sample"] or o
+        g["books"].add(o.bookmaker)
+        t1_id = f"team:{norm_team(o.team1)}"
+        t2_id = f"team:{norm_team(o.team2)}"
+        for oid, label, k in ((t1_id, o.outcome1, o.k1),
+                              ("draw", o.outcome3 or "X", o.k3),
+                              (t2_id, o.outcome2, o.k2)):
+            per_bk = g["outcomes"].setdefault(oid, {})
+            cur = per_bk.get(o.bookmaker)
+            if cur is None or k > cur.odds:
+                per_bk[o.bookmaker] = _Outcome(oid, label, k, o.bookmaker,
+                                               o.url)
+
+    arbs: list[Arb3] = []
+    for (kind, teams, cluster, market_group), g in groups.items():
+        outs = g["outcomes"]
+        if len(outs) != 3 or len(g["books"]) < 2:
+            continue  # нужны все 3 исхода и минимум 2 БК
+        s = g["sample"]
+        want_t1 = f"team:{norm_team(s.team1)}"
+        want_t2 = f"team:{norm_team(s.team2)}"
+        if want_t1 not in outs or want_t2 not in outs or "draw" not in outs:
+            continue
+        legs = [outs[want_t1], outs["draw"], outs[want_t2]]
+        warned = False
+        # ВСЕ комбинации троек БК (не только максимальные кэфы) — как и
+        # в двухисходном движке, показываем каждую валидную вилку
+        for c1, cx, c2 in itertools.product(
+                *(list(d.values()) for d in legs)):
+            if len({c1.bookmaker, cx.bookmaker, c2.bookmaker}) < 2:
+                continue  # все три ставки у одной БК — это её же маржа
+            margin = 1 / c1.odds + 1 / cx.odds + 1 / c2.odds
+            if margin >= 1:
+                continue
+            profit_pct = (1 / margin - 1) * 100
+            if profit_pct > ARB_MAX_PROFIT:
+                if not warned:
+                    log.info(
+                        "Отброшена подозрительная 1X2-вилка %.1f%% "
+                        "(%s — %s) — похоже на ошибку сопоставления",
+                        profit_pct, s.team1, s.team2)
+                    warned = True
+                continue
+            arbs.append(Arb3(
+                match_key=(f"{kind}|{'|'.join(sorted(teams))}|{cluster}|"
+                           f"{market_group}|"
+                           f"{c1.bookmaker}|{cx.bookmaker}|{c2.bookmaker}"),
+                sport=s.sport, team1=s.team1, team2=s.team2,
+                market=display_market(s.market_key, s.market),
+                outcome1="П1", outcomex="X", outcome2="П2",
+                k1_max=round(c1.odds, 3), k1_bookmaker=c1.bookmaker,
+                k1_url=c1.url,
+                kx_max=round(cx.odds, 3), kx_bookmaker=cx.bookmaker,
+                kx_url=cx.url,
+                k2_max=round(c2.odds, 3), k2_bookmaker=c2.bookmaker,
+                k2_url=c2.url,
+                margin=margin, profit_pct=profit_pct,
+                kind=kind, start_time=s.start_time, start_ts=s.start_ts,
+                stakes={str(b): calc_stakes3(c1.odds, cx.odds, c2.odds, b)
+                        for b in BANKS},
+            ))
 
     arbs.sort(key=lambda a: a.profit_pct, reverse=True)
     return arbs

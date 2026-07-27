@@ -15,10 +15,10 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from . import db
 from .arbitrage import (_market_group, _neg_hcap, _time_clusters, find_arbs,
-                        norm_team)
+                        find_arbs_1x2, norm_team)
 from .config import (LIVE_ODDS_TTL, LIVE_PER_BK_GAP, LIVE_SCAN_INTERVAL,
                      ODDS_TTL, SCAN_INTERVAL)
-from .models import Arb, KIND_LIVE, KIND_PREMATCH, MarketOdds
+from .models import Arb, Arb3, KIND_LIVE, KIND_PREMATCH, MarketOdds
 from .parsers import get_parsers
 from .parsers.base import BaseParser
 from .parsers.html_utils import display_market
@@ -42,6 +42,9 @@ class Scanner:
         self.parsers = get_parsers()
         self._lock = threading.Lock()
         self._arbs: list[Arb] = []
+        # трёхисходные вилки (рынок «Исход 1X2»: П1/X/П2) — отдельный список,
+        # т.к. у Arb3 другая форма (3 плеча вместо 2)
+        self._arbs3: list[Arb3] = []
         # котировки по каждой БК (живут между циклами) + время их получения
         self._odds_by_bk: dict[str, list[MarketOdds]] = {}
         self._fetched_at: dict[str, float] = {}
@@ -52,9 +55,11 @@ class Scanner:
         self._quotes_checked = 0   # всего котировок (событие x БК)
         # ключи вилок прошлого цикла — чтобы писать в историю только новые
         self._prev_keys: set[str] = set()
+        self._prev_keys3: set[str] = set()
         # когда каждая живая вилка появилась впервые (match_key → unix-время);
         # пока вилка держится между обновлениями, её таймер не сбрасывается
         self._first_seen: dict[str, float] = {}
+        self._first_seen3: dict[str, float] = {}
         self._executor = ThreadPoolExecutor(max_workers=len(self.parsers),
                                             thread_name_prefix=f"scan-{mode}")
         self._stop = asyncio.Event()
@@ -82,6 +87,7 @@ class Scanner:
                          "age_sec": round(now - self._fetched_at.get(bk, now))}
                     for bk, o in self._odds_by_bk.items()},
                 "arbs": [a.to_dict() for a in self._arbs],
+                "arbs_1x2": [a.to_dict() for a in self._arbs3],
             }
 
     def odds_snapshot(self) -> list[dict]:
@@ -170,6 +176,7 @@ class Scanner:
                     "market_key": o.market_key,
                     "outcome1": o.outcome1,
                     "outcome2": o.outcome2,
+                    "outcome3": o.outcome3,  # «X» у рынка «Исход 1X2»
                     "quotes": {},
                 }
                 if flipped:
@@ -182,7 +189,8 @@ class Scanner:
                         m["market"] = display_market(key, o.market)
             k1, k2 = (o.k2, o.k1) if flipped else (o.k1, o.k2)
             if o.bookmaker not in m["quotes"]:
-                m["quotes"][o.bookmaker] = {"k1": k1, "k2": k2,
+                # ничья (k3) симметрична — не зависит от порядка команд
+                m["quotes"][o.bookmaker] = {"k1": k1, "k2": k2, "k3": o.k3,
                                             "url": o.url}
 
         def _sort_key(item):
@@ -258,7 +266,8 @@ class Scanner:
                          bk, len(self._odds_by_bk[bk]) - len(kept))
                 self._odds_by_bk[bk] = kept
 
-    def _update_bk(self, bk: str, odds: list[MarketOdds]) -> list[Arb]:
+    def _update_bk(self, bk: str,
+                   odds: list[MarketOdds]) -> tuple[list[Arb], list[Arb3]]:
         """Обновляет котировки одной БК и пересчитывает вилки.
 
         Пустой результат (сбой обхода) НЕ затирает старые данные —
@@ -273,6 +282,7 @@ class Scanner:
             all_odds = [o for os_ in self._odds_by_bk.values() for o in os_]
 
         arbs = find_arbs(all_odds)
+        arbs3 = find_arbs_1x2(all_odds)
         with self._lock:
             # таймер жизни вилки: сохраняем момент первого обнаружения,
             # исчезнувшие вилки забываем (появятся снова — таймер с нуля)
@@ -281,11 +291,17 @@ class Scanner:
             for a in arbs:
                 a.first_seen = prev_seen.get(a.match_key, now)
                 self._first_seen[a.match_key] = a.first_seen
+            prev_seen3 = self._first_seen3
+            self._first_seen3 = {}
+            for a in arbs3:
+                a.first_seen = prev_seen3.get(a.match_key, now)
+                self._first_seen3[a.match_key] = a.first_seen
             self._arbs = arbs
+            self._arbs3 = arbs3
             self._last_scan = now
             self._events_checked = len({o.event_key for o in all_odds})
             self._quotes_checked = len(all_odds)
-        return arbs
+        return arbs, arbs3
 
     # ---------- цикл ----------
 
@@ -297,15 +313,17 @@ class Scanner:
                    for p in self.parsers}
         done = 0
         arbs: list[Arb] = []
+        arbs3: list[Arb3] = []
         try:
             for fut in as_completed(futures):
                 parser = futures[fut]
                 odds = fut.result()
                 done += 1
-                arbs = self._update_bk(parser.name, odds)
-                log.info("Готово %d/%d БК (%s: %d котировок), вилок: %d",
+                arbs, arbs3 = self._update_bk(parser.name, odds)
+                log.info("Готово %d/%d БК (%s: %d котировок), вилок: %d "
+                         "(+%d на 1X2)",
                          done, len(futures), parser.name, len(odds),
-                         len(arbs))
+                         len(arbs), len(arbs3))
         finally:
             with self._lock:
                 self._scanning = False
@@ -313,6 +331,8 @@ class Scanner:
         with self._lock:
             new = [a for a in arbs if a.match_key not in self._prev_keys]
             self._prev_keys = {a.match_key for a in arbs}
+            new3 = [a for a in arbs3 if a.match_key not in self._prev_keys3]
+            self._prev_keys3 = {a.match_key for a in arbs3}
             self._scan_count += 1
             total = sum(len(o) for o in self._odds_by_bk.values())
 
@@ -320,10 +340,11 @@ class Scanner:
         # засорили бы БД. История — только по прематчу.
         if not self.live:
             db.save_arbs(new)
+            db.save_arbs3(new3)
         log.info("[%s] Цикл %d завершён за %.0f c: %d котировок в памяти, "
-                 "%d вилок%s",
+                 "%d вилок, %d вилок 1X2%s",
                  self.mode, self._scan_count, time.monotonic() - started,
-                 total, len(arbs),
+                 total, len(arbs), len(arbs3),
                  f" (лучшая {arbs[0].profit_pct:.2f}%)" if arbs else "")
 
     async def run(self) -> None:
@@ -382,12 +403,13 @@ class Scanner:
             started = time.monotonic()
             try:
                 odds = self._fetch(parser)
-                arbs = self._update_bk(parser.name, odds)
+                arbs, arbs3 = self._update_bk(parser.name, odds)
                 with self._lock:
                     self._scan_count += 1
-                log.info("[live] %s: %d котировок за %.1f c, вилок: %d",
+                log.info("[live] %s: %d котировок за %.1f c, вилок: %d "
+                         "(+%d на 1X2)",
                          parser.name, len(odds), time.monotonic() - started,
-                         len(arbs))
+                         len(arbs), len(arbs3))
             except Exception:  # noqa: BLE001
                 log.exception("[live] %s: ошибка обновления", parser.name)
             # небольшая пауза, чтобы не долбить сервер БК вплотную

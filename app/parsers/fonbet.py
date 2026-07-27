@@ -6,8 +6,11 @@ resource-доменах), поэтому парсер перебирает сп�
 FONBET_LINE_HOST (см. app/config.py и README).
 
 Проверяются ВСЕ прематч-события (включая дочерние росписи) и все известные
-двухисходные рынки:
+двухисходные рынки, а также рынок «Исход 1X2» (см. ниже):
 - Победитель (П1 id=921 / П2 id=923), если НЕТ ничьей (id=922);
+- Исход 1X2 (П1/X/П2, id=921/922/923) — если ничья ЕСТЬ: это самый частый
+  рынок футбола/хоккея, трёхисходные вилки по нему ищутся отдельным
+  движком (arbitrage.find_arbs_1x2), см. README;
 - Тоталы больше/меньше: основная линия (930/931) и вся лестница
   дополнительных линий (см. F_TOTAL_PAIRS), включая тотал очков в
   настольном теннисе/теннисе/волейболе (1848/1849);
@@ -27,7 +30,7 @@ from .html_utils import neg_hcap as _neg_hcap
 from ..config import BK_TZ_OFFSET, FONBET_LINE_HOST
 from ..models import KIND_LIVE, KIND_PREMATCH, MarketOdds
 from .base import BaseParser
-from .html_utils import fmt_hcap, fmt_total, market_scope
+from .html_utils import fmt_hcap, fmt_total, market_scope, sane_1x2_margin
 
 log = logging.getLogger("parsers.fonbet")
 
@@ -377,11 +380,23 @@ class FonbetParser(BaseParser):
     def _winner(self, factors: list, base: dict,
                 scope: str) -> list[MarketOdds]:
         vals = {f["f"]: f.get("v") for f in factors}
-        if F_DRAW in vals:
-            return []  # трёхисходный рынок — пропускаем
         k1, k2 = vals.get(F_P1), vals.get(F_P2)
         if not k1 or not k2:
             return []
+        kx = vals.get(F_DRAW)
+        if kx:
+            # Рынок «Исход 1X2» (с ничьей) — самый частый рынок футбола/
+            # хоккея. Раньше пропускался целиком (искали только рынок без
+            # ничьей), из-за чего вилки по нему не находились вообще.
+            k1f, k2f, kxf = float(k1), float(k2), float(kx)
+            if not sane_1x2_margin(k1f, kxf, k2f):
+                return []
+            return [MarketOdds(
+                market="Исход (1X2)",
+                market_key=f"winner1x2:{scope}" if scope else "winner1x2",
+                outcome1="П1", outcome2="П2", outcome3="X",
+                k1=k1f, k2=k2f, k3=kxf, **base,
+            )]
         return [MarketOdds(
             market="Победитель",
             market_key=f"winner:{scope}" if scope else "winner",

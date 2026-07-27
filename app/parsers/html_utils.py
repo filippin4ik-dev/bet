@@ -299,6 +299,10 @@ def display_market(key: str, fallback: str) -> str:
         scope = parts[1] if len(parts) >= 2 else ""
         lbl = scope_label(scope)
         return "Победитель" + (f" ({lbl})" if lbl else "")
+    if kind == "winner1x2":
+        scope = parts[1] if len(parts) >= 2 else ""
+        lbl = scope_label(scope)
+        return "Исход (1X2)" + (f" ({lbl})" if lbl else "")
     if kind == "bothscore":
         scope = parts[1] if len(parts) >= 2 else ""
         lbl = scope_label(scope)
@@ -343,6 +347,22 @@ def fmt_hcap(v) -> str:
     if f == 0:
         return "0"
     return ("+" if f > 0 else "-") + ("%g" % abs(f))
+
+
+def sane_1x2_margin(k1: float, kx: float, k2: float) -> bool:
+    """Защитная проверка для рынка «Исход 1X2» (победитель+ничья).
+
+    Собственная маржа ОДНОЙ БК на этом рынке (1/К1+1/Кx+1/К2) у реальной
+    линии практически всегда лежит в диапазоне ~1.02–1.35 (2–35 %
+    накрутка букмекера). Если парсер перепутал порядок исходов в фиде
+    (например, у Winline это позиционный бинарный протокол, а не именованные
+    поля), маржа обычно вылезает за этот коридор — такую котировку
+    безопаснее не показывать, чем предложить ставку по неверной разметке
+    исходов (риск потери денег при автоматической ставке)."""
+    if not (k1 and kx and k2 and k1 > 1 and kx > 1 and k2 > 1):
+        return False
+    margin = 1 / k1 + 1 / kx + 1 / k2
+    return 1.0 < margin < 1.35
 
 
 def num(text: str) -> float | None:

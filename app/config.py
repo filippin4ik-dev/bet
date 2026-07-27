@@ -167,3 +167,37 @@ LIVE_ODDS_TTL = float(os.getenv("LIVE_ODDS_TTL", "45"))
 # обновляется в своём потоке и как можно чаще (быстрая БК не ждёт медленную);
 # эта пауза не даёт долбить сервер БК вплотную. 0 — без искусственной паузы.
 LIVE_PER_BK_GAP = float(os.getenv("LIVE_PER_BK_GAP", "1.5"))
+
+# ---- Админка (аккаунты БК, баланс-лимиты, авто-ставки) ----
+# Логин/пароль по умолчанию admin/admin1 — ОБЯЗАТЕЛЬНО смените в проде
+# через переменные окружения ADMIN_USERNAME/ADMIN_PASSWORD.
+ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "admin")
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "admin1")
+
+# Секрет для подписи сессионных cookie и шифрования логинов/паролей БК
+# в базе. Если не задан явно — генерируется один раз и сохраняется в файл
+# рядом с базой (переживает перезапуск, но НЕ коммитьте этот файл).
+SECRET_KEY_FILE = os.getenv("SECRET_KEY_FILE", ".secret_key")
+SECRET_KEY = os.getenv("SECRET_KEY", "").strip()
+
+# Сколько живёт сессия админки, сек (по умолчанию 12 часов)
+ADMIN_SESSION_TTL = float(os.getenv("ADMIN_SESSION_TTL", "43200"))
+
+# Раз в сколько секунд авто-обновлять баланс подключённых аккаунтов БК.
+BALANCE_REFRESH_INTERVAL = float(os.getenv("BALANCE_REFRESH_INTERVAL", "300"))
+
+# Авто-ставки на вилки (ОЧЕНЬ рискованная функция: букмекеры банят аккаунты
+# за вилочников, а автоматизация браузера может ошибиться в выборе исхода
+# или размере ставки). Выключено по умолчанию — включает оператор осознанно.
+AUTOBET_ENABLED = os.getenv("AUTOBET_ENABLED", "0") not in ("0", "false", "no", "")
+# Пока не выключен явно — авто-ставка выполняется В РЕЖИМЕ ИМИТАЦИИ (dry-run):
+# бот проходит весь расчёт и «нажимает» кнопки в логике, но реального запроса
+# на сайт БК на размещение ставки не делает. Реальные ставки — только когда
+# AUTOBET_DRY_RUN=0 И AUTOBET_ENABLED=1 одновременно.
+AUTOBET_DRY_RUN = os.getenv("AUTOBET_DRY_RUN", "1") not in ("0", "false", "no", "")
+# Не превышать этот процент от баланса аккаунта одной ставкой (защита от
+# ошибок в расчёте лимита при неточном балансе).
+AUTOBET_MAX_BALANCE_FRACTION = float(
+    os.getenv("AUTOBET_MAX_BALANCE_FRACTION", "0.9"))
+# Верхний потолок одной ставки в рублях (доп. защита, даже если баланс больше).
+AUTOBET_MAX_STAKE = float(os.getenv("AUTOBET_MAX_STAKE", "5000"))

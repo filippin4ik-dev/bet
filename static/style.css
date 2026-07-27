@@ -336,7 +336,8 @@ tbody tr.pinned.hot {
   grid-template-columns: 1fr 1fr;
   gap: 12px;
 }
-@media (max-width: 560px) { .bet-legs { grid-template-columns: 1fr; } }
+.bet-legs-3 { grid-template-columns: 1fr 1fr 1fr; }
+@media (max-width: 560px) { .bet-legs, .bet-legs-3 { grid-template-columns: 1fr; } }
 
 .bet-leg {
   background: var(--bg);
@@ -378,8 +379,15 @@ tbody tr.pinned.hot {
 }
 .bet-gone { color: var(--hot); font-weight: 600; }
 
-.bet-actions { margin-top: 12px; }
-#bet-open-both {
+.bet-limit {
+  margin: 4px 0 4px;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+.bet-limit .limit-known { color: var(--accent); font-weight: 600; }
+.bet-limit .limit-unknown { color: var(--hot); }
+
+#bet-open-both, #bet3-open-all {
   background: rgba(74, 222, 128, 0.15);
   color: var(--accent);
   border: 1px solid var(--accent);
@@ -388,9 +396,36 @@ tbody tr.pinned.hot {
   cursor: pointer;
   font-size: 1rem;
   font-weight: 700;
-  width: 100%;
+  flex: 1;
 }
-#bet-open-both:hover { background: rgba(74, 222, 128, 0.28); }
+#bet-open-both:hover, #bet3-open-all:hover { background: rgba(74, 222, 128, 0.28); }
+
+.bet-actions { margin-top: 12px; display: flex; gap: 10px; flex-wrap: wrap; }
+.autobet-btn {
+  background: rgba(251, 191, 36, 0.15);
+  color: var(--hot);
+  border: 1px solid var(--hot);
+  border-radius: 10px;
+  padding: 10px 18px;
+  cursor: pointer;
+  font-size: 1rem;
+  font-weight: 700;
+  flex: 1;
+}
+.autobet-btn:hover { background: rgba(251, 191, 36, 0.28); }
+.autobet-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.autobet-result {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  font-size: 0.88rem;
+  line-height: 1.5;
+}
+.autobet-result .leg-ok { color: var(--accent); }
+.autobet-result .leg-fail { color: #ef4444; }
 
 .bet-note {
   margin-top: 12px;

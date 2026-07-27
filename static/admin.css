@@ -1,0 +1,98 @@
+.admin-panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 20px 24px;
+  margin: 20px 0;
+  max-width: 900px;
+}
+.admin-panel h2 { margin-bottom: 12px; font-size: 1.1rem; }
+.admin-hint { color: var(--muted); font-size: 0.85rem; margin-bottom: 12px; line-height: 1.5; }
+.admin-warning { color: var(--hot); }
+.admin-error { color: #ef4444; margin-top: 8px; font-size: 0.85rem; }
+
+.admin-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  max-width: 360px;
+}
+.admin-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+.admin-form input, .admin-form select, .admin-form textarea {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  color: var(--text);
+  font-size: 0.95rem;
+  font-family: inherit;
+  resize: vertical;
+}
+.admin-form button, #add-account-btn, #logout-btn, #save-settings-btn {
+  background: var(--accent);
+  color: #06210f;
+  border: none;
+  border-radius: 8px;
+  padding: 8px 16px;
+  font-weight: 600;
+  cursor: pointer;
+}
+#logout-btn { background: transparent; color: var(--muted); border: 1px solid var(--border); cursor: pointer; }
+
+.admin-form-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  align-items: center;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+.admin-form-row label { display: flex; align-items: center; gap: 6px; }
+
+.admin-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-bottom: 14px;
+  font-size: 0.88rem;
+}
+.admin-table th, .admin-table td {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+}
+.admin-table th { color: var(--muted); font-weight: 600; }
+.admin-table button {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 4px 8px;
+  font-size: 0.8rem;
+  cursor: pointer;
+  margin-right: 4px;
+}
+.admin-table .err-text { color: #ef4444; font-size: 0.78rem; }
+.admin-table .ok-text { color: var(--accent); }
+
+.modal-backdrop {
+  position: fixed; inset: 0;
+  background: rgba(0,0,0,0.6);
+  display: flex; align-items: center; justify-content: center;
+  z-index: 50;
+}
+.modal {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 24px;
+}
+.modal-actions { display: flex; gap: 8px; justify-content: flex-end; }
+.modal-actions button[type="button"] {
+  background: transparent; border: 1px solid var(--border); color: var(--text);
+}

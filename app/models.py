@@ -24,7 +24,12 @@ _STARTED_GRACE = 60
 
 @dataclass
 class MarketOdds:
-    """Коэффициенты одной БК на один двухисходный рынок одного события."""
+    """Коэффициенты одной БК на один рынок одного события.
+
+    Обычно рынок двухисходный (k1/k2). Для рынка «Исход 1X2» (победитель
+    с ничьей — market_key начинается с «winner1x2») заполняется ТРЕТИЙ
+    исход k3/outcome3 (ничья) — тогда рынок трёхисходный и обрабатывается
+    отдельным движком поиска вилок (см. arbitrage.find_arbs_1x2)."""
 
     bookmaker: str          # Winline / BetBoom / Fonbet / Liga Stavok
     sport: str              # вид спорта (+ дочерняя роспись, если есть)
@@ -40,6 +45,8 @@ class MarketOdds:
     start_time: str | None = None  # время начала (как показывает БК)
     start_ts: float | None = None  # время начала, unix-время (если распознано)
     url: str | None = None         # страница события на сайте БК (deep-link)
+    outcome3: str | None = None    # метка 3-го исхода («X» — ничья)
+    k3: float | None = None        # коэффициент на 3-й исход (ничья)
 
     def started(self, now: float) -> bool:
         """Матч уже начался (по распознанному времени старта)?"""
@@ -64,8 +71,10 @@ class MarketOdds:
             "market": self.market,
             "outcome1": self.outcome1,
             "outcome2": self.outcome2,
+            "outcome3": self.outcome3,
             "k1": self.k1,
             "k2": self.k2,
+            "k3": self.k3,
             "kind": self.kind,
             "start_time": self.start_time,
             "start_ts": self.start_ts,
@@ -121,6 +130,70 @@ class Arb:
             "k1_max": self.k1_max,
             "k1_bookmaker": self.k1_bookmaker,
             "k1_url": self.k1_url,
+            "k2_max": self.k2_max,
+            "k2_bookmaker": self.k2_bookmaker,
+            "k2_url": self.k2_url,
+            "margin": round(self.margin, 4),
+            "profit_pct": round(self.profit_pct, 2),
+            "stakes": self.stakes,
+            "first_seen": self.first_seen,
+        }
+
+
+@dataclass
+class Arb3:
+    """Найденная ТРЁХисходная вилка (рынок «Исход 1X2»: П1 / X / П2).
+
+    Формула: 1/К1_max + 1/Кx_max + 1/К2_max < 1, где три коэффициента
+    могут быть у трёх РАЗНЫХ БК (или у двух, если третье плечо совпадает
+    с одним из них — это не мешает вилке, лишь две ставки идут в одну БК).
+    """
+
+    match_key: str
+    sport: str
+    team1: str
+    team2: str
+    market: str
+    outcome1: str
+    outcomex: str
+    outcome2: str
+    k1_max: float
+    k1_bookmaker: str
+    kx_max: float
+    kx_bookmaker: str
+    k2_max: float
+    k2_bookmaker: str
+    margin: float
+    profit_pct: float
+    kind: str = KIND_PREMATCH
+    start_time: str | None = None
+    start_ts: float | None = None
+    stakes: dict = field(default_factory=dict)
+    k1_url: str | None = None
+    kx_url: str | None = None
+    k2_url: str | None = None
+    first_seen: float | None = None
+
+    def to_dict(self) -> dict:
+        return {
+            "match_key": self.match_key,
+            "kind": self.kind,
+            "start_time": self.start_time,
+            "start_ts": self.start_ts,
+            "sport": self.sport,
+            "match": f"{self.team1} — {self.team2}",
+            "team1": self.team1,
+            "team2": self.team2,
+            "market": self.market,
+            "outcome1": self.outcome1,
+            "outcomex": self.outcomex,
+            "outcome2": self.outcome2,
+            "k1_max": self.k1_max,
+            "k1_bookmaker": self.k1_bookmaker,
+            "k1_url": self.k1_url,
+            "kx_max": self.kx_max,
+            "kx_bookmaker": self.kx_bookmaker,
+            "kx_url": self.kx_url,
             "k2_max": self.k2_max,
             "k2_bookmaker": self.k2_bookmaker,
             "k2_url": self.k2_url,

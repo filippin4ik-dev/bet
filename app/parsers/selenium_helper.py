@@ -98,8 +98,13 @@ def _existing(paths: list[str]) -> list[str]:
     return out
 
 
-def _make_driver():
-    """Создаёт headless-Chrome (с учётом snap-хрома). None при неудаче."""
+def _make_driver(proxy: str | None = None):
+    """Создаёт headless-Chrome (с учётом snap-хрома). None при неудаче.
+
+    proxy — явный `scheme://host:port` для ЭТОГО браузера (используется
+    коннекторами аккаунтов БК, см. app/connectors/selenium_generic.py).
+    Если не передан (None) — используется общий LIGASTAVOK_PROXY, как и
+    раньше (общий браузер сканера ходит только через него)."""
     global _warned
     if not USE_SELENIUM:
         return None
@@ -133,12 +138,29 @@ def _make_driver():
         options.add_argument(arg)
     options.add_experimental_option(
         "prefs", {"profile.managed_default_content_settings.images": 2})
-    # Резидентный прокси для Лиги Ставок: браузер сейчас используется
-    # ТОЛЬКО ею (Winline/BetBoom/Fonbet/bc.game ходят без браузера),
-    # поэтому проксируем весь Chrome. Chrome не умеет логин/пароль в
-    # --proxy-server — работает только авторизация по IP.
-    if LIGASTAVOK_PROXY:
-        u = urlsplit(LIGASTAVOK_PROXY)
+    # Резидентный прокси. Общий браузер сканера (proxy=None здесь) сейчас
+    # проксируется только для Лиги Ставок (LIGASTAVOK_PROXY) — остальные БК
+    # линии ходят без браузера. Отдельные standalone-браузеры аккаунтов БК
+    # (app/connectors/selenium_generic.py) передают свой proxy явно: анти-бот
+    # многих БК (напр. Fonbet — ServicePipe) блокирует датацентровые IP ещё
+    # до формы входа, точно как Qrator у Лиги Ставок — без резидентного/
+    # мобильного российского прокси личный кабинет с VPS не открыть.
+    #
+    # Chrome НЕ умеет логин/пароль в --proxy-server — работает только
+    # авторизация по IP сервера. ПРОВЕРЕНО двумя способами, оба не работают
+    # в этой среде: (1) расширение chrome.webRequest.onAuthRequired —
+    # branded google-chrome прямо игнорирует `--load-extension` («is not
+    # allowed in Google Chrome»); (2) перехват через CDP
+    # Fetch.authRequired — событие вообще не срабатывает для авторизации
+    # НА ПРОКСИ (только для WWW-Authenticate самого сайта), проверено на
+    # локальном тестовом HTTP-прокси с basic-auth — запрос виснет на
+    # ProxyAuthenticationFailed, событие в CDP не приходит. Поэтому у
+    # прокси-провайдера нужно включать именно авторизацию по IP (у VPS он
+    # статический — большинство провайдеров это поддерживают), а не
+    # логин/пароль.
+    effective_proxy = LIGASTAVOK_PROXY if proxy is None else proxy
+    if effective_proxy:
+        u = urlsplit(effective_proxy)
         if u.hostname and u.port:
             scheme = u.scheme or "http"
             options.add_argument(
@@ -146,10 +168,12 @@ def _make_driver():
             if u.username:
                 log.warning(
                     "Selenium: у прокси задан логин/пароль — браузер их "
-                    "НЕ передаст (ограничение Chrome). Включите у "
-                    "прокси-провайдера авторизацию по IP сервера, иначе "
-                    "Qrator-челлендж не пройдёт (HTTP-API парсера при "
-                    "этом работает с логином/паролем как обычно).")
+                    "НЕ передаст (ограничение Chrome, актуально и для "
+                    "расширений, и для CDP — проверено). Включите у "
+                    "прокси-провайдера авторизацию по IP сервера (у VPS "
+                    "он статический), иначе анти-бот-челлендж не "
+                    "пройдёт (HTTP-API парсера при этом работает с "
+                    "логином/паролем как обычно).")
     # Живые страницы БК грузятся «бесконечно» (websocket, лента ставок) —
     # не ждём полной загрузки, забираем DOM после паузы. Иначе на слабом
     # VPS driver.get() падает с «Timed out receiving message from renderer».
@@ -483,6 +507,18 @@ class SeleniumSession:
 
     def __exit__(self, *exc) -> None:
         self.close()
+
+
+def new_standalone_driver(proxy: str | None = None):
+    """Отдельный (НЕ общий) headless-браузер — для операций с аккаунтами
+    БК (баланс/ставки), где нельзя делить cookie-сессию с парсером линии.
+
+    proxy — опциональный `scheme://host:port` для входа именно в эту БК
+    (см. `<BOOKMAKER>_PROXY` в app/connectors/selenium_generic.py) — не
+    путать с общим LIGASTAVOK_PROXY у браузера сканера.
+
+    Вызывающий код обязан сам закрыть драйвер (driver.quit())."""
+    return _make_driver(proxy=proxy)
 
 
 def get_html_via_selenium(url: str, wait_seconds: float = 5.0) -> str | None:

@@ -16,6 +16,7 @@
       <span id="coverage"></span>
       <span id="bk-counts"></span>
       <span id="arb-count"></span>
+      <a href="/admin" class="badge" id="admin-link">⚙ Админка</a>
     </div>
   </header>
 
@@ -23,6 +24,8 @@
     <div class="tabs" id="view-tabs">
       <button type="button" data-view="arbs" class="active">💰 Вилки (прематч)</button>
       <button type="button" data-view="live">🔴 Лайв-вилки</button>
+      <button type="button" data-view="arbs1x2">⚔ Вилки 1X2</button>
+      <button type="button" data-view="live1x2">🔴 Лайв 1X2</button>
       <button type="button" data-view="matches">📋 Матчи</button>
       <button type="button" data-view="live-matches">📺 Лайв-матчи</button>
     </div>
@@ -81,6 +84,29 @@
       </tbody>
     </table>
 
+    <table id="arbs1x2-table" hidden>
+      <thead>
+        <tr>
+          <th class="sortable" data-sort="start_ts">Начало</th>
+          <th class="sortable" data-sort="sport">Спорт</th>
+          <th class="sortable" data-sort="match">Матч</th>
+          <th class="sortable" data-sort="k1_max">П1: К<sub>max</sub> (БК)</th>
+          <th class="sortable" data-sort="kx_max">X: К<sub>max</sub> (БК)</th>
+          <th class="sortable" data-sort="k2_max">П2: К<sub>max</sub> (БК)</th>
+          <th class="sortable" data-sort="profit_pct">Доходность</th>
+          <th class="sortable" data-sort="first_seen" title="Как давно вилка появилась">⏱ Живёт</th>
+          <th>Ставка П1</th>
+          <th>Ставка X</th>
+          <th>Ставка П2</th>
+          <th>Прибыль</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody id="arbs1x2-body">
+        <tr><td colspan="13" class="empty">Загрузка данных…</td></tr>
+      </tbody>
+    </table>
+
     <table id="matches-table" hidden>
       <thead>
         <tr>
@@ -109,11 +135,12 @@
           <tr>
             <th>Рынок</th>
             <th>Исход 1</th>
+            <th>Ничья</th>
             <th>Исход 2</th>
           </tr>
         </thead>
         <tbody id="detail-body">
-          <tr><td colspan="3" class="empty">Загрузка котировок…</td></tr>
+          <tr><td colspan="4" class="empty">Загрузка котировок…</td></tr>
         </tbody>
       </table>
     </section>
@@ -163,16 +190,92 @@
       </div>
 
       <div class="bet-summary" id="bet-summary">—</div>
+      <div class="bet-limit" id="bet-limit" hidden></div>
 
       <div class="bet-actions">
         <button id="bet-open-both" type="button">Открыть обе БК ↗</button>
+        <button id="bet-autobet" type="button" class="autobet-btn" hidden>⚡ Авто-ставка (лайв)</button>
       </div>
+      <div class="autobet-result" id="bet-autobet-result" hidden></div>
 
       <p class="bet-note">
         Ставки размещаются вручную на сайтах БК: страницы матчей откроются в
         новых вкладках, суммы уже посчитаны — кликните нужный кэф и вставьте
         сумму в купон. Перед ставкой сверьте кэфы: если они изменились, вилка
         могла исчезнуть.
+      </p>
+    </div>
+  </div>
+
+  <!-- Модалка быстрой ставки для ТРЁХисходной вилки (рынок «Исход 1X2») -->
+  <div id="bet3-modal" class="modal-backdrop" hidden>
+    <div class="modal">
+      <div class="modal-head">
+        <div>
+          <h2 id="bet3-title">—</h2>
+          <div class="detail-meta" id="bet3-meta"></div>
+        </div>
+        <button id="bet3-close" type="button" title="Закрыть">✕</button>
+      </div>
+
+      <label class="bet-bank-label">
+        Общая сумма, ₽:
+        <input type="number" id="bet3-bank" min="100" step="100" value="5000">
+      </label>
+
+      <div class="bet-legs bet-legs-3">
+        <div class="bet-leg" id="bet3-leg1">
+          <div class="bet-leg-head">
+            <span class="out">П1</span>
+            <span class="coef" id="bet3-k1">—</span>
+            <span id="bet3-bk1"></span>
+          </div>
+          <div class="bet-leg-stake" id="bet3-stake1">—</div>
+          <div class="bet-leg-actions">
+            <button type="button" class="copy-btn3" data-copy="1">📋 Копировать сумму</button>
+            <a id="bet3-link1" class="open-bk" target="_blank" rel="noopener" hidden>Открыть БК ↗</a>
+          </div>
+        </div>
+        <div class="bet-leg" id="bet3-legx">
+          <div class="bet-leg-head">
+            <span class="out">X</span>
+            <span class="coef" id="bet3-kx">—</span>
+            <span id="bet3-bkx"></span>
+          </div>
+          <div class="bet-leg-stake" id="bet3-stakex">—</div>
+          <div class="bet-leg-actions">
+            <button type="button" class="copy-btn3" data-copy="x">📋 Копировать сумму</button>
+            <a id="bet3-linkx" class="open-bk" target="_blank" rel="noopener" hidden>Открыть БК ↗</a>
+          </div>
+        </div>
+        <div class="bet-leg" id="bet3-leg2">
+          <div class="bet-leg-head">
+            <span class="out">П2</span>
+            <span class="coef" id="bet3-k2">—</span>
+            <span id="bet3-bk2"></span>
+          </div>
+          <div class="bet-leg-stake" id="bet3-stake2">—</div>
+          <div class="bet-leg-actions">
+            <button type="button" class="copy-btn3" data-copy="2">📋 Копировать сумму</button>
+            <a id="bet3-link2" class="open-bk" target="_blank" rel="noopener" hidden>Открыть БК ↗</a>
+          </div>
+        </div>
+      </div>
+
+      <div class="bet-summary" id="bet3-summary">—</div>
+      <div class="bet-limit" id="bet3-limit" hidden></div>
+
+      <div class="bet-actions">
+        <button id="bet3-open-all" type="button">Открыть все 3 БК ↗</button>
+        <button id="bet3-autobet" type="button" class="autobet-btn" hidden>⚡ Авто-ставка (лайв)</button>
+      </div>
+      <div class="autobet-result" id="bet3-autobet-result" hidden></div>
+
+      <p class="bet-note">
+        Три плеча — на исход 1, ничью и исход 2 (рынок «Исход 1X2»). Ставки
+        размещаются вручную на сайтах БК: страницы матчей откроются в новых
+        вкладках, суммы уже посчитаны. Перед ставкой сверьте кэфы: если они
+        изменились, вилка могла исчезнуть.
       </p>
     </div>
   </div>

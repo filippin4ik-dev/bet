@@ -7,11 +7,13 @@ import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, Query
+from fastapi import Body, Depends, FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import db
+from . import accounts_manager, autobet, config, db
+from .admin_api import require_admin
+from .admin_api import router as admin_router
 from .config import LIVE_ENABLED, SOUND_ALERT_PROFIT
 from .models import KIND_LIVE, KIND_PREMATCH
 from .scanner import Scanner
@@ -27,12 +29,14 @@ STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 # акцент на прематче, лайв отключается переменной LIVE_ENABLED=0).
 scanner = Scanner(mode=KIND_PREMATCH)
 live_scanner = Scanner(mode=KIND_LIVE)
+balance_loop = accounts_manager.BalanceRefreshLoop()
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     db.init_db()
-    tasks = [asyncio.create_task(scanner.run())]
+    tasks = [asyncio.create_task(scanner.run()),
+            asyncio.create_task(balance_loop.run())]
     if LIVE_ENABLED:
         tasks.append(asyncio.create_task(live_scanner.run()))
     else:
@@ -41,20 +45,51 @@ async def lifespan(app: FastAPI):
     yield
     scanner.stop()
     live_scanner.stop()
+    balance_loop.stop()
     for t in tasks:
         t.cancel()
 
 
 app = FastAPI(title="Сканер вилок (двухисходные рынки)", lifespan=lifespan)
+app.include_router(admin_router)
+
+
+def _with_limits(arbs: list[dict], bk_field1: str, bk_field2: str,
+                 bk_field3: str | None = None) -> list[dict]:
+    """Добавляет к каждой вилке max_stake — минимальный из известных
+    лимитов ставки по всем её ногам (None, если хоть один баланс
+    неизвестен). Данные берутся из подключённых в админке аккаунтов."""
+    balances = accounts_manager.available_balance_by_bookmaker()
+    if not balances:
+        for a in arbs:
+            a["max_stake"] = None
+        return arbs
+    for a in arbs:
+        bks = [a[bk_field1], a[bk_field2]]
+        if bk_field3:
+            bks.append(a[bk_field3])
+        caps = [accounts_manager.max_stake_for_bookmaker(bk, balances)
+                for bk in bks]
+        a["max_stake"] = None if any(c is None for c in caps) else min(caps)
+    return arbs
 
 
 @app.get("/api/arbs")
 def get_arbs(
     min_profit: float = Query(0.0, ge=0, description="Мин. доходность, %"),
 ):
-    """Текущие вилки по прематчу (обновляются фоновым сканером)."""
+    """Текущие вилки по прематчу (обновляются фоновым сканером).
+
+    Включает и двухисходные вилки (arbs), и трёхисходные по рынку
+    «Исход 1X2» (arbs_1x2, П1/X/П2) — самый частый рынок футбола/хоккея.
+    """
     snap = scanner.snapshot()
     snap["arbs"] = [a for a in snap["arbs"] if a["profit_pct"] >= min_profit]
+    snap["arbs_1x2"] = [a for a in snap["arbs_1x2"]
+                        if a["profit_pct"] >= min_profit]
+    snap["arbs"] = _with_limits(snap["arbs"], "k1_bookmaker", "k2_bookmaker")
+    snap["arbs_1x2"] = _with_limits(
+        snap["arbs_1x2"], "k1_bookmaker", "k2_bookmaker", "kx_bookmaker")
     snap["sound_alert_profit"] = SOUND_ALERT_PROFIT
     return snap
 
@@ -119,7 +154,14 @@ def get_live_arbs(
     """Текущие ЛАЙВ-вилки (быстрый цикл, матчи в игре)."""
     snap = live_scanner.snapshot()
     snap["arbs"] = [a for a in snap["arbs"] if a["profit_pct"] >= min_profit]
+    snap["arbs_1x2"] = [a for a in snap["arbs_1x2"]
+                        if a["profit_pct"] >= min_profit]
+    snap["arbs"] = _with_limits(snap["arbs"], "k1_bookmaker", "k2_bookmaker")
+    snap["arbs_1x2"] = _with_limits(
+        snap["arbs_1x2"], "k1_bookmaker", "k2_bookmaker", "kx_bookmaker")
     snap["sound_alert_profit"] = SOUND_ALERT_PROFIT
+    snap["autobet_enabled"] = config.AUTOBET_ENABLED
+    snap["autobet_dry_run"] = config.AUTOBET_DRY_RUN
     return snap
 
 
@@ -143,6 +185,43 @@ def get_history(limit: int = Query(100, ge=1, le=1000)):
     return {"history": db.get_history(limit)}
 
 
+@app.get("/api/history_1x2")
+def get_history_1x2(limit: int = Query(100, ge=1, le=1000)):
+    """История найденных трёхисходных вилок («Исход 1X2») из SQLite."""
+    return {"history": db.get_history_1x2(limit)}
+
+
+@app.post("/api/autobet/place")
+def autobet_place(
+    match_key: str = Body(..., embed=True),
+    kind3: bool = Body(False, embed=True),
+    live: bool = Body(True, embed=True),
+    username: str = Depends(require_admin),
+):
+    """Ставит (или имитирует — см. AUTOBET_DRY_RUN) вилку по её match_key.
+
+    Требует вход в админку (мутирует реальные деньги при выключенном
+    dry-run). Кнопка «Поставить» на фронтенде отправляет сюда именно
+    match_key активной вилки — сумма ставки считается на СЕРВЕРЕ по
+    актуальным кэфам и балансам, а не приходит с клиента."""
+    if not config.AUTOBET_ENABLED:
+        raise HTTPException(
+            status_code=403,
+            detail="Авто-ставки выключены (AUTOBET_ENABLED=0). Включите в "
+                   "настройках админки, предварительно проверив расчёт "
+                   "лимитов в режиме имитации.")
+    sc = live_scanner if live else scanner
+    snap = sc.snapshot()
+    key = "arbs_1x2" if kind3 else "arbs"
+    arb = next((a for a in snap[key] if a["match_key"] == match_key), None)
+    if arb is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Вилка уже не актуальна (кэфы изменились/матч исчез) — "
+                   "обновите список и попробуйте снова.")
+    return autobet.place_on_arb(arb, kind3=kind3)
+
+
 class _NoCacheStatic(StaticFiles):
     """Статика с Cache-Control: no-cache: браузер всегда перепроверяет
     файл на сервере (304, если не менялся) — после обновления на VPS
@@ -157,6 +236,12 @@ class _NoCacheStatic(StaticFiles):
 @app.get("/")
 def index():
     return FileResponse(STATIC_DIR / "index.html",
+                        headers={"Cache-Control": "no-cache"})
+
+
+@app.get("/admin")
+def admin_page():
+    return FileResponse(STATIC_DIR / "admin.html",
                         headers={"Cache-Control": "no-cache"})
 
 
