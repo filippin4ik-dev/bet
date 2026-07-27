@@ -101,8 +101,9 @@ class SeleniumGenericConnector(BookmakerConnector):
     пользователей). Каждый вызов get_balance()/place_bet() поднимает и
     закрывает свой собственный браузер: медленнее, но безопасно."""
 
-    def __init__(self, bookmaker: str, login: str, password: str):
-        super().__init__(bookmaker, login, password)
+    def __init__(self, bookmaker: str, login: str, password: str,
+                account_id: int | None = None):
+        super().__init__(bookmaker, login, password, account_id=account_id)
         self._driver = None
 
     def _ensure_driver(self):
