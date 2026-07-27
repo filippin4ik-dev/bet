@@ -17,9 +17,14 @@
    сопоставления именно для него, а не общая нехватка вилок.
 4. Среди событий с 2+ БК — сколько из них имеют хотя бы 1 общий
    двухисходный рынок (без этого вилка невозможна даже при совпавшем матче).
-5. «Почти совпадения»: события, которые НЕ склеились в одно, хотя у них
-   близкое время старта и похожие (но не идентичные после нормализации)
-   имена команд — кандидаты на баг в norm_team/парсинге имени.
+5. «Разошлись по времени старта»: события с ОДИНАКОВЫМИ (после нормализации,
+   без учёта порядка) именами команд у РАЗНЫХ БК, которые НЕ склеились,
+   потому что их start_ts отличается больше чем START_TS_TOLERANCE. Это не
+   баг norm_team — это сигнал, что допуск времени старта слишком строгий
+   (или одна из БК даёт неточное время) для части событий.
+6. «Почти совпадения»: события с похожими, но НЕ идентичными после
+   нормализации именами команд — кандидаты на баг в norm_team/парсинге
+   имени (отдельно от пункта 5, где имена идентичны).
 
 ВАЖНО: низкая доля вилок именно в футболе/хоккее/баскетболе при ВЫСОКОЙ
 доле совпадения событий — это, скорее всего, НЕ баг, а реальная
@@ -34,8 +39,10 @@ from collections import defaultdict
 from itertools import combinations
 
 from .arbitrage import _market_group, find_arbs, norm_team
+from .config import START_TS_TOLERANCE
 from .models import KIND_PREMATCH
 from .parsers import get_parsers
+from .parsers.html_utils import format_start
 from .scanner import Scanner
 
 logging.basicConfig(level=logging.INFO,
@@ -151,20 +158,66 @@ def main() -> None:
     print(f"С хотя бы одним общим рынком (кандидаты на вилку): "
           f"{two_plus - no_common_market}")
 
-    # ---------- 5. «почти совпадения» — вероятные баги нормализации ----------
+    # ---------- 5. одинаковые имена, разошлись по времени старта ----------
     print("-" * 72)
-    print("Ищу «почти совпадения» (похожие имена, близкое время старта, "
-          "НЕ склеились в одно событие)...")
+    print("Ищу пары с ОДИНАКОВЫМИ (после нормализации) именами команд у "
+          "разных БК, не склеившиеся из-за расхождения start_ts...")
     singles = [(eid, *sample_per_event[eid])
                for eid, books in books_per_event.items() if len(books) == 1]
+    by_pair: dict[frozenset, list] = defaultdict(list)
+    exact_dup_ids: set[str] = set()
+    for eid, sport, t1, t2, ts in singles:
+        if ts is None:
+            continue
+        pair = frozenset((norm_team(t1), norm_team(t2)))
+        by_pair[pair].append((eid, sport, t1, t2, ts))
+    ts_split = []
+    for items in by_pair.values():
+        if len(items) < 2:
+            continue
+        for (eid_a, sport_a, t1a, t2a, tsa), (eid_b, sport_b, t1b, t2b, tsb) \
+                in combinations(items, 2):
+            bk_a = next(iter(books_per_event[eid_a]))
+            bk_b = next(iter(books_per_event[eid_b]))
+            if bk_a == bk_b:
+                continue  # 2 разных матча этой пары У ОДНОЙ БК — легитимно
+            gap = abs(tsa - tsb)
+            if gap > _NEAR_TS_TOLERANCE:
+                continue  # слишком далеко по времени — вряд ли тот же матч
+            exact_dup_ids.add(eid_a)
+            exact_dup_ids.add(eid_b)
+            ts_split.append((gap, sport_a, t1a, t2a, bk_a, tsa, bk_b, tsb))
+    ts_split.sort(key=lambda x: x[0])
+    if not ts_split:
+        print("Не найдено.")
+    else:
+        tol_min = START_TS_TOLERANCE / 60
+        print(f"Найдено {len(ts_split)} пар (боевой допуск сканера — "
+              f"{tol_min:.0f} мин, топ {min(_MAX_NEAR_MISSES, len(ts_split))} "
+              f"по минимальному расхождению):")
+        for gap, sport, t1, t2, bk_a, tsa, bk_b, tsb in ts_split[:_MAX_NEAR_MISSES]:
+            print(f"  Δ{gap / 60:.0f} мин  {sport}: «{t1} — {t2}»  "
+                  f"({bk_a} {format_start(tsa)} vs {bk_b} {format_start(tsb)})")
+        print("  (одинаковые имена команд — это НЕ баг norm_team; если "
+              "расхождение систематическое для конкретного вида спорта, "
+              "можно точечно увеличить допуск для него, как уже сделано "
+              "для единоборств START_TS_TOLERANCE_COMBAT — но осторожно: "
+              "у турниров с повторяющимися парами в один вечер, напр. "
+              "виртуальный футбол/киберспорт, увеличение допуска рискует "
+              "склеить РАЗНЫЕ матчи одной пары)")
+
+    # ---------- 6. похожие, но не идентичные имена ----------
+    print("-" * 72)
+    print("Ищу «почти совпадения» (похожие, но НЕ идентичные после "
+          "нормализации имена, близкое время старта)...")
     near_misses = []
     for i, (eid_a, sport_a, t1a, t2a, tsa) in enumerate(singles):
-        if tsa is None:
+        if tsa is None or eid_a in exact_dup_ids:
             continue
         root_a = sport_a.split("·")[0].strip().lower()
         pair_a = (norm_team(t1a), norm_team(t2a))
         for eid_b, sport_b, t1b, t2b, tsb in singles[i + 1:]:
-            if tsb is None or eid_a.split("|")[0] != eid_b.split("|")[0]:
+            if tsb is None or eid_b in exact_dup_ids:
                 continue
             if abs(tsa - tsb) > _NEAR_TS_TOLERANCE:
                 continue
@@ -172,8 +225,8 @@ def main() -> None:
             if root_a != root_b:
                 continue
             pair_b = (norm_team(t1b), norm_team(t2b))
-            if pair_a == pair_b:
-                continue  # не должно случиться (иначе склеились бы)
+            if frozenset(pair_a) == frozenset(pair_b):
+                continue  # идентичные имена — уже учтены в разделе 5
             sim = _team_pair_similarity(pair_a, pair_b)
             if sim >= _NAME_SIM_THRESHOLD:
                 near_misses.append((sim, sport_a, t1a, t2a, t1b, t2b))
