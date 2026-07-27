@@ -485,6 +485,14 @@ class SeleniumSession:
         self.close()
 
 
+def new_standalone_driver():
+    """Отдельный (НЕ общий) headless-браузер — для операций с аккаунтами
+    БК (баланс/ставки), где нельзя делить cookie-сессию с парсером линии.
+
+    Вызывающий код обязан сам закрыть драйвер (driver.quit())."""
+    return _make_driver()
+
+
 def get_html_via_selenium(url: str, wait_seconds: float = 5.0) -> str | None:
     """Разовый рендер одной страницы (открывает и закрывает браузер).
     Для нескольких страниц используйте SeleniumSession (быстрее)."""
