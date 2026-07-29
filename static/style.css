@@ -343,6 +343,10 @@ input[type="checkbox"] { accent-color: var(--accent); width: 15px; height: 15px;
 }
 .filters button:hover { color: var(--text); border-color: var(--muted); }
 
+/* Кнопка «Поиск и фильтры» — только для узких экранов (см. media-блок ниже:
+ * на телефоне панель фильтров свёрнута, на компьютере она всегда открыта). */
+.filters-toggle { display: none; }
+
 /* ------------------------------------------------------------- таблицы --- */
 
 .table-card {
@@ -504,6 +508,25 @@ tr.hot .profit { background: var(--hot-soft); color: var(--hot); }
 }
 .quote-link { text-decoration: none; }
 .quote-link:hover .quote { background: color-mix(in srgb, currentColor 24%, transparent); }
+/* Подпись БК у кэфа: без неё роспись читается только по цвету рамки */
+.quote-bk {
+  font-size: 0.72rem;
+  font-weight: 600;
+  opacity: 0.75;
+  margin-left: 5px;
+  letter-spacing: 0.01em;
+}
+/* Лучший кэф исхода — на него и ставят */
+.quote.best {
+  background: color-mix(in srgb, currentColor 26%, transparent);
+  box-shadow: 0 0 0 1px currentColor;
+}
+.quote.best::after {
+  content: "▲";
+  font-size: 0.6rem;
+  margin-left: 5px;
+  vertical-align: 1px;
+}
 
 /* ---- список матчей и роспись ---- */
 tr.match-row { cursor: pointer; }
@@ -734,6 +757,10 @@ footer .bk-chip { margin: 0 2px; }
 @media (max-width: 860px) {
   body { font-size: 14.5px; }
   header h1 { font-size: 1.06rem; }
+  /* «прематч и лайв» рядом с названием — из-за него кнопки темы и админки
+     не влезали в строку заголовка и уезжали на отдельную, забирая у таблицы
+     ещё сантиметр экрана. */
+  header h1 .sub { display: none; }
   .table-card { background: transparent; border: 0; box-shadow: none; overflow: visible; }
   table, thead, tbody, tr, th, td { display: block; }
   thead { display: none; }
@@ -897,4 +924,29 @@ tr.hot .profit-cell { color: var(--hot); }
   .sport-root, .sport-league { display: inline; }
   .sport-league::before { content: " · "; }
   .stake, thead th.num-head { text-align: left; }
+
+  /* Фильтры на телефоне свёрнуты: восемь полей в столбик занимали весь
+     первый экран, и до самих вилок приходилось скроллить. */
+  .filters-toggle {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    background: var(--panel);
+    color: var(--text-dim);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 10px 14px;
+    font: inherit;
+    font-size: 0.9rem;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .filters-toggle .chev { transition: transform .15s; color: var(--muted); }
+  .filters-toggle[aria-expanded="true"] .chev { transform: rotate(180deg); }
+  .filters-toggle[aria-expanded="false"] + .filters { display: none; }
+  .filters { flex-direction: column; align-items: stretch; }
+  .filters label { justify-content: space-between; }
+  .filters select, .filters input[type="number"] { flex: 0 0 auto; }
 }

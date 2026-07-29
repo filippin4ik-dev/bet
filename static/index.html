@@ -43,7 +43,16 @@
       <button type="button" data-view="live-matches">📺 Лайв-матчи</button>
     </div>
 
-    <div class="filters">
+    <!-- На телефоне фильтры занимали весь первый экран, и до таблицы вилок
+         приходилось долго скроллить, поэтому там они свёрнуты (кнопка видна
+         только на узких экранах, см. style.css). -->
+    <button type="button" class="filters-toggle" id="filters-toggle"
+            aria-controls="filters" aria-expanded="false">
+      <span>🔍 Поиск и фильтры</span>
+      <span class="chev">▾</span>
+    </button>
+
+    <div class="filters" id="filters">
       <label class="grow">
         🔍 <input type="search" id="search" placeholder="Команда, турнир, рынок, БК…">
       </label>

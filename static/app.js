@@ -29,6 +29,7 @@ const els = {
   bkFilter: document.getElementById("bk-filter"),
   resetFilters: document.getElementById("reset-filters"),
   filters: document.querySelector(".filters"),
+  filtersToggle: document.getElementById("filters-toggle"),
   toastHost: document.getElementById("toast-host"),
   minProfit: document.getElementById("min-profit"),
   minProfitLabel: document.getElementById("min-profit-label"),
@@ -389,16 +390,26 @@ function renderDetail() {
     els.detailBody.innerHTML = '<tr><td colspan="4" class="empty">Котировок нет</td></tr>';
     return;
   }
-  const cell = (m, side) => (m.quotes || []).map((q) => {
-    const k = side === 1 ? q.k1 : side === 3 ? q.k3 : q.k2;
-    if (k == null) return "";
-    const body = `<span class="quote ${bkClass(q.bookmaker)}" title="${escapeHtml(q.bookmaker)}">` +
-      `${k.toFixed(2)}</span>`;
-    // кэф — ссылка на страницу события у этой БК (если известна)
-    return q.url
-      ? `<a class="quote-link" href="${escapeHtml(q.url)}" target="_blank" rel="noopener">${body}</a>`
-      : body;
-  }).join(" ");
+  // Роспись нужна ровно для того, чтобы сравнить кэфы БК между собой,
+  // поэтому у каждого кэфа подписана его БК (одного цвета мало: Fonbet и
+  // Winline на глаз похожи, а на телефоне подсказки по наведению нет), а
+  // лучший кэф исхода выделен — именно на него и ставят.
+  const cell = (m, side) => {
+    const list = (m.quotes || [])
+      .map((q) => ({ bk: q.bookmaker, url: q.url,
+                     k: side === 1 ? q.k1 : side === 3 ? q.k3 : q.k2 }))
+      .filter((q) => q.k != null);
+    const best = Math.max(...list.map((q) => q.k));
+    return list.map((q) => {
+      const top = list.length > 1 && q.k === best ? " best" : "";
+      const body = `<span class="quote ${bkClass(q.bk)}${top}" title="${escapeHtml(q.bk)}">` +
+        `${q.k.toFixed(2)}<span class="quote-bk">${escapeHtml(q.bk)}</span></span>`;
+      // кэф — ссылка на страницу события у этой БК (если известна)
+      return q.url
+        ? `<a class="quote-link" href="${escapeHtml(q.url)}" target="_blank" rel="noopener">${body}</a>`
+        : body;
+    }).join(" ");
+  };
   els.detailBody.innerHTML = d.markets.map((m) => `<tr>
       <td data-label="Рынок" class="market-name">${escapeHtml(m.market)}</td>
       <td data-label="Исход 1"><span class="out">${escapeHtml(m.outcome1)}</span> ${cell(m, 1)}</td>
@@ -900,6 +911,7 @@ function updateVisibility() {
   // В росписи одного матча фильтры и банк ни на что не влияют — панель
   // только сбивала бы с толку («Показано: 7454» над таблицей одного матча)
   els.filters.hidden = detailOpen;
+  els.filtersToggle.hidden = detailOpen;
   els.arbsCard.hidden = !isArbView(state.view);
   els.arbs1x2Card.hidden = !isArb1x2View(state.view);
   els.matchesCard.hidden = !isMatchesView(state.view) || detailOpen;
@@ -1043,6 +1055,12 @@ els.bkFilter.addEventListener("change", () => {
   state.bookmaker = els.bkFilter.value;
   saveState();
   rerender();
+});
+
+// Свёрнутые фильтры на телефоне (на широком экране кнопка скрыта стилями)
+els.filtersToggle.addEventListener("click", () => {
+  const open = els.filtersToggle.getAttribute("aria-expanded") === "true";
+  els.filtersToggle.setAttribute("aria-expanded", open ? "false" : "true");
 });
 
 els.resetFilters.addEventListener("click", () => {
