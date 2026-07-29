@@ -114,9 +114,11 @@ def test_empty_fetch_keeps_previous_odds():
     матчи не «слетают», пока не истёк ODDS_TTL."""
     p = _Fake("БК")
     sc = Scanner(mode=KIND_PREMATCH, parsers=[p])
-    sc._update_bk("БК", _odds("БК"))
+    sc._store_odds("БК", _odds("БК"))
+    sc._recalc()
     assert sc.snapshot()["quotes_checked"] == 1
-    sc._update_bk("БК", [])
+    sc._store_odds("БК", [])
+    sc._recalc()
     assert sc.snapshot()["quotes_checked"] == 1
 
 
@@ -124,10 +126,38 @@ def test_stale_odds_dropped_after_ttl():
     p = _Fake("БК")
     sc = Scanner(mode=KIND_PREMATCH, parsers=[p])
     sc.ttl = 0.05
-    sc._update_bk("БК", _odds("БК"))
+    sc._store_odds("БК", _odds("БК"))
+    sc._recalc()
     time.sleep(0.1)
-    sc._update_bk("БК", [])
+    sc._store_odds("БК", [])
+    sc._recalc()
     assert sc.snapshot()["quotes_checked"] == 0
+
+
+def test_recalc_coalesces_updates():
+    """Пересчёт вилок стоит секунды на сотнях тысяч котировок, поэтому он
+    один на сканер: пока он идёт, обновления БК копятся и схлопываются в
+    один следующий проход (иначе каждая БК платила бы за полный пересчёт и
+    обходы растягивались бы в разы)."""
+    p1, p2, p3 = (_Fake(f"БК{i}") for i in (1, 2, 3))
+    sc = Scanner(mode=KIND_PREMATCH, parsers=[p1, p2, p3])
+    sc.interval = 0.1
+    calls = []
+    real_recalc = sc._recalc
+
+    def slow_recalc():
+        calls.append(time.monotonic())
+        time.sleep(0.5)
+        return real_recalc()
+
+    sc._recalc = slow_recalc
+    asyncio.run(_run_for(sc, 0.8))
+    fetches = p1.calls + p2.calls + p3.calls
+    assert fetches >= 3
+    assert len(calls) <= 2, (
+        f"пересчётов должно быть меньше, чем обходов БК "
+        f"(обходов {fetches}, пересчётов {len(calls)})")
+    assert calls, "хоть один пересчёт должен был случиться"
 
 
 def test_prematch_ignores_live_switch():

@@ -76,10 +76,14 @@ class Scanner:
         self._first_seen3: dict[str, float] = {}
         # кэш фаззи-слияния имён команд (build_name_canon_map) — дорогая
         # операция, пересчитываем не чаще FUZZY_NAME_MAP_REFRESH (см.
-        # _update_bk), а не после КАЖДОГО обновления отдельной БК.
+        # _recalc), а не при каждом пересчёте вилок.
         self._name_map_cache: dict[str, str] = {}
         self._name_map_at: float = 0.0
-        self._executor = ThreadPoolExecutor(max_workers=max(1, len(self.parsers)),
+        # пришли новые котировки — вилки надо пересчитать (флаг снимает
+        # поток пересчёта, см. _recalc_worker)
+        self._dirty = False
+        # по потоку на каждую БК + поток пересчёта вилок
+        self._executor = ThreadPoolExecutor(max_workers=len(self.parsers) + 1,
                                             thread_name_prefix=f"scan-{mode}")
         self._stop = asyncio.Event()
         # Пока флаг установлен, воркеры БК работают. Лайв снимает его на
@@ -304,12 +308,11 @@ class Scanner:
                          bk, len(self._odds_by_bk[bk]) - len(kept))
                 self._odds_by_bk[bk] = kept
 
-    def _update_bk(self, bk: str,
-                   odds: list[MarketOdds]) -> tuple[list[Arb], list[Arb3]]:
-        """Обновляет котировки одной БК и пересчитывает вилки.
+    def _store_odds(self, bk: str, odds: list[MarketOdds]) -> None:
+        """Складывает свежие котировки одной БК и помечает вилки к пересчёту.
 
         Пустой результат (сбой обхода) НЕ затирает старые данные —
-        они живут до ODDS_TTL, чтобы матчи не пропадали между циклами.
+        они живут до ODDS_TTL, чтобы матчи не пропадали между обходами.
         """
         now = time.time()
         with self._lock:
@@ -317,11 +320,23 @@ class Scanner:
                 self._odds_by_bk[bk] = odds
                 self._fetched_at[bk] = now
             self._prune_locked(now)
+            self._dirty = True
+
+    def _recalc(self) -> tuple[list[Arb], list[Arb3]]:
+        """Пересчитывает вилки по котировкам ВСЕХ БК, лежащим в памяти.
+
+        Дорогая операция (сотни тысяч котировок), поэтому её выполняет один
+        отдельный поток и не чаще, чем успевает: обновления нескольких БК,
+        пришедшие подряд, схлопываются в один пересчёт (см. _recalc_worker).
+        """
+        now = time.time()
+        with self._lock:
+            self._dirty = False
             all_odds = [o for os_ in self._odds_by_bk.values() for o in os_]
 
-        # build_name_canon_map — дорогая операция; считаем не после КАЖДОГО
-        # обновления отдельной БК (несколько раз за цикл), а не чаще
-        # FUZZY_NAME_MAP_REFRESH, и переиспользуем на оба движка вилок.
+        # build_name_canon_map — дорогая операция; считаем не при КАЖДОМ
+        # пересчёте, а не чаще FUZZY_NAME_MAP_REFRESH, и переиспользуем на
+        # оба движка вилок.
         if now - self._name_map_at > FUZZY_NAME_MAP_REFRESH:
             self._name_map_cache = build_name_canon_map(all_odds)
             self._name_map_at = now
@@ -407,6 +422,8 @@ class Scanner:
                     self._running = True
                 workers = [loop.run_in_executor(self._executor, self._worker, p)
                            for p in parsers]
+                workers.append(loop.run_in_executor(self._executor,
+                                                    self._recalc_worker))
                 log.info("[%s] сканер запущен: БК=%s, пауза между обходами "
                          "одной БК %.1f c", self.mode,
                          ", ".join(p.name for p in parsers), self._gap())
@@ -459,21 +476,46 @@ class Scanner:
                 finally:
                     with self._lock:
                         self._busy.discard(parser.name)
-                arbs, arbs3 = self._update_bk(parser.name, odds)
-                self._save_new(arbs, arbs3)
+                # только складываем котировки: вилки посчитает отдельный
+                # поток, иначе каждая БК платила бы за полный пересчёт и
+                # обходы растягивались бы в разы
+                self._store_odds(parser.name, odds)
                 with self._lock:
                     self._scan_count += 1
                     total = sum(len(o) for o in self._odds_by_bk.values())
-                log.info("[%s] %s: %d котировок за %.0f c — в памяти %d, "
-                         "вилок %d (+%d на 1X2)%s",
+                log.info("[%s] %s: %d котировок за %.0f c — в памяти %d",
                          self.mode, parser.name, len(odds),
-                         time.monotonic() - started, total,
-                         len(arbs), len(arbs3),
-                         f", лучшая {arbs[0].profit_pct:.2f}%" if arbs else "")
+                         time.monotonic() - started, total)
             except Exception:  # noqa: BLE001
                 log.exception("[%s] %s: ошибка обновления",
                               self.mode, parser.name)
             self._sleep_before_next(started)
+
+    def _recalc_worker(self) -> None:
+        """Единственный поток пересчёта вилок.
+
+        Пересчёт по всем БК стоит секунды (сотни тысяч котировок), поэтому
+        считаем не после каждой БК, а по флагу: пока идёт пересчёт,
+        обновления копятся и схлопываются в один следующий проход. Один
+        поток на сканер — значит нагрузка на CPU ограничена и предсказуема,
+        а вилки всегда считаются по САМЫМ свежим данным."""
+        while self._workers_on.is_set() and not self._stop.is_set():
+            with self._lock:
+                dirty = self._dirty
+            if not dirty:
+                time.sleep(0.2)
+                continue
+            started = time.monotonic()
+            try:
+                arbs, arbs3 = self._recalc()
+                self._save_new(arbs, arbs3)
+                log.log(logging.DEBUG if self.live else logging.INFO,
+                        "[%s] пересчёт вилок за %.1f c: %d вилок "
+                        "(+%d на 1X2)%s", self.mode,
+                        time.monotonic() - started, len(arbs), len(arbs3),
+                        f", лучшая {arbs[0].profit_pct:.2f}%" if arbs else "")
+            except Exception:  # noqa: BLE001
+                log.exception("[%s] ошибка пересчёта вилок", self.mode)
 
     def _sleep_before_next(self, started: float) -> None:
         """Ждёт до следующего обхода этой БК: в прематче обходы идут не чаще
