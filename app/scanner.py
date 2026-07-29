@@ -32,8 +32,9 @@ from .arbitrage import (_canon, _market_group, _neg_hcap, _time_clusters,
                         build_name_canon_map, find_arbs, find_arbs_1x2,
                         norm_team)
 from .config import (ARB_RECALC_MIN_GAP, BK_FAIL_BACKOFF_MAX,
-                     FUZZY_NAME_MAP_REFRESH, LIVE_ODDS_TTL, LIVE_PER_BK_GAP,
-                     LIVE_SCAN_INTERVAL, ODDS_TTL, SCAN_INTERVAL)
+                     FUZZY_NAME_MAP_REFRESH, LIVE_MATCHES_CACHE_TTL,
+                     LIVE_ODDS_TTL, LIVE_PER_BK_GAP, LIVE_SCAN_INTERVAL,
+                     MATCHES_CACHE_TTL, ODDS_TTL, SCAN_INTERVAL)
 from .models import Arb, Arb3, KIND_LIVE, KIND_PREMATCH, MarketOdds
 from .parsers import get_parsers
 from .parsers.base import BaseParser
@@ -99,13 +100,16 @@ class Scanner:
         self._name_map_lock = threading.Lock()
         # Разбор котировок по событиям (список матчей и роспись одного
         # матча) стоит секунды на сотни тысяч котировок, а интерфейс тянет
-        # его каждые несколько секунд. Держим готовый разбор до прихода
-        # свежих котировок — тогда он же и обнуляется (_store_odds), чтобы
-        # кэш не держал в памяти прошлое поколение линии.
+        # его каждые несколько секунд. Держим готовый разбор MATCHES_CACHE_TTL
+        # секунд, даже если за это время пришли свежие котировки: считать его
+        # чаще, чем он считается, — значит отобрать процессор у обходов БК.
         self._odds_rev = 0          # растёт при каждом изменении котировок
         self._groups: dict[str, list[MarketOdds]] = {}
         self._groups_name_map: dict[str, str] = {}
         self._groups_rev = -1
+        self._groups_at = 0.0
+        self._groups_ttl = (LIVE_MATCHES_CACHE_TTL if self.live
+                            else MATCHES_CACHE_TTL)
         self._matches: list[dict] = []
         self._matches_rev = -1
         # Пока один запрос считает разбор, второй ждёт его результат, а не
@@ -171,7 +175,8 @@ class Scanner:
         with self._lock:
             return [o for odds in self._odds_by_bk.values() for o in odds]
 
-    def _name_map(self, all_odds: list[MarketOdds]) -> dict[str, str]:
+    def _name_map(self, all_odds: list[MarketOdds],
+                  refresh: bool = False) -> dict[str, str]:
         """Каноничные имена команд — один кэш на весь сканер.
 
         build_name_canon_map (фаззи-слияние разных написаний одного имени по
@@ -179,10 +184,18 @@ class Scanner:
         котировок. Её результат нужен и пересчёту вилок, и группировке
         матчей, поэтому считаем не чаще FUZZY_NAME_MAP_REFRESH и делим на
         всех: раньше карту строил КАЖДЫЙ запрос списка матчей, и вкладка
-        «Матчи» отвечала двадцать секунд, отбирая процессор у обходов БК."""
+        «Матчи» отвечала двадцать секунд, отбирая процессор у обходов БК.
+
+        refresh=True обновляет устаревшую карту — так её и обновляет поток
+        пересчёта вилок. Запросам из интерфейса (refresh=False) отдаём
+        готовую карту, даже если ей пора обновиться: «устаревшая» карта
+        значит лишь, что пара новых написаний имён ещё не слита, а платить
+        за пересчёт секундами посреди ответа незачем."""
         now = time.time()
         with self._name_map_lock:
-            if now - self._name_map_at <= FUZZY_NAME_MAP_REFRESH:
+            if self._name_map_at and (refresh is False
+                                      or now - self._name_map_at
+                                      <= FUZZY_NAME_MAP_REFRESH):
                 return self._name_map_cache
             self._name_map_cache = build_name_canon_map(all_odds)
             self._name_map_at = now
@@ -222,12 +235,12 @@ class Scanner:
         Вместе с разбором отдаёт номер поколения котировок, по которому он
         сделан: по нему видно, не устарел ли он уже."""
         with self._lock:
-            if self._groups_rev == self._odds_rev:
+            if self._groups_usable_locked():
                 return self._groups_rev, self._groups, self._groups_name_map
         with self._groups_lock:
             with self._lock:
                 # пока ждали очереди, разбор мог посчитать сосед
-                if self._groups_rev == self._odds_rev:
+                if self._groups_usable_locked():
                     return (self._groups_rev, self._groups,
                             self._groups_name_map)
                 rev = self._odds_rev
@@ -242,7 +255,27 @@ class Scanner:
                     self._groups = groups
                     self._groups_name_map = name_map
                     self._groups_rev = rev
+                    self._groups_at = time.monotonic()
             return rev, groups, name_map
+
+    def _groups_usable_locked(self) -> bool:
+        """Готовый разбор ещё годится: либо котировки с тех пор не менялись,
+        либо он моложе MATCHES_CACHE_TTL. Вызывать под self._lock."""
+        if self._groups_rev < 0:
+            return False
+        return (self._groups_rev == self._odds_rev
+                or time.monotonic() - self._groups_at < self._groups_ttl)
+
+    def _drop_stale_groups(self) -> None:
+        """Выбрасывает разбор, который уже не отдаётся.
+
+        Разбор держит ссылки на котировки, которых в памяти сканера больше
+        нет (БК с тех пор обновилась), — без этой уборки прошлое поколение
+        линии висело бы в памяти до следующего запроса из интерфейса, а если
+        сайт никто не смотрит, то и вовсе бесконечно."""
+        with self._lock:
+            if self._groups_rev >= 0 and not self._groups_usable_locked():
+                self._drop_groups_locked()
 
     def matches_snapshot(self) -> list[dict]:
         """Список всех найденных матчей, сгруппированных по событию.
@@ -418,15 +451,18 @@ class Scanner:
             self._mark_changed_locked()
 
     def _mark_changed_locked(self) -> None:
-        """Котировки изменились: вилки к пересчёту, разбор по событиям — в
-        утиль. Кэш разбора чистим сразу, а не по требованию: он держит ссылки
-        на прежние котировки, и в памяти лежало бы два поколения линии
-        (сотни мегабайт на слабом VPS). Вызывать под self._lock."""
+        """Котировки изменились — вилки к пересчёту, разбор по событиям
+        считается устаревшим (см. _groups_usable_locked). Вызывать под
+        self._lock."""
         self._dirty = True
         self._odds_rev += 1
+
+    def _drop_groups_locked(self) -> None:
+        """Забывает разбор линии по событиям. Вызывать под self._lock."""
         self._groups = {}
         self._groups_name_map = {}
         self._groups_rev = -1
+        self._groups_at = 0.0
         self._matches = []
         self._matches_rev = -1
 
@@ -442,7 +478,7 @@ class Scanner:
             self._dirty = False
             all_odds = [o for os_ in self._odds_by_bk.values() for o in os_]
 
-        name_map = self._name_map(all_odds)
+        name_map = self._name_map(all_odds, refresh=True)
         arbs = find_arbs(all_odds, name_map)
         arbs3 = find_arbs_1x2(all_odds, name_map)
         with self._lock:
@@ -633,6 +669,7 @@ class Scanner:
             self._odds_by_bk.clear()
             self._fetched_at.clear()
             self._mark_changed_locked()
+            self._drop_groups_locked()
             self._busy.clear()
             self._disabled.clear()
             self._restart_bks.clear()
@@ -660,6 +697,9 @@ class Scanner:
             self._fetched_at.pop(bk, None)
             if had:
                 self._mark_changed_locked()
+                # БК выключили или перезапустили — в списке матчей она должна
+                # исчезнуть сразу, а не когда истечёт окно кэша
+                self._drop_groups_locked()
 
     def _mark_disabled(self, bk: str) -> None:
         with self._lock:
@@ -743,6 +783,9 @@ class Scanner:
         поток на сканер — значит нагрузка на CPU ограничена и предсказуема,
         а вилки всегда считаются по САМЫМ свежим данным."""
         while self._workers_on.is_set() and not self._stop.is_set():
+            # заодно убираем разбор линии, который уже никому не отдаётся:
+            # он держит в памяти котировки прошлого поколения
+            self._drop_stale_groups()
             with self._lock:
                 dirty = self._dirty
             if not dirty:

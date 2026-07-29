@@ -396,6 +396,7 @@ def test_matches_snapshot_reuses_grouping_until_odds_change():
     несколько секунд: раньше каждый опрос считал всё заново и отбирал
     процессор у самих обходов БК."""
     sc = Scanner(mode=KIND_PREMATCH, parsers=[_Fake("БК1")])
+    sc._groups_ttl = 0     # окно «отдавать чуть устаревшее» проверяется ниже
     calls = []
     orig = Scanner._event_groups
 
@@ -419,6 +420,35 @@ def test_matches_snapshot_reuses_grouping_until_odds_change():
     # список отдаётся копией: сортировка вызывающего не портит кэш
     m.reverse()
     assert sc.matches_snapshot()[0]["bookmakers"] == ["БК1", "БК2"]
+
+
+def test_grouping_survives_new_odds_for_a_short_while():
+    """Разбор линии не пересчитывается чаще, чем считается.
+
+    Котировки БК приходят чаще, чем успевает разбор по событиям, поэтому
+    готовый разбор отдаётся ещё MATCHES_CACHE_TTL секунд — иначе кэш
+    промахивался бы на каждом опросе интерфейса. Устаревший разбор держит
+    ссылки на прежние котировки, поэтому его выбрасывает поток пересчёта."""
+    sc = Scanner(mode=KIND_PREMATCH, parsers=[_Fake("БК")])
+    sc._groups_ttl = 30
+    sc._store_odds("БК1", _odds("БК1"))
+    assert sc.matches_snapshot()[0]["bookmakers"] == ["БК1"]
+    sc._store_odds("БК2", _odds("БК2"))
+    # окно ещё не истекло — отдаём прежний разбор, не считая заново
+    assert sc.matches_snapshot()[0]["bookmakers"] == ["БК1"]
+    sc._drop_stale_groups()           # моложе окна — уборка его не тронет
+    assert sc._groups_rev >= 0
+    sc._groups_ttl = 0                # окно истекло
+    assert sc.matches_snapshot()[0]["bookmakers"] == ["БК1", "БК2"]
+    # выключение БК видно сразу, окна не ждём
+    sc._groups_ttl = 30
+    sc._forget_bk("БК2")
+    assert sc.matches_snapshot()[0]["bookmakers"] == ["БК1"]
+    # а уборка выбрасывает разбор, который больше не отдаётся
+    sc._store_odds("БК2", _odds("БК2"))
+    sc._groups_ttl = 0
+    sc._drop_stale_groups()
+    assert sc._groups == {} and sc._matches == []
 
 
 def test_matches_snapshot_sorted_by_start_time():
