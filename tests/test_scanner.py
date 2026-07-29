@@ -89,6 +89,33 @@ def test_slow_bookmaker_does_not_block_fast_one():
         f"(обходов: {fast.calls})")
 
 
+def test_parser_min_refresh_respected():
+    """У БК со своим ограничением (Betcity: снимок всей линии тяжёлый, и на
+    частых обходах её сервер рвёт соединение) период обхода не меньше
+    её собственного, даже если общий SCAN_INTERVAL меньше."""
+    greedy = _Fake("Обычная")
+    gentle = _Fake("Тяжёлая")
+    gentle.min_refresh = 3.0
+    sc = Scanner(mode=KIND_PREMATCH, parsers=[greedy, gentle])
+    sc.interval = 0.1
+    asyncio.run(_run_for(sc, 1.5))
+    assert gentle.calls == 1, "тяжёлую БК нельзя опрашивать чаще её периода"
+    assert greedy.calls >= 2
+
+
+def test_failing_bookmaker_backs_off():
+    """БК отвечает пусто (не отвечает сервер, защита рвёт соединение) —
+    сканер отступает, а не долбит её прежним темпом: пользы это не даёт,
+    а защита БК от такого только злее. Котировки живут до ODDS_TTL."""
+    dead = _Fake("Молчит", odds=[])
+    sc = Scanner(mode=KIND_PREMATCH, parsers=[dead])
+    sc.interval = 0.5
+    asyncio.run(_run_for(sc, 3.0))
+    # без отступа было бы ~6 обходов: 0.5 + 1 + 2 + (4) — три-четыре
+    assert dead.calls <= 4, f"обходов слишком много: {dead.calls}"
+    assert dead.calls >= 2
+
+
 def test_bookmaker_marked_busy_while_fetching():
     """Пока БК качает линию, в статусе стоит busy — в интерфейсе вместо
     возраста котировок видно «обновляется…», а не «зависла»."""

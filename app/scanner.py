@@ -26,9 +26,9 @@ from . import config, db
 from .arbitrage import (_canon, _market_group, _neg_hcap, _time_clusters,
                         build_name_canon_map, find_arbs, find_arbs_1x2,
                         norm_team)
-from .config import (ARB_RECALC_MIN_GAP, FUZZY_NAME_MAP_REFRESH,
-                     LIVE_ODDS_TTL, LIVE_PER_BK_GAP, LIVE_SCAN_INTERVAL,
-                     ODDS_TTL, SCAN_INTERVAL)
+from .config import (ARB_RECALC_MIN_GAP, BK_FAIL_BACKOFF_MAX,
+                     FUZZY_NAME_MAP_REFRESH, LIVE_ODDS_TTL, LIVE_PER_BK_GAP,
+                     LIVE_SCAN_INTERVAL, ODDS_TTL, SCAN_INTERVAL)
 from .models import Arb, Arb3, KIND_LIVE, KIND_PREMATCH, MarketOdds
 from .parsers import get_parsers
 from .parsers.base import BaseParser
@@ -467,6 +467,7 @@ class Scanner:
 
     def _worker(self, parser: BaseParser) -> None:
         """Цикл обновления одной БК (в отдельном потоке)."""
+        failures = 0
         while self._workers_on.is_set() and not self._stop.is_set():
             started = time.monotonic()
             try:
@@ -481,6 +482,7 @@ class Scanner:
                 # поток, иначе каждая БК платила бы за полный пересчёт и
                 # обходы растягивались бы в разы
                 self._store_odds(parser.name, odds)
+                failures = 0 if odds else failures + 1
                 with self._lock:
                     self._scan_count += 1
                     total = sum(len(o) for o in self._odds_by_bk.values())
@@ -488,9 +490,10 @@ class Scanner:
                          self.mode, parser.name, len(odds),
                          time.monotonic() - started, total)
             except Exception:  # noqa: BLE001
+                failures += 1
                 log.exception("[%s] %s: ошибка обновления",
                               self.mode, parser.name)
-            self._sleep_before_next(started)
+            self._sleep_before_next(started, parser, failures)
 
     def _recalc_worker(self) -> None:
         """Единственный поток пересчёта вилок.
@@ -522,14 +525,27 @@ class Scanner:
             # обходов БК. В лайве котировок мало и пересчёт дешёвый.
             self._sleep_while_running(0.5 if self.live else ARB_RECALC_MIN_GAP)
 
-    def _sleep_before_next(self, started: float) -> None:
+    def _sleep_before_next(self, started: float, parser: BaseParser,
+                           failures: int = 0) -> None:
         """Ждёт до следующего обхода этой БК: в прематче обходы идут не чаще
         раза в SCAN_INTERVAL (обход дольше периода — следующий сразу), в
-        лайве — короткая пауза, чтобы не долбить сервер БК вплотную."""
+        лайве — короткая пауза, чтобы не долбить сервер БК вплотную.
+
+        У БК со своим ограничением (BaseParser.min_refresh) период не меньше
+        её собственного: слишком частые обходы такая БК начинает срывать.
+
+        После неудачных обходов подряд пауза удваивается (до потолка): если
+        БК не отвечает или её защита рвёт соединение, прежний темп запросов
+        ничего не даст, а котировки всё равно живут до ODDS_TTL."""
         if self.live:
-            deadline = time.monotonic() + LIVE_PER_BK_GAP
+            period = LIVE_PER_BK_GAP
+            cap = LIVE_ODDS_TTL / 3
         else:
-            deadline = max(started + self.interval, time.monotonic() + 0.5)
+            period = max(self.interval, parser.min_refresh or 0)
+            cap = BK_FAIL_BACKOFF_MAX
+        if failures:
+            period = min(period * 2 ** min(failures, 6), cap)
+        deadline = max(started + period, time.monotonic() + 0.5)
         self._sleep_while_running(deadline - time.monotonic())
 
     def _sleep_while_running(self, seconds: float) -> None:
