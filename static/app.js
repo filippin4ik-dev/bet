@@ -1022,7 +1022,7 @@ function closeMatch() {
 
 /* ---------- обработчики ---------- */
 
-els.minProfit.addEventListener("change", () => { saveState(); poll(); });
+els.minProfit.addEventListener("change", () => { saveState(); restartPolling(); });
 els.bank.addEventListener("change", () => { saveState(); rerender(); });
 
 let searchTimer = null;
@@ -1052,7 +1052,7 @@ els.resetFilters.addEventListener("click", () => {
   els.search.value = "";
   els.minProfit.value = "0";
   saveState();
-  poll();
+  restartPolling();
 });
 
 els.viewTabs.addEventListener("click", (e) => {
@@ -1065,7 +1065,6 @@ els.viewTabs.addEventListener("click", (e) => {
     (b) => b.classList.toggle("active", b === btn));
   updateVisibility();
   restartPolling();
-  poll();
 });
 
 els.matchesBody.addEventListener("click", (e) => {
@@ -1100,17 +1099,49 @@ document.querySelectorAll("table thead").forEach((thead) => {
 
 /* ---------- запуск ---------- */
 
+/* Опрашиваем сервер по кругу, а не по таймеру: полный список матчей на
+ * живой линии собирается секунды (десятки тысяч событий), и setInterval
+ * успевал послать следующий запрос, не дождавшись предыдущего. Очередь
+ * выедала лимит браузера на одновременные соединения к одному хосту —
+ * после этого не отвечала вся страница, вплоть до перехода в админку. */
 let pollTimer = null;
-function restartPolling() {
-  if (pollTimer) clearInterval(pollTimer);
-  const ms = isLiveView(state.view) ? LIVE_POLL_INTERVAL_MS : POLL_INTERVAL_MS;
-  pollTimer = setInterval(poll, ms);
+let polling = false;
+// Просили обновиться, пока круг ещё шёл: сменили вкладку или фильтр — данные
+// нужны от другого адреса, ждать полный интервал незачем
+let pollAgain = false;
+
+async function pollLoop() {
+  if (polling) {
+    pollAgain = true;
+    return;
+  }
+  polling = true;
+  pollAgain = false;
+  try {
+    // Скрытая вкладка (телефон в кармане, другой таб) ничего не показывает,
+    // и дёргать из неё сервер незачем.
+    if (!document.hidden) await poll();
+  } finally {
+    polling = false;
+    clearTimeout(pollTimer);
+    pollTimer = setTimeout(pollLoop, pollAgain ? 0 : (isLiveView(state.view)
+      ? LIVE_POLL_INTERVAL_MS : POLL_INTERVAL_MS));
+  }
 }
+
+function restartPolling() {
+  clearTimeout(pollTimer);
+  pollTimer = setTimeout(pollLoop, 0);
+}
+
+// Вернулись на вкладку — показываем свежие кэфы сразу, а не через паузу
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) restartPolling();
+});
 
 loadState();
 els.viewTabs.querySelectorAll("button").forEach(
   (b) => b.classList.toggle("active", b.dataset.view === state.view));
 updateVisibility();
 
-poll();
 restartPolling();
