@@ -14,10 +14,11 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from . import db
-from .arbitrage import (_market_group, _neg_hcap, _time_clusters, find_arbs,
-                        find_arbs_1x2, norm_team)
-from .config import (LIVE_ODDS_TTL, LIVE_PER_BK_GAP, LIVE_SCAN_INTERVAL,
-                     ODDS_TTL, SCAN_INTERVAL)
+from .arbitrage import (_canon, _market_group, _neg_hcap, _time_clusters,
+                        build_name_canon_map, find_arbs, find_arbs_1x2,
+                        norm_team)
+from .config import (FUZZY_NAME_MAP_REFRESH, LIVE_ODDS_TTL, LIVE_PER_BK_GAP,
+                     LIVE_SCAN_INTERVAL, ODDS_TTL, SCAN_INTERVAL)
 from .models import Arb, Arb3, KIND_LIVE, KIND_PREMATCH, MarketOdds
 from .parsers import get_parsers
 from .parsers.base import BaseParser
@@ -60,6 +61,11 @@ class Scanner:
         # пока вилка держится между обновлениями, её таймер не сбрасывается
         self._first_seen: dict[str, float] = {}
         self._first_seen3: dict[str, float] = {}
+        # кэш фаззи-слияния имён команд (build_name_canon_map) — дорогая
+        # операция, пересчитываем не чаще FUZZY_NAME_MAP_REFRESH (см.
+        # _update_bk), а не после КАЖДОГО обновления отдельной БК.
+        self._name_map_cache: dict[str, str] = {}
+        self._name_map_at: float = 0.0
         self._executor = ThreadPoolExecutor(max_workers=len(self.parsers),
                                             thread_name_prefix=f"scan-{mode}")
         self._stop = asyncio.Event()
@@ -107,12 +113,15 @@ class Scanner:
         """Группирует котировки всех БК по событию (матч + время старта).
 
         Ключ события устойчив между опросами: kind | отсортированная пара
-        нормализованных команд | номер кластера времени старта (разные
-        матчи одной пары команд не сливаются)."""
-        clusters = _time_clusters(all_odds)
+        нормализованных (и фаззи-каноничных — см. build_name_canon_map)
+        команд | номер кластера времени старта (разные матчи одной пары
+        команд не сливаются)."""
+        name_map = build_name_canon_map(all_odds)
+        clusters = _time_clusters(all_odds, name_map)
         groups: dict[str, list[MarketOdds]] = {}
         for o in all_odds:
-            t1, t2 = norm_team(o.team1), norm_team(o.team2)
+            t1 = _canon(name_map, norm_team(o.team1))
+            t2 = _canon(name_map, norm_team(o.team2))
             if not t1 or not t2 or t1 == t2:
                 continue
             teams = frozenset((t1, t2))
@@ -132,7 +141,8 @@ class Scanner:
             sample = max(odds, key=lambda o: (o.start_ts is not None,
                                               len(o.team1) + len(o.team2)))
             books = sorted({o.bookmaker for o in odds})
-            markets = {_market_group(o) for o in odds}
+            name_map = build_name_canon_map(odds)
+            markets = {_market_group(o, name_map) for o in odds}
             start_ts = min((o.start_ts for o in odds if o.start_ts),
                            default=None)
             out.append({
@@ -157,18 +167,22 @@ class Scanner:
             return None
         sample = max(odds, key=lambda o: (o.start_ts is not None,
                                           len(o.team1) + len(o.team2)))
-        base_t1 = norm_team(sample.team1)
+        name_map = build_name_canon_map(odds)
+        base_t1 = _canon(name_map, norm_team(sample.team1))
 
         markets: dict[str, dict] = {}
         for o in odds:
             # ориентация к team1 события: у БК с перевёрнутым порядком
             # команд исходы меняются местами (тоталы, «обе забьют»,
             # чет/нечет и инд. тоталы от порядка команд не зависят —
-            # инд. тотал привязан к имени команды, а не к позиции)
-            flipped = (norm_team(o.team1) != base_t1
+            # инд. тотал привязан к имени команды, а не к позиции). Через
+            # name_map, а не «сырой» norm_team — иначе БК с чуть другим
+            # написанием имени той же команды ложно посчитались бы
+            # «перевёрнутыми» и исходы поменялись бы местами неверно.
+            flipped = (_canon(name_map, norm_team(o.team1)) != base_t1
                        and not o.market_key.startswith(("total", "bothscore",
                                                         "itotal", "oddeven")))
-            mg = _market_group(o)
+            mg = _market_group(o, name_map)
             m = markets.get(mg)
             if m is None:
                 m = markets[mg] = {
@@ -281,8 +295,15 @@ class Scanner:
             self._prune_locked(now)
             all_odds = [o for os_ in self._odds_by_bk.values() for o in os_]
 
-        arbs = find_arbs(all_odds)
-        arbs3 = find_arbs_1x2(all_odds)
+        # build_name_canon_map — дорогая операция; считаем не после КАЖДОГО
+        # обновления отдельной БК (несколько раз за цикл), а не чаще
+        # FUZZY_NAME_MAP_REFRESH, и переиспользуем на оба движка вилок.
+        if now - self._name_map_at > FUZZY_NAME_MAP_REFRESH:
+            self._name_map_cache = build_name_canon_map(all_odds)
+            self._name_map_at = now
+        name_map = self._name_map_cache
+        arbs = find_arbs(all_odds, name_map)
+        arbs3 = find_arbs_1x2(all_odds, name_map)
         with self._lock:
             # таймер жизни вилки: сохраняем момент первого обнаружения,
             # исчезнувшие вилки забываем (появятся снова — таймер с нуля)
