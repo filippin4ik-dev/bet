@@ -240,13 +240,16 @@ def test_other_yes_no_market_ignored():
 
 
 def test_odd_even_main_market():
+    """1-й исход — «Чет», как у всех остальных парсеров: движок сшивает
+    чет/нечет по ПОЗИЦИИ исхода, а не по подписи."""
     m = _market("Чет/Нечет", "REGULAR", [
         _runner("Нечет", ["ODD"], 1.89),
         _runner("Чет", ["EVEN"], 1.92),
     ])
     odds = _by_key(_parse([m]))
     o = odds["oddeven"]
-    assert (o.k1, o.k2) == (1.89, 1.92)
+    assert (o.outcome1, o.outcome2) == ("Чет", "Нечет")
+    assert (o.k1, o.k2) == (1.92, 1.89)
 
 
 def test_team_odd_even_ignored():

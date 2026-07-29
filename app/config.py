@@ -200,6 +200,11 @@ BCGAME_PROVIDER_URL = os.getenv(
     "https://bc.game/api/platform-sports/v14/home/sport/provider/support/")
 # Язык линии (ru — русские названия команд/рынков для сопоставления с БК РФ).
 BCGAME_LANG = os.getenv("BCGAME_LANG", "ru")
+# Включена ли bc.game. По умолчанию ВЫКЛЮЧЕНА: это единственная в наборе
+# зарубежная БК (платформа BetBy), её линия и названия команд заметно
+# расходятся с линией БК РФ, а «вилки» с ней чаще оказываются ошибкой
+# сопоставления, чем реальной возможностью. BCGAME_ENABLED=1 — включить.
+BCGAME_ENABLED = os.getenv("BCGAME_ENABLED", "0") in ("1", "true", "yes")
 
 # ---- LeonBet: публичный JSON-фид линии ----
 # Leon отдаёт всю линию (прематч+лайв) одним JSON-снимком без авторизации:
@@ -223,13 +228,35 @@ LEON_FULL_MARKETS_WORKERS = int(os.getenv("LEON_FULL_MARKETS_WORKERS", "16"))
 # Один POST отдаёт ВСЮ прематч-линию (все виды спорта) одним снимком, без
 # авторизации и без браузера:
 #   POST {BETCITY_API_HOST}/d/off/events?rev=6&template=1   (body: ids=0)
-# Гранулярный per-событийный эндпоинт полной росписи (/d/off/ext) закрыт
-# файрволом — используем только «топ»-рынки из общего снимка (см. докстринг
-# app/parsers/betcity.py).
+# Полная роспись рынков события (лестницы тоталов/фор, инд. тоталы, обе
+# забьют, чет/нечет) приходит ТЕМ ЖЕ эндпоинтом с ext=1 и списком id
+# событий в теле — см. докстринг app/parsers/betcity.py.
 BETCITY_API_HOST = os.getenv("BETCITY_API_HOST", "https://ad.betcity.ru").rstrip("/")
 # Хост сайта — только для сборки ссылок на страницу события (deep-link).
 BETCITY_SITE_HOST = os.getenv("BETCITY_SITE_HOST", "https://betcity.ru").rstrip("/")
-BETCITY_FEED_TIMEOUT = float(os.getenv("BETCITY_FEED_TIMEOUT", "30"))
+BETCITY_FEED_TIMEOUT = float(os.getenv("BETCITY_FEED_TIMEOUT", "60"))
+# Забирать ПОЛНУЮ роспись рынков (ext=1): ~55 рынков на событие вместо ~3 в
+# общем снимке. 0 — только «топ»-рынки (быстро и почти без трафика).
+BETCITY_FULL_MARKETS = os.getenv("BETCITY_FULL_MARKETS", "1") not in (
+    "0", "false", "no")
+# Сколько событий запрашивать одним запросом полной росписи. Больше ~250
+# id сервер Betcity отвергает (500), поэтому потолок — 200.
+BETCITY_EXT_BATCH = min(int(os.getenv("BETCITY_EXT_BATCH", "100")), 200)
+# Сколько запросов полной росписи слать параллельно.
+BETCITY_EXT_WORKERS = int(os.getenv("BETCITY_EXT_WORKERS", "3"))
+# Полная роспись всей линии — это ~40 МБ за проход, качать её КАЖДЫЙ цикл
+# (SCAN_INTERVAL) незачем: прематч-кэфы так быстро не двигаются. Роспись
+# обновляется по кругу — не чаще, чем раз в BETCITY_EXT_REFRESH секунд на
+# событие, и не больше BETCITY_EXT_MAX_REQUESTS запросов за цикл. При
+# дефолтах (180 c, 6 запросов по 100 событий) вся линия (~2900 событий)
+# успевает обновиться за ~5 циклов, трафик — ~8 МБ на цикл.
+BETCITY_EXT_REFRESH = float(os.getenv("BETCITY_EXT_REFRESH", "180"))
+BETCITY_EXT_MAX_REQUESTS = int(os.getenv("BETCITY_EXT_MAX_REQUESTS", "6"))
+# Насколько старую роспись ещё можно показывать. Дольше этого — рынки из
+# росписи выбрасываются (лучше меньше рынков, чем ставка по кэфу, которого
+# уже нет). Основные рынки события при этом остаются свежими: они приходят
+# в общем снимке каждый цикл.
+BETCITY_EXT_MAX_AGE = float(os.getenv("BETCITY_EXT_MAX_AGE", "600"))
 
 # ---- Лайв-режим (матчи в игре) ----
 # Лайв сканируется ОТДЕЛЬНЫМ быстрым циклом: коэффициенты в игре меняются

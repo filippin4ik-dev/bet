@@ -4,6 +4,7 @@
 """
 import time
 
+from app.parsers import betcity as betcity_mod
 from app.parsers.betcity import BetcityParser
 
 NOW = time.time()
@@ -32,10 +33,13 @@ def _event(markets, team1="Спартак", team2="Зенит", date_ev=FUTURE_T
 
 
 def _parse(markets, sport_name="Футбол", league="Премьер-лига",
-          slug="soccer", **event_kwargs):
+          slug="soccer", ext=None, **event_kwargs):
     p = BetcityParser()
-    return p._parse_event(_event(markets, **event_kwargs), sport_name,
-                          league, slug, NOW)
+    ev = _event(markets, **event_kwargs)
+    if ext is not None:
+        # полная роспись (ext=1) живёт в кэше парсера, а не в событии
+        p._ext[ev["id_ev"]] = {str(i): m for i, m in enumerate(ext)}
+    return p._parse_event(ev, sport_name, league, slug, NOW)
 
 
 def _by_key(odds):
@@ -177,9 +181,8 @@ def test_outright_tms_block_ignored():
     assert _parse([m]) == []
 
 
-def test_yes_no_block_ignored():
-    """YNm не привязан однозначно к «Обе забьют» (нет отдельных тегов
-    исходов, как у LeonBet) — Betcity-парсер его не разбирает вовсе."""
+def test_unknown_yes_no_block_ignored():
+    """Блок YNm (не YN) в общем снимке — турнирный проп, не разбираем."""
     m = _market("Победитель", {
         "YNm": {"Y": _kf(1.5), "N": _kf(2.5)},
     })
@@ -235,3 +238,233 @@ def test_event_url_falls_back_without_slug():
     })
     odds = _parse([m], slug=None)
     assert odds[0].url == "https://betcity.ru/ru/line"
+
+
+# ---------- полная роспись рынков (ext=1) ----------
+
+def test_ext_markets_add_full_ladder():
+    """В общем снимке у события лишь ОДНА линия тотала и форы; полная
+    роспись добавляет всю лестницу (блоки называются T/F1 без суффикса)."""
+    main = _market("Тотал", {
+        "T1m": {"Tot": 2.5, "Tb": _kf(1.95), "Tm": _kf(1.86)},
+    })
+    ext = [
+        _market("Тотал", {"T": {"Tot": 3.5, "Tb": _kf(2.9), "Tm": _kf(1.42)}}),
+        _market("Азиатский тотал",
+                {"T": {"Tot": 2.75, "Tb": _kf(2.1), "Tm": _kf(1.75)}}),
+        _market("Фора 1-й тайм",
+                {"F1": {"F1": -0.5, "F2": 0.5, "Kf_F1": _kf(2.2),
+                        "Kf_F2": _kf(1.7)}}),
+    ]
+    odds = _by_key(_parse([main], ext=ext))
+    assert "total:2.5" in odds and "total:3.5" in odds
+    # азиатский тотал — та же линия тотала, дробный шаг: scope не меняется
+    assert "total:2.75" in odds
+    assert "hcap:half1:-0.5" in odds
+
+
+def test_main_market_wins_over_ext_duplicate():
+    """Один и тот же рынок есть и в снимке (свежий каждый цикл), и в
+    росписи (обновляется по кругу) — берём снимок."""
+    main = _market("Тотал", {
+        "T1m": {"Tot": 2.5, "Tb": _kf(1.95), "Tm": _kf(1.86)},
+    })
+    ext = [_market("Тотал", {"T": {"Tot": 2.5, "Tb": _kf(1.5), "Tm": _kf(2.5)}})]
+    odds = _by_key(_parse([main], ext=ext))
+    assert (odds["total:2.5"].k1, odds["total:2.5"].k2) == (1.95, 1.86)
+
+
+def test_individual_totals_both_sides():
+    ext = [
+        _market("Индивидуальный тотал",
+                {"IT_T1": {"Tot": 2.5, "Tb": _kf(1.67), "Tm": _kf(2.16),
+                           "id_bet": 1}}),
+        _market("Индивидуальный тотал",
+                {"IT_T2": {"Tot": 1, "Tb": _kf(1.79), "Tm": _kf(2.0),
+                           "id_bet": 2}}),
+        _market("Инд. тотал 1-й тайм",
+                {"IT_T1": {"Tot": 1, "Tb": _kf(1.63), "Tm": _kf(2.16)}}),
+    ]
+    odds = _by_key(_parse([], ext=ext))
+    o1 = odds["itotal:1::2.5"]
+    assert o1.market == "Тотал 2.5 (Спартак)"      # IT_T1 — хозяева
+    assert (o1.outcome1, o1.outcome2) == ("ИТБ 2.5", "ИТМ 2.5")
+    assert (o1.k1, o1.k2) == (1.67, 2.16)
+    assert odds["itotal:2::1"].market == "Тотал 1 (Зенит)"
+    assert "itotal:1:half1:1" in odds
+
+
+def test_both_score_market():
+    ext = [_market("Обе забьют", {"YN": {"Y": _kf(1.54), "N": _kf(2.4)}})]
+    odds = _by_key(_parse([], ext=ext))
+    o = odds["bothscore"]
+    assert (o.outcome1, o.outcome2) == ("Да", "Нет")
+    assert (o.k1, o.k2) == (1.54, 2.4)
+
+
+def test_both_score_period_scoped():
+    ext = [
+        _market("Обе забьют в первом тайме",
+                {"YN": {"Y": _kf(3.6), "N": _kf(1.26)}}),
+        _market("Обе забьют в 1-м периоде",
+                {"YN": {"Y": _kf(2.8), "N": _kf(1.4)}}),
+    ]
+    odds = _by_key(_parse([], ext=ext))
+    assert "bothscore:half1" in odds
+    assert "bothscore:period1" in odds
+    assert "bothscore" not in odds  # рынок тайма ≠ рынок всего матча
+
+
+def test_combined_markets_with_same_words_rejected():
+    """У Betcity десятки комбинированных Да/Нет-рынков, содержащих слова
+    «обе забьют». Служебные «П1»/«ТМ» в scope не попадают, поэтому без
+    строгой проверки имени они склеились бы с обычным «Обе забьют» другой
+    БК в ложную вилку."""
+    ext = [
+        _market("П1 и обе забьют", {"YN": {"Y": _kf(3.1), "N": _kf(1.32)}}),
+        _market("Обе забьют и не ничья",
+                {"YN": {"Y": _kf(2.4), "N": _kf(1.5)}}),
+        _market("Обе забьют хотя бы в одном тайме",
+                {"YN": {"Y": _kf(1.9), "N": _kf(1.9)}}),
+        _market("Волевая победа", {"YN": {"Y": _kf(4.0), "N": _kf(1.2)}}),
+    ]
+    assert _parse([], ext=ext) == []
+
+
+def test_odd_even_market():
+    """Y=Чет, N=Нечет (по шаблону разметки рынка сайта). Порядок исходов
+    как у остальных парсеров: 1-й исход всегда «Чет»."""
+    ext = [_market("Чет/Нечет тотала",
+                   {"YN": {"Y": _kf(1.9), "N": _kf(1.95)}})]
+    odds = _by_key(_parse([], ext=ext))
+    o = odds["oddeven"]
+    assert (o.outcome1, o.outcome2) == ("Чет", "Нечет")
+    assert (o.k1, o.k2) == (1.9, 1.95)
+
+
+def test_odd_even_with_subject_prefix():
+    ext = [_market("УГЛ. Чет/Нечет тотала",
+                   {"YN": {"Y": _kf(1.85), "N": _kf(1.95)}})]
+    assert "oddeven:corners" in _by_key(_parse([], ext=ext))
+
+
+def test_team_yes_no_blocks_ignored():
+    """Да/Нет КОНКРЕТНОЙ команды (YNT1/YNT2) — рынок другого смысла."""
+    ext = [_market("Голы", {"YNT1": {"Y": _kf(1.5), "N": _kf(2.4),
+                                     "num_team": 1, "id_bet": 7}})]
+    assert _parse([], ext=ext) == []
+
+
+# ---------- зависимые события (статистика отдельным событием) ----------
+
+def test_dependent_event_team_prefix_stripped():
+    """Статистику Betcity дублирует зависимым событием, приписывая предмет
+    к именам ОБЕИХ команд («УГЛ Спартак»). Предмет уже есть в имени рынка,
+    а искажённое имя команды не даёт сшить событие с другими БК."""
+    m = _market("УГЛ. Тотал", {
+        "T1m": {"Tot": 9.5, "Tb": _kf(1.9), "Tm": _kf(1.9)},
+    })
+    odds = _parse([m], team1="УГЛ Спартак", team2="УГЛ Зенит")
+    assert len(odds) == 1
+    assert (odds[0].team1, odds[0].team2) == ("Спартак", "Зенит")
+    assert odds[0].market_key == "total:corners:9.5"
+
+
+def test_real_team_name_prefix_kept():
+    """Убираем префикс ТОЛЬКО когда он у обеих команд: «КС Университатя» —
+    настоящее имя клуба, а не пометка предмета."""
+    m = _market("Тотал", {
+        "T1m": {"Tot": 2.5, "Tb": _kf(1.9), "Tm": _kf(1.9)},
+    })
+    odds = _parse([m], team1="КС Университатя Крайова", team2="Левски София")
+    assert odds[0].team1 == "КС Университатя Крайова"
+
+
+# ---------- обновление росписи по кругу ----------
+
+class _ExtSpy(BetcityParser):
+    """Парсер с подменённой сетью: помнит, какие id запрашивались."""
+
+    def __init__(self, without_ext=()):
+        super().__init__()
+        self.asked = []
+        self._without_ext = set(without_ext)
+
+    def _fetch_ext(self, ids):
+        self.asked.append(list(ids))
+        return {i: {"1": {"name": "Тотал", "data": {}}}
+                for i in ids if i not in self._without_ext}
+
+
+def _events(n, start=1):
+    return [{"id_ev": i, "date_ev": FUTURE_TS + i}
+            for i in range(start, start + n)]
+
+
+def test_ext_refresh_limited_per_cycle(monkeypatch):
+    """За цикл — не больше BETCITY_EXT_MAX_REQUESTS пачек: полная роспись
+    всей линии весит десятки мегабайт, её незачем качать каждый цикл."""
+    monkeypatch.setattr(betcity_mod, "BETCITY_EXT_BATCH", 10)
+    monkeypatch.setattr(betcity_mod, "BETCITY_EXT_MAX_REQUESTS", 2)
+    p = _ExtSpy()
+    events = _events(100)
+    p._refresh_ext(events, deadline=time.monotonic() + 60, now=time.time())
+    assert sum(len(b) for b in p.asked) == 20
+    assert len(p._ext) == 20
+
+
+def test_ext_refresh_round_robin(monkeypatch):
+    """Событие со свежей росписью не перезапрашивается — бюджет цикла
+    уходит на те, у которых росписи ещё нет."""
+    monkeypatch.setattr(betcity_mod, "BETCITY_EXT_BATCH", 10)
+    monkeypatch.setattr(betcity_mod, "BETCITY_EXT_MAX_REQUESTS", 1)
+    monkeypatch.setattr(betcity_mod, "BETCITY_EXT_REFRESH", 180)
+    p = _ExtSpy()
+    events = _events(20)
+    now = time.time()
+    p._refresh_ext(events, deadline=time.monotonic() + 60, now=now)
+    p._refresh_ext(events, deadline=time.monotonic() + 60, now=now + 1)
+    first, second = p.asked
+    assert not set(first) & set(second)
+    assert set(first) | set(second) == {e["id_ev"] for e in events}
+    # пока роспись свежая, запросов нет вовсе
+    p.asked.clear()
+    p._refresh_ext(events, deadline=time.monotonic() + 60, now=now + 2)
+    assert p.asked == []
+    # спустя BETCITY_EXT_REFRESH первой снова обновляется самая старая пачка
+    p._refresh_ext(events, deadline=time.monotonic() + 60, now=now + 200)
+    assert set(p.asked[0]) == set(first)
+
+
+def test_ext_refresh_marks_events_without_extra_markets(monkeypatch):
+    """У части событий доп. рынков нет вовсе — они всё равно помечаются
+    запрошенными, иначе съедали бы бюджет каждый цикл."""
+    monkeypatch.setattr(betcity_mod, "BETCITY_EXT_BATCH", 10)
+    monkeypatch.setattr(betcity_mod, "BETCITY_EXT_MAX_REQUESTS", 1)
+    events = _events(10)
+    p = _ExtSpy(without_ext=[e["id_ev"] for e in events])
+    now = time.time()
+    p._refresh_ext(events, deadline=time.monotonic() + 60, now=now)
+    p.asked.clear()
+    p._refresh_ext(events, deadline=time.monotonic() + 60, now=now + 1)
+    assert p.asked == []
+
+
+def test_ext_dropped_when_stale_or_event_gone(monkeypatch):
+    monkeypatch.setattr(betcity_mod, "BETCITY_EXT_BATCH", 10)
+    monkeypatch.setattr(betcity_mod, "BETCITY_EXT_MAX_REQUESTS", 1)
+    monkeypatch.setattr(betcity_mod, "BETCITY_EXT_MAX_AGE", 600)
+    p = _ExtSpy()
+    events = _events(10)
+    now = time.time()
+    p._refresh_ext(events, deadline=time.monotonic() + 60, now=now)
+    assert len(p._ext) == 10
+    # событие ушло из линии — роспись не должна оставаться в памяти
+    p._refresh_ext(events[:5], deadline=time.monotonic() + 60, now=now + 1)
+    assert set(p._ext) == {e["id_ev"] for e in events[:5]}
+    # роспись старше BETCITY_EXT_MAX_AGE выбрасывается
+    p._refresh_ext(events[:5], deadline=time.monotonic() + 60, now=now + 1000)
+    assert len(p._ext) == 5  # перезапрошена в этом же цикле
+    p._fetch_ext = lambda ids: {}
+    p._refresh_ext(events[:5], deadline=time.monotonic() + 60, now=now + 3000)
+    assert p._ext == {}
