@@ -17,6 +17,9 @@
 
 Лайв-сканер можно включать и выключать НА ХОДУ из админки (флаг
 config.LIVE_ENABLED): выключенный лайв освобождает CPU и сеть прематчу.
+Оттуда же гасится и перезапускается ОТДЕЛЬНАЯ БК (см. bk_control и
+Scanner.request_restart): мешающая БК убирается из вилок, а зависшая
+получает чистую сессию — без перезапуска сервера.
 """
 import asyncio
 import logging
@@ -24,7 +27,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 
-from . import config, db
+from . import bk_control, config, db
 from .arbitrage import (_canon, _market_group, _neg_hcap, _time_clusters,
                         build_name_canon_map, find_arbs, find_arbs_1x2,
                         norm_team)
@@ -55,6 +58,10 @@ class Scanner:
         self.ttl = LIVE_ODDS_TTL if self.live else ODDS_TTL
         # parsers подставляются в тестах; в бою — все включённые БК
         self.parsers = get_parsers() if parsers is None else list(parsers)
+        # откуда взяты парсеры: при перезапуске набор из реестра пересобирается
+        # заново (сессии, cookie, websocket-состояние — с чистого листа),
+        # подставленные в тестах остаются теми же объектами
+        self._parsers_from_registry = parsers is None
         self._lock = threading.Lock()
         self._arbs: list[Arb] = []
         # трёхисходные вилки (рынок «Исход 1X2»: П1/X/П2) — отдельный список,
@@ -68,6 +75,13 @@ class Scanner:
         # какие БК опрашиваются ПРЯМО СЕЙЧАС — чтобы в интерфейсе было
         # видно, что БК не «зависла», а как раз обновляется
         self._busy: set[str] = set()
+        # БК, выключенные в админке: их воркеры простаивают, а котировки
+        # забыты (см. bk_control и _worker)
+        self._disabled: set[str] = set()
+        # запрошенные из админки перезапуски: имена отдельных БК и флаг
+        # «перезапустить весь сканер»
+        self._restart_bks: set[str] = set()
+        self._restart_all = False
         self._events_checked = 0   # уникальных событий сейчас в памяти
         self._quotes_checked = 0   # всего котировок (событие x БК)
         # ключи вилок прошлого цикла — чтобы писать в историю только новые
@@ -114,15 +128,17 @@ class Scanner:
                 "events_checked": self._events_checked,
                 "quotes_checked": self._quotes_checked,
                 # по каждой БК: сколько котировок, сколько секунд назад они
-                # получены и не идёт ли обход прямо сейчас (индикатор
-                # свежести в UI)
+                # получены, не идёт ли обход прямо сейчас (индикатор
+                # свежести в UI) и не выключена ли она в админке
                 "bookmakers": {
                     bk: {"count": len(self._odds_by_bk.get(bk) or ()),
                          "age_sec": round(now - self._fetched_at.get(bk, now)),
-                         "busy": bk in self._busy}
+                         "busy": bk in self._busy,
+                         "off": bk in self._disabled}
                     # БК, которую опрашивают впервые, котировок ещё не
                     # принесла, но показать её уже надо
-                    for bk in sorted(set(self._odds_by_bk) | self._busy)},
+                    for bk in sorted(set(self._odds_by_bk) | self._busy
+                                     | self._disabled)},
                 "arbs": [a.to_dict() for a in self._arbs],
                 "arbs_1x2": [a.to_dict() for a in self._arbs3],
             }
@@ -405,13 +421,45 @@ class Scanner:
         with self._lock:
             return self._running
 
+    def parser_names(self) -> list[str]:
+        """Имена БК этого режима (для админки)."""
+        return [p.name for p in self._worker_parsers()]
+
+    def request_restart(self, bookmaker: str | None = None) -> bool:
+        """Перезапуск из админки: одной БК или всего сканера.
+
+        Перезапуск — это не «пнуть посильнее», а начать с чистого листа:
+        парсер создаётся заново (новая сессия requests, новые cookie и
+        websocket-состояние), его котировки забываются. Нужен, когда БК
+        отвечает, но линию отдаёт мусорную или перестала обновляться —
+        раньше это лечилось только перезапуском всего сервера.
+
+        Возвращает False, если такой БК в этом режиме нет."""
+        if bookmaker is None:
+            with self._lock:
+                self._restart_all = True
+            return True
+        if bookmaker not in self.parser_names():
+            return False
+        with self._lock:
+            self._restart_bks.add(bookmaker)
+        log.info("[%s] запрошен перезапуск БК %s", self.mode, bookmaker)
+        return True
+
+    def _take_restart(self, bookmaker: str) -> bool:
+        """Забирает запрос на перезапуск этой БК (и снимает его)."""
+        with self._lock:
+            if bookmaker not in self._restart_bks:
+                return False
+            self._restart_bks.discard(bookmaker)
+            return True
+
     async def run(self) -> None:
         """Держит по одному воркеру на каждую БК, пока режим включён.
 
         Медленная БК не тормозит быструю: каждая обновляется в своём темпе,
         а вилки пересчитывает отдельный воркер по свежим данным всех БК."""
-        parsers = self._worker_parsers()
-        if not parsers:
+        if not self._worker_parsers():
             log.info("[%s] ни одна БК не поддерживает этот режим — простой",
                      self.mode)
             await self._stop.wait()
@@ -420,9 +468,11 @@ class Scanner:
         workers: list = []
         while not self._stop.is_set():
             if self.enabled() and not workers:
+                parsers = self._worker_parsers()
                 self._workers_on.set()
                 with self._lock:
                     self._running = True
+                    self._restart_all = False
                 workers = [loop.run_in_executor(self._executor, self._worker, p)
                            for p in parsers]
                 workers.append(loop.run_in_executor(self._executor,
@@ -431,8 +481,14 @@ class Scanner:
                          ", ".join(f"{p.name} — {self._period(p):.0f} c"
                                    for p in parsers))
             elif not self.enabled() and workers:
-                await self._stop_workers(workers)
+                await self._stop_workers(workers, "выключен — ресурсы "
+                                                  "отданы прематчу")
                 workers = []
+            elif workers and self._restart_requested():
+                await self._stop_workers(workers, "перезапуск из админки")
+                self._recreate_parsers()
+                workers = []
+                continue     # поднять воркеры заново, не ожидая секунду
             try:
                 await asyncio.wait_for(self._stop.wait(), timeout=1.0)
             except asyncio.TimeoutError:
@@ -441,11 +497,44 @@ class Scanner:
         with self._lock:
             self._running = False
 
-    async def _stop_workers(self, workers: list) -> None:
-        """Гасит воркеры (лайв выключили из админки) и забывает котировки:
-        показывать кэфы режима, который больше не обновляется, нельзя."""
-        log.info("[%s] сканер выключен — ресурсы отданы прематчу "
-                 "(ждём завершения текущих обходов)", self.mode)
+    def _restart_requested(self) -> bool:
+        with self._lock:
+            return self._restart_all
+
+    def _recreate_parsers(self) -> None:
+        """Пересобирает набор парсеров (перезапуск сканера).
+
+        Набор из реестра берётся заново — это и подхватывает изменения
+        окружения, и даёт БК чистые сессии. Подставленные в тестах парсеры
+        пересоздаются по классу, а если у него другой конструктор —
+        остаются как есть (терять их состояние тесту незачем)."""
+        if self._parsers_from_registry:
+            self.parsers = get_parsers()
+        else:
+            self.parsers = [self._recreate(p) for p in self.parsers]
+        self._ensure_executor()
+
+    @staticmethod
+    def _recreate(parser: BaseParser) -> BaseParser:
+        try:
+            return type(parser)()
+        except Exception:  # noqa: BLE001 — конструктор с аргументами (тесты)
+            return parser
+
+    def _ensure_executor(self) -> None:
+        """Держит в пуле поток на каждую БК + поток пересчёта."""
+        need = len(self.parsers) + 1
+        if self._executor._max_workers >= need:  # noqa: SLF001
+            return
+        old, self._executor = self._executor, ThreadPoolExecutor(
+            max_workers=need, thread_name_prefix=f"scan-{self.mode}")
+        old.shutdown(wait=False)
+
+    async def _stop_workers(self, workers: list, reason: str) -> None:
+        """Гасит воркеры и забывает котировки: показывать кэфы режима,
+        который больше не обновляется, нельзя."""
+        log.info("[%s] сканер %s (ждём завершения текущих обходов)",
+                 self.mode, reason)
         self._workers_on.clear()
         for w in workers:
             try:
@@ -456,12 +545,49 @@ class Scanner:
             self._odds_by_bk.clear()
             self._fetched_at.clear()
             self._busy.clear()
+            self._disabled.clear()
+            self._restart_bks.clear()
             self._arbs = []
             self._arbs3 = []
             self._events_checked = 0
             self._quotes_checked = 0
             self._running = False
         log.info("[%s] сканер остановлен", self.mode)
+
+    def _replace_parser(self, parser: BaseParser) -> BaseParser:
+        """Меняет парсер БК на свежий экземпляр (перезапуск одной БК)."""
+        fresh = self._recreate(parser)
+        if fresh is not parser:
+            self.parsers = [fresh if p is parser else p for p in self.parsers]
+        return fresh
+
+    def _forget_bk(self, bk: str) -> None:
+        """Убирает котировки одной БК (выключили или перезапустили).
+
+        Держать в вилках кэфы БК, которая больше не обновляется, нельзя:
+        по ним нельзя ставить, а в интерфейсе они выглядят как живые."""
+        with self._lock:
+            had = self._odds_by_bk.pop(bk, None)
+            self._fetched_at.pop(bk, None)
+            if had:
+                self._dirty = True
+
+    def _mark_disabled(self, bk: str) -> None:
+        with self._lock:
+            first = bk not in self._disabled
+            self._disabled.add(bk)
+        if first:
+            log.info("[%s] %s: выключена в админке — обходы остановлены",
+                     self.mode, bk)
+            self._forget_bk(bk)
+
+    def _mark_enabled(self, bk: str) -> None:
+        with self._lock:
+            was_off = bk in self._disabled
+            self._disabled.discard(bk)
+        if was_off:
+            log.info("[%s] %s: включена в админке — обходы возобновлены",
+                     self.mode, bk)
 
     def _period(self, parser: BaseParser) -> float:
         """Минимальный период между обходами ОДНОЙ БК.
@@ -474,9 +600,25 @@ class Scanner:
         return max(self.interval, parser.min_refresh or 0)
 
     def _worker(self, parser: BaseParser) -> None:
-        """Цикл обновления одной БК (в отдельном потоке)."""
+        """Цикл обновления одной БК (в отдельном потоке).
+
+        Здесь же применяются решения оператора из админки: выключенная БК
+        только простаивает (и её котировки забыты), а запрошенный перезапуск
+        пересоздаёт парсер — с чистой сессией и без прежних котировок."""
         failures = 0
         while self._workers_on.is_set() and not self._stop.is_set():
+            if self._take_restart(parser.name):
+                log.info("[%s] %s: перезапуск — новая сессия, котировки "
+                         "сброшены", self.mode, parser.name)
+                parser = self._replace_parser(parser)
+                self._forget_bk(parser.name)
+                failures = 0
+            if not bk_control.is_enabled(parser.name):
+                self._mark_disabled(parser.name)
+                failures = 0
+                self._sleep_while_running(1.0)
+                continue
+            self._mark_enabled(parser.name)
             started = time.monotonic()
             try:
                 with self._lock:
@@ -550,16 +692,35 @@ class Scanner:
         if failures:
             period = min(period * 2 ** min(failures, 6), cap)
         deadline = max(started + period, time.monotonic() + 0.5)
-        self._sleep_while_running(deadline - time.monotonic())
+        # Пауза между обходами прематча — минуты, и досыпать её, когда БК
+        # уже выключили из админки, значит «применить» через полчаса.
+        self._sleep_while_running(deadline - time.monotonic(),
+                                  wake=lambda: self._interrupted(parser.name))
 
-    def _sleep_while_running(self, seconds: float) -> None:
-        """Пауза, которая прерывается остановкой сканера."""
+    def _interrupted(self, bk: str) -> bool:
+        """Ждать дальше незачем: БК выключили или попросили перезапустить."""
+        with self._lock:
+            if bk in self._restart_bks:
+                return True
+        return not bk_control.is_enabled(bk)
+
+    def _sleep_while_running(self, seconds: float, wake=None) -> None:
+        """Пауза, которая прерывается остановкой сканера.
+
+        wake — необязательная проверка «просыпаться прямо сейчас»; её
+        спрашивают не чаще раза в секунду, чтобы длинная пауза не
+        превратилась в опрос базы по кругу."""
         deadline = time.monotonic() + seconds
+        next_check = 0.0
         while self._workers_on.is_set() and not self._stop.is_set():
-            left = deadline - time.monotonic()
-            if left <= 0:
+            now = time.monotonic()
+            if now >= deadline:
                 return
-            time.sleep(min(0.3, left))
+            if wake is not None and now >= next_check:
+                if wake():
+                    return
+                next_check = now + 1.0
+            time.sleep(min(0.3, deadline - now))
 
     def stop(self) -> None:
         self._stop.set()

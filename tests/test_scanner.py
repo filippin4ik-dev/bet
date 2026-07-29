@@ -17,7 +17,7 @@ _tmpdir = tempfile.mkdtemp()
 os.environ["DB_PATH"] = str(Path(_tmpdir) / "scanner-test.sqlite3")
 os.environ["SECRET_KEY"] = "test-secret-key-not-for-prod"
 
-from app import config, db  # noqa: E402
+from app import bk_control, config, db  # noqa: E402
 from app.models import KIND_LIVE, KIND_PREMATCH, MarketOdds  # noqa: E402
 from app.parsers.base import BaseParser  # noqa: E402
 from app.scanner import Scanner  # noqa: E402
@@ -223,8 +223,10 @@ def test_live_scanner_starts_and_stops_at_runtime():
 
     async def scenario():
         config.LIVE_ENABLED = True
+        # ждём не только обхода БК, но и пересчёта вилок: считает его
+        # отдельный поток, и котировки попадают в снимок чуть позже обхода
         for _ in range(40):
-            if p.calls and sc.is_running():
+            if sc.is_running() and sc.snapshot()["quotes_checked"]:
                 break
             await asyncio.sleep(0.1)
         assert p.calls >= 1, "включённый лайв должен опрашивать БК"
@@ -267,6 +269,122 @@ def test_live_switch_persisted_in_db():
     assert db.get_bool_setting(key, True) is False
     db.set_bool_setting(key, True)
     assert db.get_bool_setting(key, False) is True
+
+
+def test_disabled_bookmaker_stops_and_forgets_odds():
+    """Выключенная в админке БК перестаёт опрашиваться и убирает свои
+    котировки: держать в вилках кэфы, которые никто не обновляет, нельзя.
+    Выключение должно применяться СРАЗУ, а не после паузы до следующего
+    обхода (в прематче это полчаса)."""
+    keep = _Fake("Останется")
+    drop = _Fake("Выключим")
+    sc = Scanner(mode=KIND_PREMATCH, parsers=[keep, drop])
+    sc.interval = 60  # длинная пауза: проверяем, что её прерывают
+
+    async def scenario():
+        for _ in range(50):
+            snap = sc.snapshot()["bookmakers"]
+            if snap.get("Выключим", {}).get("count"):
+                break
+            await asyncio.sleep(0.1)
+        assert drop.calls >= 1
+        calls_before = drop.calls
+
+        bk_control.set_enabled("Выключим", False)
+        for _ in range(40):
+            snap = sc.snapshot()["bookmakers"]
+            if snap.get("Выключим", {}).get("off"):
+                break
+            await asyncio.sleep(0.1)
+        snap = sc.snapshot()["bookmakers"]
+        assert snap["Выключим"]["off"] is True
+        assert snap["Выключим"]["count"] == 0, "котировки выключенной БК — забыть"
+        assert snap["Останется"]["count"] == 1, "соседнюю БК это не трогает"
+
+        await asyncio.sleep(0.6)
+        assert drop.calls == calls_before, "выключенную БК больше не опрашиваем"
+
+        bk_control.set_enabled("Выключим", True)
+        for _ in range(40):
+            if drop.calls > calls_before:
+                break
+            await asyncio.sleep(0.1)
+        assert drop.calls > calls_before, "включённая обратно БК снова обходится"
+
+    try:
+        asyncio.run(_run_for(sc, 0, on_tick=scenario))
+    finally:
+        bk_control.set_enabled("Выключим", True)
+
+
+def test_restart_of_one_bookmaker_refetches_it():
+    """Перезапуск одной БК из админки: её котировки сбрасываются, и обход
+    начинается заново, не дожидаясь конца долгой паузы."""
+    p = _Fake("Зависла")
+    sc = Scanner(mode=KIND_PREMATCH, parsers=[p])
+    sc.interval = 60
+
+    async def scenario():
+        for _ in range(50):
+            if p.calls:
+                break
+            await asyncio.sleep(0.1)
+        calls_before = p.calls
+        assert sc.request_restart("Зависла") is True
+        for _ in range(40):
+            if p.calls > calls_before:
+                break
+            await asyncio.sleep(0.1)
+        assert p.calls > calls_before, "перезапуск должен вызвать новый обход"
+
+    asyncio.run(_run_for(sc, 0, on_tick=scenario))
+
+
+def test_restart_of_unknown_bookmaker_is_reported():
+    sc = Scanner(mode=KIND_PREMATCH, parsers=[_Fake("БК")])
+    assert sc.request_restart("НетТакой") is False
+    assert sc.parser_names() == ["БК"]
+
+
+def test_scanner_restart_recreates_workers():
+    """Перезапуск всего сканера: воркеры гасятся и поднимаются заново, а
+    обходы продолжаются (это замена перезапуска сервера)."""
+    p = _Fake("БК")
+    sc = Scanner(mode=KIND_PREMATCH, parsers=[p])
+    sc.interval = 0.2
+
+    async def scenario():
+        for _ in range(40):
+            if p.calls:
+                break
+            await asyncio.sleep(0.1)
+        sc.request_restart()
+        for _ in range(40):
+            if not sc.is_running():
+                break
+            await asyncio.sleep(0.1)
+        calls_at_stop = p.calls
+        for _ in range(40):
+            if sc.is_running() and p.calls > calls_at_stop:
+                break
+            await asyncio.sleep(0.1)
+        assert sc.is_running() is True, "после перезапуска сканер снова работает"
+        assert p.calls > calls_at_stop, "обходы продолжаются"
+
+    asyncio.run(_run_for(sc, 0, on_tick=scenario))
+
+
+def test_bk_toggle_persisted_in_db():
+    """Выключенная БК остаётся выключенной после перезапуска сервера."""
+    name = "ТестоваяБК"
+    assert bk_control.is_enabled(name) is True   # по умолчанию все включены
+    bk_control.set_enabled(name, False)
+    assert bk_control.is_enabled(name) is False
+    assert db.get_bool_setting(f"bk_enabled:{name}", True) is False
+    assert name in bk_control.disabled_names()
+    bk_control.set_enabled(name, True)
+    assert bk_control.is_enabled(name) is True
+    assert name not in bk_control.disabled_names()
 
 
 def test_new_arbs_saved_to_history_once():

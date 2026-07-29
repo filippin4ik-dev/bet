@@ -147,6 +147,15 @@ def set_setting(key: str, value: str) -> None:
             (key, value))
 
 
+def get_settings_prefix(prefix: str) -> dict[str, str]:
+    """Все настройки, ключ которых начинается с prefix (напр. флаги БК)."""
+    with _lock, _connect() as conn:
+        rows = conn.execute(
+            "SELECT key, value FROM settings WHERE key LIKE ?",
+            (prefix.replace("%", r"\%") + "%",)).fetchall()
+    return {r["key"][len(prefix):]: r["value"] for r in rows}
+
+
 def get_bool_setting(key: str, default: bool) -> bool:
     """Сохранённый флаг; нет записи — значение по умолчанию (из окружения)."""
     value = get_setting(key)
