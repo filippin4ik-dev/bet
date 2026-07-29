@@ -28,6 +28,7 @@ const els = {
   sportFilter: document.getElementById("sport-filter"),
   bkFilter: document.getElementById("bk-filter"),
   resetFilters: document.getElementById("reset-filters"),
+  filters: document.querySelector(".filters"),
   toastHost: document.getElementById("toast-host"),
   minProfit: document.getElementById("min-profit"),
   minProfitLabel: document.getElementById("min-profit-label"),
@@ -380,7 +381,9 @@ function renderDetail() {
   els.detailMeta.innerHTML =
     `${escapeHtml(d.sport)} · ${escapeHtml(when)} · ` +
     (d.bookmakers || []).map(bkChip).join(" ");
-  renderMeta(d.markets.length, d.markets.length);
+  // «Показано: N из M» тут не к месту: фильтры к росписи одного матча не
+  // применяются (и сама панель фильтров на это время спрятана)
+  els.tableMeta.textContent = `Рынков: ${d.markets.length}`;
 
   if (!d.markets.length) {
     els.detailBody.innerHTML = '<tr><td colspan="4" class="empty">Котировок нет</td></tr>';
@@ -491,7 +494,7 @@ function renderArbs() {
         title="${pinned ? "Клик — открепить" : "Клик — закрепить вилку сверху"}">
       <td data-label="Начало">${pinned ? "📌 " : ""}${startCell(a)}</td>
       <td data-label="Спорт" class="sport">${sportCell(a.sport)}</td>
-      <td data-label="Матч">${escapeHtml(a.match)}</td>
+      <td data-label="Матч" class="match-name">${escapeHtml(a.match)}</td>
       <td data-label="Рынок">${escapeHtml(a.market)}</td>
       <td data-label="Исход 1"><span class="out">${escapeHtml(a.outcome1)}</span> <span class="coef">${a.k1_max.toFixed(2)}</span> ${bkChip(a.k1_bookmaker)}</td>
       <td data-label="Исход 2"><span class="out">${escapeHtml(a.outcome2)}</span> <span class="coef">${a.k2_max.toFixed(2)}</span> ${bkChip(a.k2_bookmaker)}</td>
@@ -544,7 +547,7 @@ function renderArbs1x2() {
         title="${pinned ? "Клик — открепить" : "Клик — закрепить вилку сверху"}">
       <td data-label="Начало">${pinned ? "📌 " : ""}${startCell(a)}</td>
       <td data-label="Спорт" class="sport">${sportCell(a.sport)}</td>
-      <td data-label="Матч">${escapeHtml(a.match)}</td>
+      <td data-label="Матч" class="match-name">${escapeHtml(a.match)}</td>
       <td data-label="П1"><span class="out">П1</span> <span class="coef">${a.k1_max.toFixed(2)}</span> ${bkChip(a.k1_bookmaker)}</td>
       <td data-label="X"><span class="out">X</span> <span class="coef">${a.kx_max.toFixed(2)}</span> ${bkChip(a.kx_bookmaker)}</td>
       <td data-label="П2"><span class="out">П2</span> <span class="coef">${a.k2_max.toFixed(2)}</span> ${bkChip(a.k2_bookmaker)}</td>
@@ -894,6 +897,9 @@ document.querySelectorAll(".copy-btn3").forEach((btn) => {
 
 function updateVisibility() {
   const detailOpen = isMatchesView(state.view) && state.openMatch !== null;
+  // В росписи одного матча фильтры и банк ни на что не влияют — панель
+  // только сбивала бы с толку («Показано: 7454» над таблицей одного матча)
+  els.filters.hidden = detailOpen;
   els.arbsCard.hidden = !isArbView(state.view);
   els.arbs1x2Card.hidden = !isArb1x2View(state.view);
   els.matchesCard.hidden = !isMatchesView(state.view) || detailOpen;
@@ -1003,6 +1009,7 @@ function openMatch(id) {
   updateVisibility();
   els.detailTitle.textContent = "Загрузка…";
   els.detailMeta.textContent = "";
+  els.tableMeta.textContent = "";
   els.detailBody.innerHTML = '<tr><td colspan="4" class="empty">Загрузка котировок…</td></tr>';
   pollDetail().then(rerender);
 }

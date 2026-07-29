@@ -74,7 +74,10 @@ main#admin-view { max-width: 1080px; margin: 0 auto; }
   font-size: 0.83rem;
   color: var(--muted);
 }
-.admin-form input, .admin-form select, .admin-form textarea { width: 100%; }
+/* Галку из ширины на всю строку исключаем: растянутый чекбокс уезжал в
+   середину поля, а подпись рядом с ним ломалась на два слова в строку. */
+.admin-form input:not([type="checkbox"]),
+.admin-form select, .admin-form textarea { width: 100%; }
 .admin-form textarea { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 
 .admin-form-row {
