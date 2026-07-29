@@ -232,6 +232,10 @@ def update_parser(name: str, body: ParserBody,
     иначе они висели бы в вилках как живые до истечения ODDS_TTL."""
     _known_bookmaker(name)
     bk_control.set_enabled(name, body.enabled)
+    # не дожидаясь, пока воркер БК закончит начатый обход: иначе кэфы
+    # выключенной БК ещё минуту висят на сайте как живые
+    scanner.apply_bk_state(name, body.enabled)
+    live_scanner.apply_bk_state(name, body.enabled)
     log.info("БК %s %s из админки (%s)", name,
              "включена" if body.enabled else "выключена", username)
     return {"ok": True, "name": name, "enabled": body.enabled}

@@ -317,6 +317,33 @@ def test_disabled_bookmaker_stops_and_forgets_odds():
         bk_control.set_enabled("Выключим", True)
 
 
+def test_disabling_bk_applies_without_waiting_for_current_fetch():
+    """Кнопка в админке действует сразу, даже посреди обхода БК.
+
+    Обход длится десятки секунд (у Betcity под минуту), и если ждать, пока
+    воркер сам заметит выключение, кэфы выключенной БК всё это время висят
+    в вилках и в шапке как живые — оператор не понимает, сработала кнопка
+    или нет."""
+    sc = Scanner(mode=KIND_PREMATCH, parsers=[_Fake("БК")])
+    sc._store_odds("БК", _odds("БК"))
+    assert sc.snapshot()["bookmakers"]["БК"]["count"] == 1
+
+    sc.apply_bk_state("БК", False)
+    snap = sc.snapshot()["bookmakers"]["БК"]
+    assert snap["off"] is True and snap["count"] == 0
+    # обход, начатый до выключения, не возвращает котировки на круг обратно
+    sc._store_odds("БК", _odds("БК"))
+    assert sc.snapshot()["bookmakers"]["БК"]["count"] == 0
+
+    sc.apply_bk_state("БК", True)
+    sc._store_odds("БК", _odds("БК"))
+    snap = sc.snapshot()["bookmakers"]["БК"]
+    assert snap["off"] is False and snap["count"] == 1
+    # чужую БК не выключаем: в этом режиме её нет
+    sc.apply_bk_state("Другая", False)
+    assert "Другая" not in sc.snapshot()["bookmakers"]
+
+
 def test_restart_of_one_bookmaker_refetches_it():
     """Перезапуск одной БК из админки: её котировки сбрасываются, и обход
     начинается заново, не дожидаясь конца долгой паузы."""

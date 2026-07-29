@@ -444,6 +444,10 @@ class Scanner:
         """
         now = time.time()
         with self._lock:
+            # БК выключили, пока шёл этот обход — его результат уже не нужен:
+            # иначе забытые котировки тут же вернулись бы в вилки на один круг
+            if bk in self._disabled:
+                return
             if odds:
                 self._odds_by_bk[bk] = odds
                 self._fetched_at[bk] = now
@@ -543,6 +547,20 @@ class Scanner:
     def parser_names(self) -> list[str]:
         """Имена БК этого режима (для админки)."""
         return [p.name for p in self._worker_parsers()]
+
+    def apply_bk_state(self, bk: str, enabled: bool) -> None:
+        """Применяет включение/выключение БК немедленно.
+
+        Воркер БК заметит решение админки и сам, но только когда закончит
+        начатый обход, — а он длится десятки секунд (у Betcity под минуту).
+        Всё это время котировки выключенной БК висели бы в вилках и в шапке
+        как живые, и оператор не понимал бы, сработала кнопка или нет."""
+        if bk not in self.parser_names():
+            return
+        if enabled:
+            self._mark_enabled(bk)
+        else:
+            self._mark_disabled(bk)
 
     def request_restart(self, bookmaker: str | None = None) -> bool:
         """Перезапуск из админки: одной БК или всего сканера.
