@@ -388,6 +388,81 @@ def test_bk_toggle_persisted_in_db():
     assert bk_control.is_enabled(name) is True
 
 
+def test_matches_snapshot_reuses_grouping_until_odds_change():
+    """Список матчей не пересобирается на каждый запрос.
+
+    Разбор линии по событиям стоит секунды на живой линии (сотни тысяч
+    котировок, фаззи-слияние имён), а интерфейс дёргает /api/matches раз в
+    несколько секунд: раньше каждый опрос считал всё заново и отбирал
+    процессор у самих обходов БК."""
+    sc = Scanner(mode=KIND_PREMATCH, parsers=[_Fake("БК1")])
+    calls = []
+    orig = Scanner._event_groups
+
+    def counted(all_odds, name_map=None):
+        calls.append(len(all_odds))
+        return orig(all_odds, name_map)
+
+    sc._event_groups = counted
+    sc._store_odds("БК1", _odds("БК1"))
+    assert len(sc.matches_snapshot()) == 1
+    assert len(calls) == 1
+    # тот же запрос ещё дважды — разбор берётся из кэша
+    sc.matches_snapshot()
+    sc.match_detail("нет такого события")
+    assert len(calls) == 1, calls
+    # свежие котировки обесценивают кэш
+    sc._store_odds("БК2", _odds("БК2"))
+    m = sc.matches_snapshot()
+    assert len(calls) == 2, calls
+    assert len(m) == 1 and m[0]["bookmakers"] == ["БК1", "БК2"]
+    # список отдаётся копией: сортировка вызывающего не портит кэш
+    m.reverse()
+    assert sc.matches_snapshot()[0]["bookmakers"] == ["БК1", "БК2"]
+
+
+def test_matches_snapshot_sorted_by_start_time():
+    """Матчи приходят в порядке начала — как их показывает интерфейс."""
+    sc = Scanner(mode=KIND_PREMATCH, parsers=[_Fake("БК")])
+    now = time.time()
+    late = MarketOdds(bookmaker="БК", sport="Футбол", team1="Динамо",
+                      team2="Локомотив", market="Победитель",
+                      market_key="winner", outcome1="П1", outcome2="П2",
+                      k1=2.0, k2=2.0, start_ts=now + 7200,
+                      start_time="01.01 22:00")
+    early = MarketOdds(bookmaker="БК", sport="Футбол", team1="Спартак",
+                       team2="Зенит", market="Победитель",
+                       market_key="winner", outcome1="П1", outcome2="П2",
+                       k1=2.0, k2=2.0, start_ts=now + 600,
+                       start_time="01.01 20:00")
+    sc._store_odds("БК", [late, early])
+    assert [m["match"] for m in sc.matches_snapshot()] == [
+        "Спартак — Зенит", "Динамо — Локомотив"]
+
+
+def test_name_canon_map_shared_between_arbs_and_matches():
+    """Карту имён считаем один раз на всех, а не в каждом запросе."""
+    sc = Scanner(mode=KIND_PREMATCH, parsers=[_Fake("БК")])
+    built = []
+    import app.scanner as scanner_mod
+    orig = scanner_mod.build_name_canon_map
+
+    def counted(odds):
+        built.append(len(odds))
+        return orig(odds)
+
+    scanner_mod.build_name_canon_map = counted
+    try:
+        sc._store_odds("БК1", _odds("БК1"))
+        sc._recalc()                 # пересчёт вилок построил карту
+        assert len(built) == 1, built
+        sc.matches_snapshot()        # матчи берут ту же карту
+        sc.match_detail("нет")
+        assert len(built) == 1, built
+    finally:
+        scanner_mod.build_name_canon_map = orig
+
+
 def test_new_arbs_saved_to_history_once():
     """Вилка пишется в историю один раз, пока живёт между обходами."""
     p = _Fake("БК")

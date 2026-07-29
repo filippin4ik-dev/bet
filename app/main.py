@@ -164,14 +164,12 @@ def get_odds():
 
 def _matches_payload(sc: Scanner) -> dict:
     snap = sc.snapshot()
-    matches = sc.matches_snapshot()
-    matches.sort(key=lambda m: (m["start_ts"] or float("inf"),
-                                m["sport"], m["match"]))
     return {
         "scanning": snap["scanning"],
         "last_scan": snap["last_scan"],
         "bookmakers": snap["bookmakers"],
-        "matches": matches,
+        # уже по времени начала — сканер отдаёт список отсортированным
+        "matches": sc.matches_snapshot(),
     }
 
 

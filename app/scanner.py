@@ -93,9 +93,24 @@ class Scanner:
         self._first_seen3: dict[str, float] = {}
         # кэш фаззи-слияния имён команд (build_name_canon_map) — дорогая
         # операция, пересчитываем не чаще FUZZY_NAME_MAP_REFRESH (см.
-        # _recalc), а не при каждом пересчёте вилок.
+        # _name_map) и переиспользуем на вилки, матчи и роспись.
         self._name_map_cache: dict[str, str] = {}
         self._name_map_at: float = 0.0
+        self._name_map_lock = threading.Lock()
+        # Разбор котировок по событиям (список матчей и роспись одного
+        # матча) стоит секунды на сотни тысяч котировок, а интерфейс тянет
+        # его каждые несколько секунд. Держим готовый разбор до прихода
+        # свежих котировок — тогда он же и обнуляется (_store_odds), чтобы
+        # кэш не держал в памяти прошлое поколение линии.
+        self._odds_rev = 0          # растёт при каждом изменении котировок
+        self._groups: dict[str, list[MarketOdds]] = {}
+        self._groups_name_map: dict[str, str] = {}
+        self._groups_rev = -1
+        self._matches: list[dict] = []
+        self._matches_rev = -1
+        # Пока один запрос считает разбор, второй ждёт его результат, а не
+        # считает то же самое второй раз (полсотни секунд CPU на двоих).
+        self._groups_lock = threading.Lock()
         # пришли новые котировки — вилки надо пересчитать (флаг снимает
         # поток пересчёта, см. _recalc_worker)
         self._dirty = False
@@ -156,15 +171,35 @@ class Scanner:
         with self._lock:
             return [o for odds in self._odds_by_bk.values() for o in odds]
 
+    def _name_map(self, all_odds: list[MarketOdds]) -> dict[str, str]:
+        """Каноничные имена команд — один кэш на весь сканер.
+
+        build_name_canon_map (фаззи-слияние разных написаний одного имени по
+        всей линии) — самая дорогая операция сканера: секунды на сотни тысяч
+        котировок. Её результат нужен и пересчёту вилок, и группировке
+        матчей, поэтому считаем не чаще FUZZY_NAME_MAP_REFRESH и делим на
+        всех: раньше карту строил КАЖДЫЙ запрос списка матчей, и вкладка
+        «Матчи» отвечала двадцать секунд, отбирая процессор у обходов БК."""
+        now = time.time()
+        with self._name_map_lock:
+            if now - self._name_map_at <= FUZZY_NAME_MAP_REFRESH:
+                return self._name_map_cache
+            self._name_map_cache = build_name_canon_map(all_odds)
+            self._name_map_at = now
+            return self._name_map_cache
+
     @staticmethod
-    def _event_groups(all_odds: list[MarketOdds]) -> dict[str, list[MarketOdds]]:
+    def _event_groups(all_odds: list[MarketOdds],
+                      name_map: dict[str, str] | None = None
+                      ) -> dict[str, list[MarketOdds]]:
         """Группирует котировки всех БК по событию (матч + время старта).
 
         Ключ события устойчив между опросами: kind | отсортированная пара
         нормализованных (и фаззи-каноничных — см. build_name_canon_map)
         команд | номер кластера времени старта (разные матчи одной пары
         команд не сливаются)."""
-        name_map = build_name_canon_map(all_odds)
+        if name_map is None:
+            name_map = build_name_canon_map(all_odds)
         clusters = _time_clusters(all_odds, name_map)
         groups: dict[str, list[MarketOdds]] = {}
         for o in all_odds:
@@ -180,16 +215,51 @@ class Scanner:
             groups.setdefault(key, []).append(o)
         return groups
 
+    def _grouped(self) -> tuple[int, dict[str, list[MarketOdds]],
+                                dict[str, str]]:
+        """Разбор котировок по событиям — готовый или посчитанный сейчас.
+
+        Вместе с разбором отдаёт номер поколения котировок, по которому он
+        сделан: по нему видно, не устарел ли он уже."""
+        with self._lock:
+            if self._groups_rev == self._odds_rev:
+                return self._groups_rev, self._groups, self._groups_name_map
+        with self._groups_lock:
+            with self._lock:
+                # пока ждали очереди, разбор мог посчитать сосед
+                if self._groups_rev == self._odds_rev:
+                    return (self._groups_rev, self._groups,
+                            self._groups_name_map)
+                rev = self._odds_rev
+                all_odds = [o for odds in self._odds_by_bk.values()
+                            for o in odds]
+            name_map = self._name_map(all_odds)
+            groups = self._event_groups(all_odds, name_map)
+            with self._lock:
+                # за время разбора пришли новые котировки — этот разбор уже
+                # не соответствует памяти сканера, в кэш его не кладём
+                if rev == self._odds_rev:
+                    self._groups = groups
+                    self._groups_name_map = name_map
+                    self._groups_rev = rev
+            return rev, groups, name_map
+
     def matches_snapshot(self) -> list[dict]:
-        """Список всех найденных матчей (сгруппированных по событию)."""
-        groups = self._event_groups(self._all_odds())
+        """Список всех найденных матчей, сгруппированных по событию.
+
+        Уже отсортирован по времени начала — в этом порядке его и показывает
+        интерфейс, а готовый список кэшируется до свежих котировок."""
+        rev, groups, name_map = self._grouped()
+        with self._lock:
+            if self._matches_rev == rev:
+                # копия: вызывающий может отсортировать список по-своему
+                return list(self._matches)
         out = []
         for event_id, odds in groups.items():
             # образец с временем старта и самыми длинными именами команд
             sample = max(odds, key=lambda o: (o.start_ts is not None,
                                               len(o.team1) + len(o.team2)))
             books = sorted({o.bookmaker for o in odds})
-            name_map = build_name_canon_map(odds)
             markets = {_market_group(o, name_map) for o in odds}
             start_ts = min((o.start_ts for o in odds if o.start_ts),
                            default=None)
@@ -205,17 +275,22 @@ class Scanner:
                 "bookmakers": books,
                 "markets_count": len(markets),
             })
-        return out
+        out.sort(key=lambda m: (m["start_ts"] or float("inf"),
+                                m["sport"], m["match"]))
+        with self._lock:
+            if rev == self._odds_rev:
+                self._matches = out
+                self._matches_rev = rev
+        return list(out)
 
     def match_detail(self, event_id: str) -> dict | None:
         """Полная роспись одного события: все рынки всех БК бок о бок."""
-        groups = self._event_groups(self._all_odds())
+        _, groups, name_map = self._grouped()
         odds = groups.get(event_id)
         if not odds:
             return None
         sample = max(odds, key=lambda o: (o.start_ts is not None,
                                           len(o.team1) + len(o.team2)))
-        name_map = build_name_canon_map(odds)
         base_t1 = _canon(name_map, norm_team(sample.team1))
 
         markets: dict[str, dict] = {}
@@ -340,7 +415,20 @@ class Scanner:
                 self._odds_by_bk[bk] = odds
                 self._fetched_at[bk] = now
             self._prune_locked(now)
-            self._dirty = True
+            self._mark_changed_locked()
+
+    def _mark_changed_locked(self) -> None:
+        """Котировки изменились: вилки к пересчёту, разбор по событиям — в
+        утиль. Кэш разбора чистим сразу, а не по требованию: он держит ссылки
+        на прежние котировки, и в памяти лежало бы два поколения линии
+        (сотни мегабайт на слабом VPS). Вызывать под self._lock."""
+        self._dirty = True
+        self._odds_rev += 1
+        self._groups = {}
+        self._groups_name_map = {}
+        self._groups_rev = -1
+        self._matches = []
+        self._matches_rev = -1
 
     def _recalc(self) -> tuple[list[Arb], list[Arb3]]:
         """Пересчитывает вилки по котировкам ВСЕХ БК, лежащим в памяти.
@@ -354,13 +442,7 @@ class Scanner:
             self._dirty = False
             all_odds = [o for os_ in self._odds_by_bk.values() for o in os_]
 
-        # build_name_canon_map — дорогая операция; считаем не при КАЖДОМ
-        # пересчёте, а не чаще FUZZY_NAME_MAP_REFRESH, и переиспользуем на
-        # оба движка вилок.
-        if now - self._name_map_at > FUZZY_NAME_MAP_REFRESH:
-            self._name_map_cache = build_name_canon_map(all_odds)
-            self._name_map_at = now
-        name_map = self._name_map_cache
+        name_map = self._name_map(all_odds)
         arbs = find_arbs(all_odds, name_map)
         arbs3 = find_arbs_1x2(all_odds, name_map)
         with self._lock:
@@ -550,6 +632,7 @@ class Scanner:
         with self._lock:
             self._odds_by_bk.clear()
             self._fetched_at.clear()
+            self._mark_changed_locked()
             self._busy.clear()
             self._disabled.clear()
             self._restart_bks.clear()
@@ -576,7 +659,7 @@ class Scanner:
             had = self._odds_by_bk.pop(bk, None)
             self._fetched_at.pop(bk, None)
             if had:
-                self._dirty = True
+                self._mark_changed_locked()
 
     def _mark_disabled(self, bk: str) -> None:
         with self._lock:
