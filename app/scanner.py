@@ -1,11 +1,13 @@
 """Фоновый сканер: опрашивает БК, ищет вилки и сохраняет новые в SQLite.
 
-Каждая БК обновляется в СВОЁМ потоке и независимо от остальных: как только
-БК принесла свежие кэфы, вилки сразу пересчитываются по всем БК. Раньше
+Каждая БК обновляется в СВОЁМ потоке и независимо от остальных. Раньше
 прематч шёл общим кругом и ждал самую медленную БК — быстрая всё это время
 стояла, и в интерфейсе висело «Fonbet: 7 минут назад», хотя её собственный
 обход занимает полминуты. Пауза между обходами ОДНОЙ БК — SCAN_INTERVAL
-(в лайве LIVE_PER_BK_GAP).
+(в лайве LIVE_PER_BK_GAP), но не чаще, чем позволяет сама БК
+(BaseParser.min_refresh). Вилки считает отдельный поток по флагу
+«данные изменились»: пересчёт по всей линии стоит секунды, и делать его
+после каждой БК значит отдать процессор пересчёту вместо обходов.
 
 Котировки хранятся ПО КАЖДОЙ БК и живут между обходами:
 - пришли свежие данные БК — её котировки заменяются целиком;
@@ -407,7 +409,7 @@ class Scanner:
         """Держит по одному воркеру на каждую БК, пока режим включён.
 
         Медленная БК не тормозит быструю: каждая обновляется в своём темпе,
-        и вилки пересчитываются по всем БК сразу после её обхода."""
+        а вилки пересчитывает отдельный воркер по свежим данным всех БК."""
         parsers = self._worker_parsers()
         if not parsers:
             log.info("[%s] ни одна БК не поддерживает этот режим — простой",
@@ -425,9 +427,9 @@ class Scanner:
                            for p in parsers]
                 workers.append(loop.run_in_executor(self._executor,
                                                     self._recalc_worker))
-                log.info("[%s] сканер запущен: БК=%s, пауза между обходами "
-                         "одной БК %.1f c", self.mode,
-                         ", ".join(p.name for p in parsers), self._gap())
+                log.info("[%s] сканер запущен, период обхода: %s", self.mode,
+                         ", ".join(f"{p.name} — {self._period(p):.0f} c"
+                                   for p in parsers))
             elif not self.enabled() and workers:
                 await self._stop_workers(workers)
                 workers = []
@@ -461,9 +463,15 @@ class Scanner:
             self._running = False
         log.info("[%s] сканер остановлен", self.mode)
 
-    def _gap(self) -> float:
-        """Минимальная пауза между обходами ОДНОЙ БК."""
-        return LIVE_PER_BK_GAP if self.live else self.interval
+    def _period(self, parser: BaseParser) -> float:
+        """Минимальный период между обходами ОДНОЙ БК.
+
+        В лайве все БК ходят с коротким шагом, в прематче — раз в
+        SCAN_INTERVAL, но не чаще собственного ограничения БК
+        (BaseParser.min_refresh)."""
+        if self.live:
+            return LIVE_PER_BK_GAP
+        return max(self.interval, parser.min_refresh or 0)
 
     def _worker(self, parser: BaseParser) -> None:
         """Цикл обновления одной БК (в отдельном потоке)."""
@@ -537,12 +545,8 @@ class Scanner:
         После неудачных обходов подряд пауза удваивается (до потолка): если
         БК не отвечает или её защита рвёт соединение, прежний темп запросов
         ничего не даст, а котировки всё равно живут до ODDS_TTL."""
-        if self.live:
-            period = LIVE_PER_BK_GAP
-            cap = LIVE_ODDS_TTL / 3
-        else:
-            period = max(self.interval, parser.min_refresh or 0)
-            cap = BK_FAIL_BACKOFF_MAX
+        period = self._period(parser)
+        cap = LIVE_ODDS_TTL / 3 if self.live else BK_FAIL_BACKOFF_MAX
         if failures:
             period = min(period * 2 ** min(failures, 6), cap)
         deadline = max(started + period, time.monotonic() + 0.5)
