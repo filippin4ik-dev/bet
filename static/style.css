@@ -144,6 +144,14 @@ th.sortable::after { content: " ↕"; opacity: 0.35; font-size: 0.75em; }
 th.sortable.sorted-asc::after { content: " ▲"; opacity: 1; color: var(--accent); }
 th.sortable.sorted-desc::after { content: " ▼"; opacity: 1; color: var(--accent); }
 
+/* «(БК)» внутри заголовка кэфа — отдельная цель сортировки: по букмекеру
+   этого плеча, а не по величине коэффициента. */
+.sort-bk { cursor: pointer; }
+.sort-bk:hover { color: var(--text); text-decoration: underline; }
+.sort-bk.sorted-asc, .sort-bk.sorted-desc { color: var(--accent); }
+.sort-bk.sorted-asc::after { content: " ▲"; font-size: 0.75em; }
+.sort-bk.sorted-desc::after { content: " ▼"; font-size: 0.75em; }
+
 .table-meta {
   color: var(--muted);
   font-size: 0.85rem;

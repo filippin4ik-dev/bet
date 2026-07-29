@@ -22,7 +22,6 @@ const els = {
   search: document.getElementById("search"),
   sportFilter: document.getElementById("sport-filter"),
   bkFilter: document.getElementById("bk-filter"),
-  bkFilterLabel: document.getElementById("bk-filter-label"),
   minProfit: document.getElementById("min-profit"),
   minProfitLabel: document.getElementById("min-profit-label"),
   bank: document.getElementById("bank"),
@@ -150,6 +149,10 @@ let lastArbs = [];
 let lastArbs1x2 = [];
 let lastMatches = [];
 let lastDetail = null;
+// Все БК, которые сейчас опрашивает сканер (из /api/arbs). Список фильтра
+// строим по нему, а не только по видимым строкам: иначе выбранная БК
+// исчезала бы из фильтра всякий раз, когда по ней нет вилок.
+let lastBkNames = [];
 
 // Строки текущего представления (для фильтров/сортировки/индикаторов)
 function currentRows() {
@@ -191,7 +194,11 @@ els.testSound.addEventListener("click", beep);
 /* ---------- сортировка / фильтрация ---------- */
 
 function cmp(a, b, key) {
-  const va = a[key], vb = b[key];
+  let va = a[key], vb = b[key];
+  // список БК матча сравниваем как строку «БК1, БК2» — так матчи одного
+  // набора букмекеров встают рядом
+  if (Array.isArray(va)) va = [...va].sort().join(", ");
+  if (Array.isArray(vb)) vb = [...vb].sort().join(", ");
   if (va == null && vb == null) return 0;
   if (va == null) return 1;   // пустые — в конец
   if (vb == null) return -1;
@@ -202,12 +209,18 @@ function cmp(a, b, key) {
 // Корневой вид спорта: «Футбол · США. MLS» -> «Футбол»
 const rootSport = (s) => String(s).split(" · ")[0].trim();
 
+// Все БК, участвующие в строке: у матча — список БК, у вилки — БК её плеч
+// (в т.ч. третьего, ничейного, у вилок 1X2).
+function rowBookmakers(r) {
+  if (r.bookmakers) return r.bookmakers;
+  return [r.k1_bookmaker, r.kx_bookmaker, r.k2_bookmaker].filter(Boolean);
+}
+
 function applyFilters(rows) {
   const q = state.search.trim().toLowerCase();
   return rows.filter((r) => {
     if (state.sport && rootSport(r.sport) !== state.sport) return false;
-    if (isMatchesView(state.view) && state.bookmaker &&
-        !(r.bookmakers || []).includes(state.bookmaker)) return false;
+    if (state.bookmaker && !rowBookmakers(r).includes(state.bookmaker)) return false;
     if (q) {
       // ВАЖНО: .toLowerCase() должен охватывать ВСЮ строку. Без внешних
       // скобок он применялся только ко второму литералу, а имена команд
@@ -229,9 +242,11 @@ function applySort(rows) {
 function updateSortIndicators() {
   const table = currentTable();
   const { key, dir } = state.sort[state.view];
-  document.querySelectorAll("th.sortable").forEach((th) => th.classList.remove("sorted-asc", "sorted-desc"));
-  table.querySelectorAll("th.sortable").forEach((th) => {
-    if (th.dataset.sort === key) th.classList.add(dir === 1 ? "sorted-asc" : "sorted-desc");
+  const cls = dir === 1 ? "sorted-asc" : "sorted-desc";
+  document.querySelectorAll("th.sortable, .sort-bk").forEach(
+    (el) => el.classList.remove("sorted-asc", "sorted-desc"));
+  table.querySelectorAll("[data-sort]").forEach((el) => {
+    if (el.dataset.sort === key) el.classList.add(cls);
   });
 }
 
@@ -240,18 +255,21 @@ function refreshFilterOptions() {
   // В фильтре — только корневые виды спорта, без лиг и росписей
   const sports = [...new Set(rows.map((r) => rootSport(r.sport)))].sort((a, b) => a.localeCompare(b, "ru"));
   fillSelect(els.sportFilter, sports, state.sport, "Все");
-  if (isMatchesView(state.view)) {
-    const bks = [...new Set(rows.flatMap((r) => r.bookmakers || []))].sort();
-    fillSelect(els.bkFilter, bks, state.bookmaker, "Все");
-  }
-  els.bkFilterLabel.hidden = !isMatchesView(state.view);
+  // Фильтр по БК работает во ВСЕХ вкладках: в списке вилок оставляет те, у
+  // которых выбранная БК стоит хотя бы в одном плече (удобно смотреть
+  // вилки только по тем БК, где есть аккаунт).
+  const bks = [...new Set([...lastBkNames, ...rows.flatMap(rowBookmakers)])].sort();
+  fillSelect(els.bkFilter, bks, state.bookmaker, "Все");
   els.minProfitLabel.hidden = isMatchesView(state.view);
 }
 
 function fillSelect(sel, values, current, allLabel) {
+  // выбранное значение оставляем в списке даже если под него сейчас нет
+  // строк — иначе фильтр молча сбрасывался бы сам
+  const all = current && !values.includes(current) ? [...values, current] : values;
   sel.innerHTML = `<option value="">${allLabel}</option>` +
-    values.map((v) => `<option value="${escapeHtml(v)}">${escapeHtml(v)}</option>`).join("");
-  sel.value = values.includes(current) ? current : "";
+    all.map((v) => `<option value="${escapeHtml(v)}">${escapeHtml(v)}</option>`).join("");
+  sel.value = current || "";
 }
 
 function escapeHtml(s) {
@@ -870,6 +888,7 @@ async function poll() {
         `В памяти: ${data.events_checked} событий / ${data.quotes_checked} котировок`;
     }
     renderBkCounts(data.bookmakers);
+    lastBkNames = Object.keys(data.bookmakers || {});
 
     lastArbs = data.arbs;
     lastArbs1x2 = data.arbs_1x2 || [];
@@ -979,15 +998,23 @@ els.matchesBody.addEventListener("click", (e) => {
 
 els.backBtn.addEventListener("click", closeMatch);
 
-document.querySelectorAll("th.sortable").forEach((th) => {
-  th.addEventListener("click", () => {
-    const key = th.dataset.sort;
+// Сортировка по клику на заголовок. Слушаем на таблицах целиком, чтобы
+// работали и вложенные цели — подпись «(БК)» внутри заголовка кэфа
+// сортирует по букмекеру плеча, а не по величине коэффициента.
+const DESC_FIRST_KEYS = ["profit_pct", "k1_max", "kx_max", "k2_max",
+                         "markets_count"];
+
+document.querySelectorAll("table thead").forEach((thead) => {
+  thead.addEventListener("click", (e) => {
+    const target = e.target.closest("[data-sort]");
+    if (!target || !thead.contains(target)) return;
+    const key = target.dataset.sort;
     const sort = state.sort[state.view];
     if (sort.key === key) sort.dir = -sort.dir;
     else {
       sort.key = key;
       // числовые — сначала по убыванию, текст/время — по возрастанию
-      sort.dir = ["profit_pct", "k1_max", "kx_max", "k2_max", "markets_count"].includes(key) ? -1 : 1;
+      sort.dir = DESC_FIRST_KEYS.includes(key) ? -1 : 1;
     }
     saveState();
     rerender();
