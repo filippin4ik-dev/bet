@@ -201,6 +201,36 @@ BCGAME_PROVIDER_URL = os.getenv(
 # Язык линии (ru — русские названия команд/рынков для сопоставления с БК РФ).
 BCGAME_LANG = os.getenv("BCGAME_LANG", "ru")
 
+# ---- LeonBet: публичный JSON-фид линии ----
+# Leon отдаёт всю линию (прематч+лайв) одним JSON-снимком без авторизации:
+# GET {LEON_API_HOST}/api-2/betline/changes/all?ctag=ru-RU&vtag=&flags=...
+# Хост можно переопределить, если сменится домен/зеркало.
+LEON_API_HOST = os.getenv("LEON_API_HOST", "https://leon.ru").rstrip("/")
+# Общий снимок отдаёт только «топ» рынки события (~9: исход/1X2, тотал и
+# фора основной линии, тайм-маркеты, обе забьют). Полная роспись (лестница
+# доп. линий тоталов/фор, теннисные сеты и т.п.) — отдельным запросом на
+# событие; сколько секунд максимум тратить на сбор всей линии за цикл.
+LEON_FEED_TIMEOUT = float(os.getenv("LEON_FEED_TIMEOUT", "120"))
+# Забирать ПОЛНУЮ роспись каждого события отдельным запросом (много больше
+# рынков — лестница тоталов/фор), а не только «топ» из общего снимка.
+# 0 — быстрее, но только базовые рынки.
+LEON_FULL_MARKETS = os.getenv("LEON_FULL_MARKETS", "1") not in (
+    "0", "false", "no")
+# Сколько запросов полной росписи слать параллельно (пул потоков).
+LEON_FULL_MARKETS_WORKERS = int(os.getenv("LEON_FULL_MARKETS_WORKERS", "16"))
+
+# ---- Betcity: публичный JSON-фид линии ----
+# Один POST отдаёт ВСЮ прематч-линию (все виды спорта) одним снимком, без
+# авторизации и без браузера:
+#   POST {BETCITY_API_HOST}/d/off/events?rev=6&template=1   (body: ids=0)
+# Гранулярный per-событийный эндпоинт полной росписи (/d/off/ext) закрыт
+# файрволом — используем только «топ»-рынки из общего снимка (см. докстринг
+# app/parsers/betcity.py).
+BETCITY_API_HOST = os.getenv("BETCITY_API_HOST", "https://ad.betcity.ru").rstrip("/")
+# Хост сайта — только для сборки ссылок на страницу события (deep-link).
+BETCITY_SITE_HOST = os.getenv("BETCITY_SITE_HOST", "https://betcity.ru").rstrip("/")
+BETCITY_FEED_TIMEOUT = float(os.getenv("BETCITY_FEED_TIMEOUT", "30"))
+
 # ---- Лайв-режим (матчи в игре) ----
 # Лайв сканируется ОТДЕЛЬНЫМ быстрым циклом: коэффициенты в игре меняются
 # ежесекундно, поэтому опрос чаще и котировки живут недолго.
