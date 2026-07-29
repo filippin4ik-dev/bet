@@ -34,7 +34,8 @@
   font-family: inherit;
   resize: vertical;
 }
-.admin-form button, #add-account-btn, #logout-btn, #save-settings-btn {
+.admin-form button, #add-account-btn, #logout-btn, #save-settings-btn,
+#save-scanner-btn {
   background: var(--accent);
   color: #06210f;
   border: none;
@@ -44,6 +45,8 @@
   cursor: pointer;
 }
 #logout-btn { background: transparent; color: var(--muted); border: 1px solid var(--border); cursor: pointer; }
+/* пока настройка применяется, кнопка заблокирована — это должно быть видно */
+#save-scanner-btn:disabled { opacity: 0.5; cursor: default; }
 
 .admin-form-row {
   display: flex;

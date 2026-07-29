@@ -204,6 +204,42 @@ def test_place_on_arb_logs_bet():
     print("OK: test_place_on_arb_logs_bet")
 
 
+def test_live_toggle_settings():
+    """Переключатель лайва в админке: применяется на ходу (правит
+    config.LIVE_ENABLED, который читает сканер) И сохраняется в базе —
+    выключенный лайв остаётся выключенным после перезапуска. Флаги
+    авто-ставки, наоборот, сознательно только runtime."""
+    from app import admin_api
+    before = config.LIVE_ENABLED
+    try:
+        admin_api.update_settings(
+            admin_api.SettingsBody(live_enabled=False), username="admin")
+        assert config.LIVE_ENABLED is False
+        assert db.get_bool_setting("live_enabled", True) is False
+        assert admin_api.get_settings(username="admin")["live_enabled"] is False
+
+        admin_api.update_settings(
+            admin_api.SettingsBody(live_enabled=True), username="admin")
+        assert config.LIVE_ENABLED is True
+        assert db.get_bool_setting("live_enabled", False) is True
+
+        # автобет-флаги в базу не попадают
+        admin_api.update_settings(
+            admin_api.SettingsBody(autobet_dry_run=True), username="admin")
+        assert db.get_setting("autobet_dry_run") is None
+    finally:
+        config.LIVE_ENABLED = before
+    print("OK: test_live_toggle_settings")
+
+
+def test_settings_report_scanner_state():
+    from app import admin_api
+    s = admin_api.get_settings(username="admin")
+    assert s["scan_interval"] == config.SCAN_INTERVAL
+    assert s["live_running"] is False  # сканеры в тестах не запущены
+    print("OK: test_settings_report_scanner_state")
+
+
 def test_otp_relay_roundtrip():
     """Коннектор (фоновый поток) ждёт код, админка вводит его — код
     должен дойти обратно до заблокированного потока."""
@@ -253,6 +289,8 @@ if __name__ == "__main__":
     test_autobet_plan_without_accounts_is_zero()
     test_autobet_plan_with_balances_caps_stake()
     test_place_on_arb_logs_bet()
+    test_live_toggle_settings()
+    test_settings_report_scanner_state()
     test_otp_relay_roundtrip()
     test_otp_relay_timeout()
     print("Все тесты прошли.")

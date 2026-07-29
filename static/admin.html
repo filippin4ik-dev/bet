@@ -68,6 +68,21 @@
   </section>
 
   <section class="admin-panel">
+    <h2>Сканер</h2>
+    <p class="admin-hint">
+      Лайв-сканер работает отдельным быстрым циклом и делит с прематчем
+      процессор и сеть. На слабом VPS его лучше выключить: тогда все
+      ресурсы уходят прематчу — БК обновляются чаще и успевают отдать
+      линию целиком. Выключение сохраняется и после перезапуска сервера.
+    </p>
+    <div class="admin-form-row">
+      <label><input type="checkbox" id="setting-live-enabled"> Лайв-сканер включён</label>
+      <button id="save-scanner-btn">Применить</button>
+      <span id="scanner-state" class="admin-hint"></span>
+    </div>
+  </section>
+
+  <section class="admin-panel">
     <h2>Авто-ставки</h2>
     <p class="admin-hint admin-warning">
       ⚠️ Автоматическая постановка ставки — риск бана аккаунта у

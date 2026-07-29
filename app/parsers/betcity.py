@@ -76,7 +76,7 @@ from ..config import (BETCITY_API_HOST, BETCITY_EXT_BATCH,
                       BETCITY_EXT_MAX_AGE, BETCITY_EXT_MAX_REQUESTS,
                       BETCITY_EXT_REFRESH, BETCITY_EXT_WORKERS,
                       BETCITY_FEED_TIMEOUT, BETCITY_FULL_MARKETS,
-                      BETCITY_SITE_HOST)
+                      BETCITY_MIN_REFRESH, BETCITY_SITE_HOST)
 from ..models import KIND_PREMATCH, MarketOdds
 from .base import BaseParser
 from .html_utils import fmt_hcap, fmt_total, format_start, market_scope, sane_1x2_margin
@@ -170,6 +170,11 @@ def _price(v) -> float | None:
 
 class BetcityParser(BaseParser):
     name = "Betcity"
+    # Запрос всей линии у Betcity тяжёлый (~5-7 МБ), и её сервер не терпит
+    # частых обходов: при периоде 30 c половина попыток заканчивалась
+    # обрывом соединения (Connection reset by peer) даже с повторами, а
+    # успешные запросы замедлялись с 15 до 60 c. Поэтому у неё свой период.
+    min_refresh = BETCITY_MIN_REFRESH
 
     def __init__(self) -> None:
         super().__init__()

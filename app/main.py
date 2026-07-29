@@ -16,6 +16,7 @@ from .admin_api import require_admin
 from .admin_api import router as admin_router
 from .config import LIVE_ENABLED, SOUND_ALERT_PROFIT
 from .models import KIND_LIVE, KIND_PREMATCH
+from .runtime import balance_loop, live_scanner, scanner
 from .scanner import Scanner
 
 logging.basicConfig(
@@ -25,23 +26,22 @@ logging.basicConfig(
 
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 
-# Два независимых сканера: прематч (основной) и лайв (опциональный —
-# акцент на прематче, лайв отключается переменной LIVE_ENABLED=0).
-scanner = Scanner(mode=KIND_PREMATCH)
-live_scanner = Scanner(mode=KIND_LIVE)
-balance_loop = accounts_manager.BalanceRefreshLoop()
-
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     db.init_db()
+    # Сохранённый в админке переключатель лайва важнее переменной окружения:
+    # оператор выключил лайв — после перезапуска он остаётся выключенным.
+    config.LIVE_ENABLED = db.get_bool_setting("live_enabled", LIVE_ENABLED)
+    logging.getLogger("main").info(
+        "Лайв-сканер %s (переключается в админке)",
+        "включён" if config.LIVE_ENABLED else
+        "выключен — все ресурсы прематчу")
+    # Лайв-сканер запускается всегда: он сам простаивает, пока выключен, и
+    # поднимает воркеры, как только его включили из админки.
     tasks = [asyncio.create_task(scanner.run()),
-            asyncio.create_task(balance_loop.run())]
-    if LIVE_ENABLED:
-        tasks.append(asyncio.create_task(live_scanner.run()))
-    else:
-        logging.getLogger("main").info(
-            "Лайв-сканер выключен (LIVE_ENABLED=0) — все ресурсы прематчу")
+             asyncio.create_task(live_scanner.run()),
+             asyncio.create_task(balance_loop.run())]
     yield
     scanner.stop()
     live_scanner.stop()

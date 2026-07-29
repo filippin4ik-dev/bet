@@ -23,6 +23,9 @@ const els = {
   settingEnabled: document.getElementById("setting-enabled"),
   settingDryRun: document.getElementById("setting-dry-run"),
   saveSettingsBtn: document.getElementById("save-settings-btn"),
+  settingLiveEnabled: document.getElementById("setting-live-enabled"),
+  saveScannerBtn: document.getElementById("save-scanner-btn"),
+  scannerState: document.getElementById("scanner-state"),
   limitFraction: document.getElementById("limit-fraction"),
   limitMax: document.getElementById("limit-max"),
   betlogBody: document.getElementById("betlog-body"),
@@ -224,7 +227,36 @@ async function loadSettings() {
   els.settingDryRun.checked = s.autobet_dry_run;
   els.limitFraction.textContent = `${Math.round(s.autobet_max_balance_fraction * 100)}%`;
   els.limitMax.textContent = s.autobet_max_stake;
+  els.settingLiveEnabled.checked = s.live_enabled;
+  renderScannerState(s);
 }
+
+function renderScannerState(s) {
+  // Выключение вступает в силу не мгновенно: БК сначала докачивают то, что
+  // уже начали, поэтому показываем и желаемое состояние, и фактическое.
+  const parts = [`Прематч обновляет каждую БК раз в ${Math.round(s.scan_interval)} c.`];
+  if (s.live_enabled) {
+    parts.push(s.live_running ? "Лайв работает." : "Лайв запускается…");
+  } else {
+    parts.push(s.live_running
+      ? "Лайв останавливается — БК докачивают текущие обходы…"
+      : "Лайв не работает, все ресурсы прематчу.");
+  }
+  els.scannerState.textContent = parts.join(" ");
+}
+
+els.saveScannerBtn.addEventListener("click", async () => {
+  els.saveScannerBtn.disabled = true;
+  try {
+    await api("/api/admin/settings", {
+      method: "POST",
+      body: JSON.stringify({ live_enabled: els.settingLiveEnabled.checked }),
+    });
+    await loadSettings();
+  } finally {
+    els.saveScannerBtn.disabled = false;
+  }
+});
 
 els.saveSettingsBtn.addEventListener("click", async () => {
   await api("/api/admin/settings", {
@@ -296,5 +328,14 @@ async function pollOtp() {
   }
 }
 setInterval(pollOtp, 4000);
+
+// Состояние сканера меняется само (лайв останавливается не мгновенно —
+// БК сначала докачивают начатые обходы), поэтому подтягиваем его в фоне.
+setInterval(async () => {
+  if (!sessionActive) return;
+  try {
+    renderScannerState(await api("/api/admin/settings"));
+  } catch (_) { /* не залогинены — покажем при следующем входе */ }
+}, 5000);
 
 checkSession();

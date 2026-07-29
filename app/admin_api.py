@@ -11,6 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel
 
 from . import accounts_manager, config, db, otp
+from .runtime import live_scanner
 from .security import create_session_token, verify_admin_password, \
     verify_session_token
 
@@ -183,12 +184,19 @@ def get_settings(username: str = Depends(require_admin)):
         "autobet_max_stake": config.AUTOBET_MAX_STAKE,
         "autobet_max_balance_fraction": config.AUTOBET_MAX_BALANCE_FRACTION,
         "balance_refresh_interval": config.BALANCE_REFRESH_INTERVAL,
+        # Лайв-сканер: чего хочет оператор (live_enabled) и что происходит
+        # прямо сейчас (live_running) — выключение вступает в силу не
+        # мгновенно, а когда БК закончат текущие обходы.
+        "live_enabled": bool(config.LIVE_ENABLED),
+        "live_running": live_scanner.is_running(),
+        "scan_interval": config.SCAN_INTERVAL,
     }
 
 
 class SettingsBody(BaseModel):
     autobet_enabled: bool | None = None
     autobet_dry_run: bool | None = None
+    live_enabled: bool | None = None
 
 
 @router.post("/settings")
@@ -201,6 +209,13 @@ def update_settings(body: SettingsBody, username: str = Depends(require_admin)):
         config.AUTOBET_ENABLED = body.autobet_enabled
     if body.autobet_dry_run is not None:
         config.AUTOBET_DRY_RUN = body.autobet_dry_run
+    # Лайв, наоборот, сохраняем: выключили, чтобы не мешал прематчу —
+    # значит и после перезапуска он должен остаться выключенным.
+    if body.live_enabled is not None:
+        config.LIVE_ENABLED = body.live_enabled
+        db.set_bool_setting("live_enabled", body.live_enabled)
+        log.info("Лайв-сканер %s из админки (%s)",
+                 "включён" if body.live_enabled else "выключен", username)
     return {"ok": True}
 
 

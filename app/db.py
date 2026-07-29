@@ -121,6 +121,43 @@ def init_db() -> None:
             )
         """)
 
+        # Настройки, которые оператор меняет из админки и которые должны
+        # переживать перезапуск (в отличие от флагов авто-ставки — те
+        # сознательно только runtime, см. admin_api.update_settings).
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS settings (
+                key   TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )
+        """)
+
+
+def get_setting(key: str) -> str | None:
+    with _lock, _connect() as conn:
+        row = conn.execute("SELECT value FROM settings WHERE key = ?",
+                           (key,)).fetchone()
+    return row["value"] if row else None
+
+
+def set_setting(key: str, value: str) -> None:
+    with _lock, _connect() as conn:
+        conn.execute(
+            "INSERT INTO settings (key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, value))
+
+
+def get_bool_setting(key: str, default: bool) -> bool:
+    """Сохранённый флаг; нет записи — значение по умолчанию (из окружения)."""
+    value = get_setting(key)
+    if value is None:
+        return default
+    return value == "1"
+
+
+def set_bool_setting(key: str, value: bool) -> None:
+    set_setting(key, "1" if value else "0")
+
 
 def save_arbs(arbs: list[Arb]) -> None:
     if not arbs:
