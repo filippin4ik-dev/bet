@@ -270,21 +270,36 @@ def restart_scanner(body: ScannerRestartBody,
     return {"ok": True, "mode": body.mode}
 
 
+def restart_argv() -> list[str]:
+    """Командная строка, которой процесс был запущен.
+
+    Берём sys.orig_argv — она включает и ключи интерпретатора. Склейка
+    sys.executable + sys.argv не годится: после `python -m uvicorn` в
+    argv[0] лежит путь к uvicorn/__main__.py, и запуск этого файла
+    напрямую кладёт его каталог в sys.path — дальше `import logging`
+    находит uvicorn/logging.py вместо стандартного модуля, и процесс
+    падает на циклическом импорте, не поднявшись."""
+    return list(getattr(sys, "orig_argv", None) or [sys.executable, *sys.argv])
+
+
 @router.post("/restart_app")
 def restart_app(username: str = Depends(require_admin)):
-    """Перезапускает весь процесс сервера (os.execv тем же аргументами).
+    """Перезапускает весь процесс сервера той же командой, что его запустила.
 
     Нужно, когда меняли переменные окружения или обновили код на VPS:
     процесс поднимается заново сам, без ssh и systemctl. Ответ уходит
     ДО перезапуска, поэтому админка успевает показать сообщение."""
     log.warning("Перезапуск сервера из админки (%s)", username)
+    argv = restart_argv()
 
     def do_restart() -> None:
         time.sleep(0.7)
         try:
-            os.execv(sys.executable, [sys.executable, *sys.argv])
+            os.execv(sys.executable, argv)
         except Exception:  # noqa: BLE001
-            log.exception("Не удалось перезапустить процесс (execv)")
+            # Процесс остаётся жив: если он под systemd (Restart=always),
+            # оператору хотя бы не придётся поднимать сайт руками.
+            log.exception("Не удалось перезапустить процесс (execv %s)", argv)
 
     threading.Thread(target=do_restart, daemon=True).start()
     return {"ok": True, "detail": "Сервер перезапускается — страница "

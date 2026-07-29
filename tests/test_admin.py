@@ -303,6 +303,37 @@ def test_scanner_restart_endpoint():
     print("OK: test_scanner_restart_endpoint")
 
 
+def test_restart_argv_repeats_original_command():
+    """Перезапуск сервера должен повторять исходную команду целиком.
+
+    Проверено на живом сервере: склейка sys.executable + sys.argv ломает
+    запуск через `python -m uvicorn` — интерпретатор получает путь к
+    uvicorn/__main__.py, кладёт его каталог в sys.path, и `import logging`
+    внутри uvicorn находит uvicorn/logging.py вместо стандартного модуля.
+    Процесс падает на циклическом импорте, и сайт не поднимается."""
+    import sys
+
+    from app import admin_api
+    orig = getattr(sys, "orig_argv", None)
+    try:
+        sys.orig_argv = [sys.executable, "-m", "uvicorn", "app.main:app",
+                         "--port", "8000"]
+        assert admin_api.restart_argv() == sys.orig_argv
+        # интерпретатор без ключей: команда тоже воспроизводится как есть
+        sys.orig_argv = [sys.executable, "run.py"]
+        assert admin_api.restart_argv() == [sys.executable, "run.py"]
+        # очень старый Python без orig_argv — хотя бы не падаем
+        del sys.orig_argv
+        assert admin_api.restart_argv()[0] == sys.executable
+    finally:
+        if orig is None:
+            if hasattr(sys, "orig_argv"):
+                del sys.orig_argv
+        else:
+            sys.orig_argv = orig
+    print("OK: test_restart_argv_repeats_original_command")
+
+
 def test_otp_relay_roundtrip():
     """Коннектор (фоновый поток) ждёт код, админка вводит его — код
     должен дойти обратно до заблокированного потока."""
