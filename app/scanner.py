@@ -1,19 +1,28 @@
-"""Фоновый сканер: раз в SCAN_INTERVAL секунд опрашивает все БК
-(параллельно), ищет вилки и сохраняет новые находки в SQLite.
+"""Фоновый сканер: опрашивает БК, ищет вилки и сохраняет новые в SQLite.
 
-Котировки хранятся ПО КАЖДОЙ БК и живут между циклами:
+Каждая БК обновляется в СВОЁМ потоке и независимо от остальных: как только
+БК принесла свежие кэфы, вилки сразу пересчитываются по всем БК. Раньше
+прематч шёл общим кругом и ждал самую медленную БК — быстрая всё это время
+стояла, и в интерфейсе висело «Fonbet: 7 минут назад», хотя её собственный
+обход занимает полминуты. Пауза между обходами ОДНОЙ БК — SCAN_INTERVAL
+(в лайве LIVE_PER_BK_GAP).
+
+Котировки хранятся ПО КАЖДОЙ БК и живут между обходами:
 - пришли свежие данные БК — её котировки заменяются целиком;
 - обход БК сорвался (сеть, рендеринг) — старые котировки остаются до ODDS_TTL,
-  матчи не «слетают» в начале каждого круга;
+  матчи не «слетают» после каждого обхода;
 - матч начался (по распознанному времени старта) — убирается сразу.
+
+Лайв-сканер можно включать и выключать НА ХОДУ из админки (флаг
+config.LIVE_ENABLED): выключенный лайв освобождает CPU и сеть прематчу.
 """
 import asyncio
 import logging
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 
-from . import db
+from . import config, db
 from .arbitrage import (_canon, _market_group, _neg_hcap, _time_clusters,
                         build_name_canon_map, find_arbs, find_arbs_1x2,
                         norm_team)
@@ -30,17 +39,19 @@ log = logging.getLogger("scanner")
 class Scanner:
     """Фоновый сканер одного режима: прематч ИЛИ лайв.
 
-    mode="prematch" — медленный цикл, матчи убираются по времени старта;
-    mode="live"     — быстрый цикл, матчи в игре, короткий TTL котировок
+    mode="prematch" — редкие обходы, матчи убираются по времени старта;
+    mode="live"     — частые обходы, матчи в игре, короткий TTL котировок
                       (в лайве старый кэф опаснее его отсутствия).
     """
 
-    def __init__(self, mode: str = KIND_PREMATCH) -> None:
+    def __init__(self, mode: str = KIND_PREMATCH,
+                 parsers: list[BaseParser] | None = None) -> None:
         self.mode = mode
         self.live = mode == KIND_LIVE
         self.interval = LIVE_SCAN_INTERVAL if self.live else SCAN_INTERVAL
         self.ttl = LIVE_ODDS_TTL if self.live else ODDS_TTL
-        self.parsers = get_parsers()
+        # parsers подставляются в тестах; в бою — все включённые БК
+        self.parsers = get_parsers() if parsers is None else list(parsers)
         self._lock = threading.Lock()
         self._arbs: list[Arb] = []
         # трёхисходные вилки (рынок «Исход 1X2»: П1/X/П2) — отдельный список,
@@ -51,7 +62,9 @@ class Scanner:
         self._fetched_at: dict[str, float] = {}
         self._last_scan: float | None = None
         self._scan_count = 0
-        self._scanning = False
+        # какие БК опрашиваются ПРЯМО СЕЙЧАС — чтобы в интерфейсе было
+        # видно, что БК не «зависла», а как раз обновляется
+        self._busy: set[str] = set()
         self._events_checked = 0   # уникальных событий сейчас в памяти
         self._quotes_checked = 0   # всего котировок (событие x БК)
         # ключи вилок прошлого цикла — чтобы писать в историю только новые
@@ -66,9 +79,15 @@ class Scanner:
         # _update_bk), а не после КАЖДОГО обновления отдельной БК.
         self._name_map_cache: dict[str, str] = {}
         self._name_map_at: float = 0.0
-        self._executor = ThreadPoolExecutor(max_workers=len(self.parsers),
+        self._executor = ThreadPoolExecutor(max_workers=max(1, len(self.parsers)),
                                             thread_name_prefix=f"scan-{mode}")
         self._stop = asyncio.Event()
+        # Пока флаг установлен, воркеры БК работают. Лайв снимает его на
+        # ходу (выключение из админки), прематч держит установленным всегда.
+        self._workers_on = threading.Event()
+        # Воркеры ещё живы? Снятый _workers_on — только просьба
+        # остановиться: БК сначала докачивают начатый обход.
+        self._running = False
 
     def _fetch(self, parser):
         return parser.safe_fetch_live() if self.live else parser.safe_fetch()
@@ -82,16 +101,21 @@ class Scanner:
                 "mode": self.mode,
                 "scan_interval": self.interval,
                 "scan_count": self._scan_count,
-                "scanning": self._scanning,
+                "scanning": bool(self._busy),
+                "running": self._workers_on.is_set(),
                 "last_scan": self._last_scan,
                 "events_checked": self._events_checked,
                 "quotes_checked": self._quotes_checked,
-                # по каждой БК: сколько котировок и сколько секунд назад
-                # они получены (для индикатора свежести в UI)
+                # по каждой БК: сколько котировок, сколько секунд назад они
+                # получены и не идёт ли обход прямо сейчас (индикатор
+                # свежести в UI)
                 "bookmakers": {
-                    bk: {"count": len(o),
-                         "age_sec": round(now - self._fetched_at.get(bk, now))}
-                    for bk, o in self._odds_by_bk.items()},
+                    bk: {"count": len(self._odds_by_bk.get(bk) or ()),
+                         "age_sec": round(now - self._fetched_at.get(bk, now)),
+                         "busy": bk in self._busy}
+                    # БК, которую опрашивают впервые, котировок ещё не
+                    # принесла, но показать её уже надо
+                    for bk in sorted(set(self._odds_by_bk) | self._busy)},
                 "arbs": [a.to_dict() for a in self._arbs],
                 "arbs_1x2": [a.to_dict() for a in self._arbs3],
             }
@@ -324,121 +348,148 @@ class Scanner:
             self._quotes_checked = len(all_odds)
         return arbs, arbs3
 
-    # ---------- цикл ----------
+    def _save_new(self, arbs: list[Arb], arbs3: list[Arb3]) -> None:
+        """Пишет в историю только вилки, которых не было в прошлый раз.
 
-    def _scan_once(self) -> None:
-        started = time.monotonic()
-        with self._lock:
-            self._scanning = True
-        futures = {self._executor.submit(self._fetch, p): p
-                   for p in self.parsers}
-        done = 0
-        arbs: list[Arb] = []
-        arbs3: list[Arb3] = []
-        try:
-            for fut in as_completed(futures):
-                parser = futures[fut]
-                odds = fut.result()
-                done += 1
-                arbs, arbs3 = self._update_bk(parser.name, odds)
-                log.info("Готово %d/%d БК (%s: %d котировок), вилок: %d "
-                         "(+%d на 1X2)",
-                         done, len(futures), parser.name, len(odds),
-                         len(arbs), len(arbs3))
-        finally:
-            with self._lock:
-                self._scanning = False
-
+        Лайв-вилки не пишем: они меняются ежесекундно и быстро засорили бы
+        базу. История — только по прематчу."""
+        if self.live:
+            return
         with self._lock:
             new = [a for a in arbs if a.match_key not in self._prev_keys]
             self._prev_keys = {a.match_key for a in arbs}
             new3 = [a for a in arbs3 if a.match_key not in self._prev_keys3]
             self._prev_keys3 = {a.match_key for a in arbs3}
-            self._scan_count += 1
-            total = sum(len(o) for o in self._odds_by_bk.values())
+        db.save_arbs(new)
+        db.save_arbs3(new3)
 
-        # Лайв-вилки не пишем в историю: они меняются ежесекундно и быстро
-        # засорили бы БД. История — только по прематчу.
-        if not self.live:
-            db.save_arbs(new)
-            db.save_arbs3(new3)
-        log.info("[%s] Цикл %d завершён за %.0f c: %d котировок в памяти, "
-                 "%d вилок, %d вилок 1X2%s",
-                 self.mode, self._scan_count, time.monotonic() - started,
-                 total, len(arbs), len(arbs3),
-                 f" (лучшая {arbs[0].profit_pct:.2f}%)" if arbs else "")
-
-    async def run(self) -> None:
-        if self.live:
-            await self._run_live()
-            return
-        log.info("Сканер запущен: режим=%s, период=%s c",
-                 self.mode, self.interval)
-        loop = asyncio.get_running_loop()
-        while not self._stop.is_set():
-            started = time.monotonic()
-            try:
-                await loop.run_in_executor(None, self._scan_once)
-            except Exception:  # noqa: BLE001
-                log.exception("Ошибка цикла сканирования")
-            elapsed = time.monotonic() - started
-            wait = max(0.5, self.interval - elapsed)
-            try:
-                await asyncio.wait_for(self._stop.wait(), timeout=wait)
-            except asyncio.TimeoutError:
-                pass
-
-    # ---------- лайв: независимое обновление по каждой БК ----------
+    # ---------- цикл: по потоку на каждую БК ----------
 
     @staticmethod
     def _supports_live(parser: BaseParser) -> bool:
         """БК реально отдаёт лайв (переопределила fetch_live_odds)?"""
         return type(parser).fetch_live_odds is not BaseParser.fetch_live_odds
 
-    async def _run_live(self) -> None:
-        """Каждая лайв-БК крутится в своём потоке и обновляется как можно
-        чаще — медленная БК не тормозит быструю. Как только БК принесла
-        свежие кэфы, вилки сразу пересчитываются по всем БК."""
-        workers = [p for p in self.parsers if self._supports_live(p)]
-        if not workers:
-            log.info("Лайв-сканер: ни одна БК не поддерживает лайв — простой")
+    def _worker_parsers(self) -> list[BaseParser]:
+        if not self.live:
+            return list(self.parsers)
+        return [p for p in self.parsers if self._supports_live(p)]
+
+    def enabled(self) -> bool:
+        """Должен ли сканер сейчас работать. Лайв включается и выключается
+        на ходу (админка правит config.LIVE_ENABLED), прематч — основной
+        режим и работает всегда."""
+        return bool(config.LIVE_ENABLED) if self.live else True
+
+    def is_running(self) -> bool:
+        """Работают ли сейчас воркеры БК. Остаётся True и после выключения,
+        пока БК не докачали начатые обходы."""
+        with self._lock:
+            return self._running
+
+    async def run(self) -> None:
+        """Держит по одному воркеру на каждую БК, пока режим включён.
+
+        Медленная БК не тормозит быструю: каждая обновляется в своём темпе,
+        и вилки пересчитываются по всем БК сразу после её обхода."""
+        parsers = self._worker_parsers()
+        if not parsers:
+            log.info("[%s] ни одна БК не поддерживает этот режим — простой",
+                     self.mode)
             await self._stop.wait()
             return
-        log.info("Лайв-сканер запущен: БК=%s, пауза между обновлениями %.1f c",
-                 ", ".join(p.name for p in workers), LIVE_PER_BK_GAP)
-        with self._lock:
-            self._scanning = True
         loop = asyncio.get_running_loop()
-        tasks = [loop.run_in_executor(self._executor, self._live_worker, p)
-                 for p in workers]
-        await self._stop.wait()
-        for t in tasks:
-            try:
-                await t
-            except Exception:  # noqa: BLE001
-                pass
-
-    def _live_worker(self, parser: BaseParser) -> None:
-        """Бесконечный цикл обновления одной лайв-БК (в отдельном потоке)."""
+        workers: list = []
         while not self._stop.is_set():
+            if self.enabled() and not workers:
+                self._workers_on.set()
+                with self._lock:
+                    self._running = True
+                workers = [loop.run_in_executor(self._executor, self._worker, p)
+                           for p in parsers]
+                log.info("[%s] сканер запущен: БК=%s, пауза между обходами "
+                         "одной БК %.1f c", self.mode,
+                         ", ".join(p.name for p in parsers), self._gap())
+            elif not self.enabled() and workers:
+                await self._stop_workers(workers)
+                workers = []
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=1.0)
+            except asyncio.TimeoutError:
+                pass
+        self._workers_on.clear()
+        with self._lock:
+            self._running = False
+
+    async def _stop_workers(self, workers: list) -> None:
+        """Гасит воркеры (лайв выключили из админки) и забывает котировки:
+        показывать кэфы режима, который больше не обновляется, нельзя."""
+        log.info("[%s] сканер выключен — ресурсы отданы прематчу "
+                 "(ждём завершения текущих обходов)", self.mode)
+        self._workers_on.clear()
+        for w in workers:
+            try:
+                await w
+            except Exception:  # noqa: BLE001
+                log.exception("[%s] воркер завершился с ошибкой", self.mode)
+        with self._lock:
+            self._odds_by_bk.clear()
+            self._fetched_at.clear()
+            self._busy.clear()
+            self._arbs = []
+            self._arbs3 = []
+            self._events_checked = 0
+            self._quotes_checked = 0
+            self._running = False
+        log.info("[%s] сканер остановлен", self.mode)
+
+    def _gap(self) -> float:
+        """Минимальная пауза между обходами ОДНОЙ БК."""
+        return LIVE_PER_BK_GAP if self.live else self.interval
+
+    def _worker(self, parser: BaseParser) -> None:
+        """Цикл обновления одной БК (в отдельном потоке)."""
+        while self._workers_on.is_set() and not self._stop.is_set():
             started = time.monotonic()
             try:
-                odds = self._fetch(parser)
+                with self._lock:
+                    self._busy.add(parser.name)
+                try:
+                    odds = self._fetch(parser)
+                finally:
+                    with self._lock:
+                        self._busy.discard(parser.name)
                 arbs, arbs3 = self._update_bk(parser.name, odds)
+                self._save_new(arbs, arbs3)
                 with self._lock:
                     self._scan_count += 1
-                log.info("[live] %s: %d котировок за %.1f c, вилок: %d "
-                         "(+%d на 1X2)",
-                         parser.name, len(odds), time.monotonic() - started,
-                         len(arbs), len(arbs3))
+                    total = sum(len(o) for o in self._odds_by_bk.values())
+                log.info("[%s] %s: %d котировок за %.0f c — в памяти %d, "
+                         "вилок %d (+%d на 1X2)%s",
+                         self.mode, parser.name, len(odds),
+                         time.monotonic() - started, total,
+                         len(arbs), len(arbs3),
+                         f", лучшая {arbs[0].profit_pct:.2f}%" if arbs else "")
             except Exception:  # noqa: BLE001
-                log.exception("[live] %s: ошибка обновления", parser.name)
-            # небольшая пауза, чтобы не долбить сервер БК вплотную
-            slept = 0.0
-            while slept < LIVE_PER_BK_GAP and not self._stop.is_set():
-                time.sleep(0.3)
-                slept += 0.3
+                log.exception("[%s] %s: ошибка обновления",
+                              self.mode, parser.name)
+            self._sleep_before_next(started)
+
+    def _sleep_before_next(self, started: float) -> None:
+        """Ждёт до следующего обхода этой БК: в прематче обходы идут не чаще
+        раза в SCAN_INTERVAL (обход дольше периода — следующий сразу), в
+        лайве — короткая пауза, чтобы не долбить сервер БК вплотную."""
+        if self.live:
+            deadline = time.monotonic() + LIVE_PER_BK_GAP
+        else:
+            deadline = max(started + self.interval, time.monotonic() + 0.5)
+        while self._workers_on.is_set() and not self._stop.is_set():
+            left = deadline - time.monotonic()
+            if left <= 0:
+                return
+            time.sleep(min(0.3, left))
 
     def stop(self) -> None:
         self._stop.set()
+        self._workers_on.clear()
         self._executor.shutdown(wait=False)

@@ -390,10 +390,14 @@ function renderBkCounts(bookmakers) {
     if (s < 90) return "только что";
     return `${Math.round(s / 60)} мин назад`;
   };
+  // Каждая БК обновляется в своём темпе (медленная не тормозит быструю),
+  // поэтому у той, которую опрашивают прямо сейчас, показываем это вместо
+  // возраста котировок: она не «зависла», а как раз качает линию.
   const parts = Object.entries(bookmakers || {}).map(([bk, v]) => {
     const cls = bkClass(bk);
     if (typeof v === "number") return `<span class="${cls}">${escapeHtml(bk)}: ${v}</span>`;
-    return `<span class="${cls}">${escapeHtml(bk)}: ${v.count}</span> <span class="muted">(${age(v.age_sec)})</span>`;
+    const note = v.busy ? "обновляется…" : age(v.age_sec);
+    return `<span class="${cls}">${escapeHtml(bk)}: ${v.count}</span> <span class="muted">(${note})</span>`;
   });
   els.bkCounts.innerHTML = parts.length ? parts.join(" · ") : "";
 }
