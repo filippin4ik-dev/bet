@@ -450,6 +450,60 @@ def test_ext_refresh_marks_events_without_extra_markets(monkeypatch):
     assert p.asked == []
 
 
+# ---------- устойчивость сети ----------
+
+class _FlakySession:
+    """Сессия, которая рвёт соединение заданное число первых запросов."""
+
+    def __init__(self, fails):
+        self.fails = fails
+        self.calls = 0
+        self.closed = 0
+
+    def post(self, *a, **kw):
+        self.calls += 1
+        if self.calls <= self.fails:
+            raise ConnectionResetError(104, "Connection reset by peer")
+
+        class _Resp:
+            @staticmethod
+            def raise_for_status():
+                pass
+
+            @staticmethod
+            def json():
+                return {"reply": {"sports": {}}}
+        return _Resp()
+
+    def close(self):
+        self.closed += 1
+
+
+def test_post_retries_after_connection_reset(monkeypatch):
+    """Betcity периодически рвёт соединение (RST) посередине ответа. Снимок
+    линии — единственный источник её событий, поэтому запрос повторяется, а
+    keep-alive перед повтором сбрасывается."""
+    monkeypatch.setattr(betcity_mod, "_POST_RETRY_PAUSES", (0.0, 0.0))
+    p = BetcityParser()
+    p.session = _FlakySession(fails=2)
+    assert p._fetch_snapshot() == {"reply": {"sports": {}}}
+    assert p.session.calls == 3
+    assert p.session.closed == 2  # перед каждым повтором
+
+
+def test_post_gives_up_after_last_attempt(monkeypatch):
+    monkeypatch.setattr(betcity_mod, "_POST_RETRY_PAUSES", (0.0,))
+    p = BetcityParser()
+    p.session = _FlakySession(fails=99)
+    try:
+        p._fetch_snapshot()
+    except ConnectionResetError:
+        pass
+    else:
+        raise AssertionError("ошибка сети должна пробрасываться наверх")
+    assert p.session.calls == 2
+
+
 def test_ext_dropped_when_stale_or_event_gone(monkeypatch):
     monkeypatch.setattr(betcity_mod, "BETCITY_EXT_BATCH", 10)
     monkeypatch.setattr(betcity_mod, "BETCITY_EXT_MAX_REQUESTS", 1)

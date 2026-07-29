@@ -20,7 +20,7 @@ Betcity — Angular SPA (`betcity.ru`), защищённая антифрод-с
    Отдаёт ~5000 событий, но у каждого лишь «топ»-рынки (`main`, ~3 на
    событие: исход, ОДНА линия форы и ОДНА линия тотала).
 
-2. Полная роспись рынков (`ext`, ~55 рынков на событие: вся лестница
+2. Полная роспись рынков (`ext`, ~160 рынков на событие: вся лестница
    тоталов и фор, азиатские линии, тоталы/форы таймов, индивидуальные
    тоталы, «обе забьют», чет/нечет) — ТОТ ЖЕ эндпоинт с `ext=1` и списком
    id событий в теле (не более ~200 id за раз, дальше сервер отвечает 500):
@@ -29,7 +29,9 @@ Betcity — Angular SPA (`betcity.ru`), защищённая антифрод-с
        Body: id_ev=<id>,<id>,...
 
    Сколько именно рынков спрятано за `ext`, событие сообщает заранее в
-   поле `cnt_ext_add`. Полная роспись всей линии — ~40 МБ, поэтому она
+   поле `cnt_ext_add`; у событий с пустым `cnt_ext_add` росписи нет вовсе
+   (на живой линии — примерно 700 из 2900). Роспись весит ~9.5 КБ на
+   событие в сжатом виде, ~20 МБ за полный обход линии, поэтому она
    обновляется ПО КРУГУ (см. BETCITY_EXT_REFRESH): каждый цикл сканера
    догоняется часть событий, остальные берутся из кэша парсера. Основные
    рынки при этом всегда свежие — они приходят в общем снимке.
@@ -82,6 +84,12 @@ from .html_utils import fmt_hcap, fmt_total, format_start, market_scope, sane_1x
 log = logging.getLogger("parsers.betcity")
 
 _EVENTS_URL = f"{BETCITY_API_HOST}/d/off/events"
+
+# Паузы перед повторами POST: сколько пауз — столько и повторов. Betcity
+# рвёт заметную долю соединений (на живой линии — до трети попыток),
+# поэтому повторов несколько: снимок линии — единственный источник её
+# событий, и терять его на весь цикл из-за одного RST нельзя.
+_POST_RETRY_PAUSES = (1.0, 3.0, 8.0)
 
 _WM_1X2 = frozenset({"P1", "P2", "X"})
 _WM_2WAY = frozenset({"P1", "P2"})
@@ -197,13 +205,14 @@ class BetcityParser(BaseParser):
     # ---- общий снимок линии ----
 
     def _post(self, params: dict, data: dict) -> dict:
-        """POST к API линии с одной повторной попыткой.
+        """POST к API линии с повторными попытками.
 
-        На серию запросов подряд (снимок + пачки росписи) Betcity иногда
-        отвечает обрывом соединения (RST) — на повторе через секунду
-        отдаёт данные нормально."""
-        last: Exception | None = None
-        for attempt in (0, 1):
+        Betcity рвёт часть соединений (RST/ошибка TLS-рукопожатия), иногда
+        посередине многомегабайтного ответа. Перед повтором закрываем пул
+        соединений: сервер мог закрыть keep-alive со своей стороны, и на
+        новом соединении запрос проходит."""
+        # первая попытка + по одной на каждую паузу
+        for pause in (*_POST_RETRY_PAUSES, None):
             try:
                 resp = self.session.post(
                     _EVENTS_URL, params=params, data=data,
@@ -211,10 +220,13 @@ class BetcityParser(BaseParser):
                 resp.raise_for_status()
                 return resp.json()
             except Exception as exc:  # noqa: BLE001
-                last = exc
-                if attempt == 0:
-                    time.sleep(1.5)
-        raise last
+                if pause is None:
+                    raise
+                log.debug("Betcity: повтор запроса через %.1f с (%s)",
+                          pause, exc)
+                self.session.close()
+                time.sleep(pause)
+        raise AssertionError("недостижимо")  # pragma: no cover
 
     def _fetch_snapshot(self) -> dict:
         return self._post({"rev": "6", "template": "1"}, {"ids": "0"})
