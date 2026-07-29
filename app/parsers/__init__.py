@@ -9,12 +9,13 @@ from .base import BaseParser
 from .bcgame import BCGameParser
 from .betboom import BetBoomParser
 from .fonbet import FonbetParser
+from .leon import LeonParser
 from .ligastavok import LigaStavokParser
 from .winline import WinlineParser
 
 log = logging.getLogger("parsers")
 
-BOOKMAKERS = ["Winline", "BetBoom", "Fonbet", "bc.game"] + \
+BOOKMAKERS = ["Winline", "BetBoom", "Fonbet", "bc.game", "LeonBet"] + \
     (["Liga Stavok"] if LIGASTAVOK_ENABLED else [])
 
 _ls_notice_shown = False
@@ -23,7 +24,8 @@ _ls_notice_shown = False
 def get_parsers() -> list[BaseParser]:
     global _ls_notice_shown
     parsers: list[BaseParser] = [WinlineParser(), BetBoomParser(),
-                                 FonbetParser(), BCGameParser()]
+                                 FonbetParser(), BCGameParser(),
+                                 LeonParser()]
     if LIGASTAVOK_ENABLED:
         parsers.append(LigaStavokParser())
     elif not _ls_notice_shown:
