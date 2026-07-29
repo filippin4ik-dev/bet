@@ -36,7 +36,7 @@
       Спорт:
       <select id="sport-filter"><option value="">Все</option></select>
     </label>
-    <label id="bk-filter-label" hidden>
+    <label id="bk-filter-label">
       БК:
       <select id="bk-filter"><option value="">Все</option></select>
     </label>
@@ -69,8 +69,10 @@
           <th class="sortable" data-sort="sport">Спорт</th>
           <th class="sortable" data-sort="match">Матч</th>
           <th class="sortable" data-sort="market">Рынок</th>
-          <th class="sortable" data-sort="k1_max">Исход 1: К<sub>max</sub> (БК)</th>
-          <th class="sortable" data-sort="k2_max">Исход 2: К<sub>max</sub> (БК)</th>
+          <th class="sortable" data-sort="k1_max">Исход 1: К<sub>max</sub>
+            <span class="sort-bk" data-sort="k1_bookmaker" title="Сортировать по БК">(БК)</span></th>
+          <th class="sortable" data-sort="k2_max">Исход 2: К<sub>max</sub>
+            <span class="sort-bk" data-sort="k2_bookmaker" title="Сортировать по БК">(БК)</span></th>
           <th class="sortable" data-sort="profit_pct">Доходность</th>
           <th class="sortable" data-sort="first_seen" title="Как давно вилка появилась">⏱ Живёт</th>
           <th>Ставка 1</th>
@@ -90,9 +92,12 @@
           <th class="sortable" data-sort="start_ts">Начало</th>
           <th class="sortable" data-sort="sport">Спорт</th>
           <th class="sortable" data-sort="match">Матч</th>
-          <th class="sortable" data-sort="k1_max">П1: К<sub>max</sub> (БК)</th>
-          <th class="sortable" data-sort="kx_max">X: К<sub>max</sub> (БК)</th>
-          <th class="sortable" data-sort="k2_max">П2: К<sub>max</sub> (БК)</th>
+          <th class="sortable" data-sort="k1_max">П1: К<sub>max</sub>
+            <span class="sort-bk" data-sort="k1_bookmaker" title="Сортировать по БК">(БК)</span></th>
+          <th class="sortable" data-sort="kx_max">X: К<sub>max</sub>
+            <span class="sort-bk" data-sort="kx_bookmaker" title="Сортировать по БК">(БК)</span></th>
+          <th class="sortable" data-sort="k2_max">П2: К<sub>max</sub>
+            <span class="sort-bk" data-sort="k2_bookmaker" title="Сортировать по БК">(БК)</span></th>
           <th class="sortable" data-sort="profit_pct">Доходность</th>
           <th class="sortable" data-sort="first_seen" title="Как давно вилка появилась">⏱ Живёт</th>
           <th>Ставка П1</th>
@@ -113,7 +118,7 @@
           <th class="sortable" data-sort="start_ts">Начало</th>
           <th class="sortable" data-sort="sport">Спорт</th>
           <th class="sortable" data-sort="match">Матч</th>
-          <th>Букмекеры</th>
+          <th class="sortable" data-sort="bookmakers">Букмекеры</th>
           <th class="sortable" data-sort="markets_count">Рынков</th>
         </tr>
       </thead>
@@ -288,8 +293,10 @@
     Источники: <span class="bk-chip bk-winline">Winline</span>
     <span class="bk-chip bk-betboom">BetBoom</span>
     <span class="bk-chip bk-fonbet">Fonbet</span>
-    <span class="bk-chip bk-liga">Liga Stavok</span>
-    <span class="bk-chip bk-bcgame">bc.game</span>
+    <span class="bk-chip bk-leon">LeonBet</span>
+    <span class="bk-chip bk-betcity">Betcity</span>
+    <span class="muted" title="Лига Ставок включается резидентным прокси (LIGASTAVOK_PROXY), bc.game — флагом BCGAME_ENABLED=1">
+      (+ Liga Stavok и bc.game — по настройке)</span>
   </footer>
 
   <script src="/static/app.js"></script>

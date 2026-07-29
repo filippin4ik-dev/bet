@@ -4,7 +4,7 @@
 """
 import logging
 
-from ..config import LIGASTAVOK_ENABLED
+from ..config import BCGAME_ENABLED, LIGASTAVOK_ENABLED
 from .base import BaseParser
 from .bcgame import BCGameParser
 from .betboom import BetBoomParser
@@ -16,17 +16,27 @@ from .winline import WinlineParser
 
 log = logging.getLogger("parsers")
 
-BOOKMAKERS = ["Winline", "BetBoom", "Fonbet", "bc.game", "LeonBet", "Betcity"] + \
+BOOKMAKERS = ["Winline", "BetBoom", "Fonbet", "LeonBet", "Betcity"] + \
+    (["bc.game"] if BCGAME_ENABLED else []) + \
     (["Liga Stavok"] if LIGASTAVOK_ENABLED else [])
 
 _ls_notice_shown = False
+_bc_notice_shown = False
 
 
 def get_parsers() -> list[BaseParser]:
-    global _ls_notice_shown
+    global _ls_notice_shown, _bc_notice_shown
     parsers: list[BaseParser] = [WinlineParser(), BetBoomParser(),
-                                 FonbetParser(), BCGameParser(),
-                                 LeonParser(), BetcityParser()]
+                                 FonbetParser(), LeonParser(),
+                                 BetcityParser()]
+    if BCGAME_ENABLED:
+        parsers.append(BCGameParser())
+    elif not _bc_notice_shown:
+        log.info(
+            "bc.game отключена (BCGAME_ENABLED=0): единственная зарубежная "
+            "БК в наборе, её линия и написание имён команд заметно "
+            "расходятся с БК РФ. BCGAME_ENABLED=1 — включить обратно.")
+        _bc_notice_shown = True
     if LIGASTAVOK_ENABLED:
         parsers.append(LigaStavokParser())
     elif not _ls_notice_shown:

@@ -260,11 +260,15 @@ class LeonParser(BaseParser):
             # («Чет/Нечет хозяев/гостей») тоже дают tags ODD/EVEN, но по
             # market_scope не отличаются от общего рынка (оба слова не
             # несут «предметного» токена) — пропускаем, чтобы не смешать.
+            # Порядок исходов ОБЯЗАН совпадать с остальными парсерами
+            # (Winline/BetBoom/Fonbet/Betcity): 1-й исход — «Чет». Движок
+            # сшивает чет/нечет по позиции исхода, а не по подписи, так что
+            # перевёрнутый порядок дал бы ложную вилку «чет против чета».
             key = f"oddeven:{scope}" if scope else "oddeven"
             return MarketOdds(
                 market=name, market_key=key,
-                outcome1="Нечет", outcome2="Чет",
-                k1=runners["ODD"]["price"], k2=runners["EVEN"]["price"],
+                outcome1="Чет", outcome2="Нечет",
+                k1=runners["EVEN"]["price"], k2=runners["ODD"]["price"],
                 **base)
 
         return None
