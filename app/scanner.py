@@ -26,8 +26,9 @@ from . import config, db
 from .arbitrage import (_canon, _market_group, _neg_hcap, _time_clusters,
                         build_name_canon_map, find_arbs, find_arbs_1x2,
                         norm_team)
-from .config import (FUZZY_NAME_MAP_REFRESH, LIVE_ODDS_TTL, LIVE_PER_BK_GAP,
-                     LIVE_SCAN_INTERVAL, ODDS_TTL, SCAN_INTERVAL)
+from .config import (ARB_RECALC_MIN_GAP, FUZZY_NAME_MAP_REFRESH,
+                     LIVE_ODDS_TTL, LIVE_PER_BK_GAP, LIVE_SCAN_INTERVAL,
+                     ODDS_TTL, SCAN_INTERVAL)
 from .models import Arb, Arb3, KIND_LIVE, KIND_PREMATCH, MarketOdds
 from .parsers import get_parsers
 from .parsers.base import BaseParser
@@ -516,6 +517,10 @@ class Scanner:
                         f", лучшая {arbs[0].profit_pct:.2f}%" if arbs else "")
             except Exception:  # noqa: BLE001
                 log.exception("[%s] ошибка пересчёта вилок", self.mode)
+            # передышка: без неё пересчёт идёт непрерывно (котировки
+            # приходят чаще, чем он успевает) и отбирает процессор у самих
+            # обходов БК. В лайве котировок мало и пересчёт дешёвый.
+            self._sleep_while_running(0.5 if self.live else ARB_RECALC_MIN_GAP)
 
     def _sleep_before_next(self, started: float) -> None:
         """Ждёт до следующего обхода этой БК: в прематче обходы идут не чаще
@@ -525,6 +530,11 @@ class Scanner:
             deadline = time.monotonic() + LIVE_PER_BK_GAP
         else:
             deadline = max(started + self.interval, time.monotonic() + 0.5)
+        self._sleep_while_running(deadline - time.monotonic())
+
+    def _sleep_while_running(self, seconds: float) -> None:
+        """Пауза, которая прерывается остановкой сканера."""
+        deadline = time.monotonic() + seconds
         while self._workers_on.is_set() and not self._stop.is_set():
             left = deadline - time.monotonic()
             if left <= 0:
