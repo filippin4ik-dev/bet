@@ -12,13 +12,15 @@
   а не только лучшая — пользователь видит все вилки, включая те, где
   кэф ниже максимального.
 """
+import difflib
 import itertools
 import logging
 import re
 from collections import defaultdict
 from typing import Iterable
 
-from .config import (ARB_MAX_PROFIT, BANKS, START_TS_TOLERANCE,
+from .config import (ARB_MAX_PROFIT, BANKS, FUZZY_NAME_MIN_SINGLE_RATIO,
+                     FUZZY_NAME_SIM_THRESHOLD, START_TS_TOLERANCE,
                      START_TS_TOLERANCE_COMBAT, START_TS_TOLERANCE_RAPID)
 from .models import Arb, Arb3, KIND_PREMATCH, MarketOdds
 from .parsers.html_utils import display_market, neg_hcap as _neg_hcap
@@ -42,6 +44,169 @@ def norm_team(name: str) -> str:
             continue
         words.append("ж" if w in _FEMALE else w)
     return " ".join(sorted(words))  # порядок слов тоже не важен
+
+
+def _team_pair_similarity(a: tuple[str, str], b: tuple[str, str]) -> float:
+    """Похожесть двух пар нормализованных имён команд (порядок не важен) —
+    среднее по лучшему сопоставлению команда↔команда. Та же формула, что и
+    в диагностике (app/diagnose_overlap.py, «почти совпадения»)."""
+    straight = (difflib.SequenceMatcher(None, a[0], b[0]).ratio()
+               + difflib.SequenceMatcher(None, a[1], b[1]).ratio()) / 2
+    swapped = (difflib.SequenceMatcher(None, a[0], b[1]).ratio()
+              + difflib.SequenceMatcher(None, a[1], b[0]).ratio()) / 2
+    return max(straight, swapped)
+
+
+class _UnionFind:
+    """DSU для слияния РАЗНЫХ написаний имени одной и той же команды."""
+
+    def __init__(self) -> None:
+        self._parent: dict[str, str] = {}
+
+    def find(self, x: str) -> str:
+        p = self._parent.setdefault(x, x)
+        if p != x:
+            root = self.find(p)
+            self._parent[x] = root
+            return root
+        return x
+
+    def union(self, a: str, b: str) -> None:
+        ra, rb = self.find(a), self.find(b)
+        if ra != rb:
+            # какой из двух станет корнем — не важно (это внутренний ключ,
+            # наружу не показывается), лишь бы стабильно на одних данных
+            if ra < rb:
+                self._parent[rb] = ra
+            else:
+                self._parent[ra] = rb
+
+
+def _fuzzy_window_cap(root: str) -> float:
+    """Верхняя граница окна поиска фаззи-кандидатов по времени старта для
+    корня вида спорта (сама граница финального решения не определяет —
+    решение о склейке события всё равно принимает _time_clusters со своим
+    допуском; здесь только чтобы не сравнивать вообще всё со всем). Больше
+    максимального реального допуска смысла нет — такая пара всё равно не
+    склеится позже."""
+    return START_TS_TOLERANCE_COMBAT if root in _COMBAT_ROOTS \
+        else START_TS_TOLERANCE
+
+
+def _len_compatible(a: int, b: int) -> bool:
+    """Дешёвый предфильтр ДО дорогого difflib: при похожести >= порога
+    FUZZY_NAME_MIN_SINGLE_RATIO длины строк не могут отличаться сильнее
+    определённого соотношения (из формулы ratio = 2*min/(min+max)).
+    Отсекает заведомо непроходные пары без единого вызова SequenceMatcher."""
+    lo, hi = (a, b) if a <= b else (b, a)
+    return hi <= lo * 1.7 + 2
+
+
+def build_name_canon_map(odds: list[MarketOdds]) -> dict[str, str]:
+    """Строит соответствие «сырое нормализованное имя команды» → каноническое,
+    сливая РАЗНЫЕ написания одной и той же команды/игрока между БК
+    (транслитерация, опечатки, сокращения — см. FUZZY_NAME_SIM_THRESHOLD).
+
+    Диагностика (app/diagnose_overlap.py) на живых данных нашла тысячи пар
+    событий с ИДЕНТИЧНЫМИ соперниками и близким временем старта, которые не
+    склеивались только из-за разного написания имени одной из команд у
+    разных БК («Кимчхон Санму»/«Кимчхон Сангму», «Виктория Плзень»/
+    «Виктория Пльзень» и т.п.) — из-за этого терялись реальные вилки.
+
+    Алгоритм: берём по одному «сырому» событию на каждую пару (БК, пара
+    команд), ОТБРАСЫВАЕМ те, что у 2+ БК УЖЕ совпали ТОЧНО (фаззи-сравнение
+    им не нужно — экономит основную массу сравнений: бóльшая часть
+    популярных матчей и так совпадает по написанию), группируем оставшиеся
+    «одиночки» по корню вида спорта и внутри группы (отсортировав по
+    времени старта) сравниваем близкие по времени события РАЗНЫХ БК — если
+    похожесть пары имён высокая (FUZZY_NAME_SIM_THRESHOLD) и каждая команда
+    по отдельности тоже похожа (FUZZY_NAME_MIN_SINGLE_RATIO, защита от
+    «одна команда 100% совпала, другая — нет»), объединяем соответствующие
+    ИМЕНА через DSU. НЕ объединяем события одной и той же БК — это заведомо
+    разные матчи. Итоговая склейка события ВСЁ РАВНО дополнительно
+    проверяется по времени старта в _time_clusters с допуском конкретного
+    вида спорта — ошибочное слияние имён само по себе ложную вилку не
+    создаст.
+    """
+    raw_events: dict[tuple, tuple[str, float]] = {}
+    bk_by_teams: dict[frozenset, set[str]] = defaultdict(set)
+    for o in odds:
+        if o.kind != KIND_PREMATCH or not o.start_ts:
+            continue
+        t1, t2 = norm_team(o.team1), norm_team(o.team2)
+        if not t1 or not t2 or t1 == t2:
+            continue
+        teams = frozenset((t1, t2))
+        key = (o.bookmaker, teams)
+        if key not in raw_events:
+            raw_events[key] = (o.sport, o.start_ts)
+            bk_by_teams[teams].add(o.bookmaker)
+
+    buckets: dict[str, list[tuple]] = defaultdict(list)
+    for (bookmaker, teams), (sport, start_ts) in raw_events.items():
+        if len(bk_by_teams[teams]) >= 2:
+            continue  # уже совпало ТОЧНО у 2+ БК — фаззи-поиск не нужен
+        root = sport.split("·")[0].strip().lower().replace("ё", "е")
+        buckets[root].append((bookmaker, teams, start_ts, sport))
+
+    dsu = _UnionFind()
+    for root, items in buckets.items():
+        items.sort(key=lambda x: x[2])  # по start_ts
+        cap = _fuzzy_window_cap(root)
+        n = len(items)
+        for i in range(n):
+            bk_i, teams_i, ts_i, sport_i = items[i]
+            tol_i = _start_tolerance(sport_i)
+            pair_i = tuple(teams_i)
+            len_i0, len_i1 = len(pair_i[0]), len(pair_i[1])
+            for j in range(i + 1, n):
+                bk_j, teams_j, ts_j, sport_j = items[j]
+                gap = ts_j - ts_i
+                if gap > cap:
+                    break  # отсортировано по времени — дальше только больше
+                if bk_i == bk_j or teams_i == teams_j:
+                    continue
+                tol_j = _start_tolerance(sport_j)
+                if gap > max(tol_i, tol_j):
+                    continue
+                pair_j = tuple(teams_j)
+                len_j0, len_j1 = len(pair_j[0]), len(pair_j[1])
+                straight_ok = (_len_compatible(len_i0, len_j0)
+                              and _len_compatible(len_i1, len_j1))
+                swapped_ok = (_len_compatible(len_i0, len_j1)
+                             and _len_compatible(len_i1, len_j0))
+                if not straight_ok and not swapped_ok:
+                    continue  # длины несовместимы ни в одной ориентации
+                straight = swapped = -1.0
+                if straight_ok:
+                    r00 = difflib.SequenceMatcher(None, pair_i[0], pair_j[0]).ratio()
+                    r11 = difflib.SequenceMatcher(None, pair_i[1], pair_j[1]).ratio()
+                    straight = (r00 + r11) / 2
+                if swapped_ok:
+                    r01 = difflib.SequenceMatcher(None, pair_i[0], pair_j[1]).ratio()
+                    r10 = difflib.SequenceMatcher(None, pair_i[1], pair_j[0]).ratio()
+                    swapped = (r01 + r10) / 2
+                if straight >= swapped:
+                    avg, ra, rb = straight, r00, r11
+                    match0, match1 = pair_j[0], pair_j[1]
+                else:
+                    avg, ra, rb = swapped, r01, r10
+                    match0, match1 = pair_j[1], pair_j[0]
+                if avg < FUZZY_NAME_SIM_THRESHOLD:
+                    continue
+                if ra < FUZZY_NAME_MIN_SINGLE_RATIO \
+                        or rb < FUZZY_NAME_MIN_SINGLE_RATIO:
+                    continue
+                if pair_i[0] != match0:
+                    dsu.union(pair_i[0], match0)
+                if pair_i[1] != match1:
+                    dsu.union(pair_i[1], match1)
+
+    return {name: dsu.find(name) for name in dsu._parent}
+
+
+def _canon(name_map: dict[str, str] | None, name: str) -> str:
+    return name_map.get(name, name) if name_map else name
 
 
 def calc_stakes(k1: float, k2: float, bank: float) -> dict:
@@ -86,23 +251,28 @@ class _Outcome:
         self.url = url
 
 
-def _explode(o: MarketOdds):
+def _explode(o: MarketOdds, name_map: dict[str, str] | None = None):
     """Разбивает котировку на два канонических исхода (id, метка, кэф).
 
     id — устойчивый между БК идентификатор исхода:
-    - победитель: нормализованное имя команды;
+    - победитель: нормализованное (и, если есть, фаззи-каноничное — см.
+      build_name_canon_map) имя команды;
     - тотал: 'over:<pt>' / 'under:<pt>';
     - фора: 'hcap:<команда>:<знаковая линия>' — исход привязан к КОМАНДЕ и
       её линии. Фора team1(-1.5) сшивается с team2(+1.5) другой БК как две
       стороны одного рынка, а team1(+1.5) — уже другой рынок (другой
       фаворит), ложных вилок не будет.
+
+    name_map — соответствие «сырое имя → каноническое» (build_name_canon_map):
+    без него, если БК пишут имя команды чуть по-разному, «Победитель»/фора/
+    инд.тотал не сошьются между БК даже при совпавшем событии.
     """
     if o.market_key.startswith("itotal"):
         # itotal:<сторона 1|2>:<scope>:<линия> — тотал ОДНОЙ команды.
         # Исход привязан к нормализованному имени команды: у БК с
         # перевёрнутым порядком команд тот же рынок сшивается корректно.
         _, side, scope, pt = o.market_key.split(":", 3)
-        team = norm_team(o.team1 if side == "1" else o.team2)
+        team = _canon(name_map, norm_team(o.team1 if side == "1" else o.team2))
         return [
             (f"itover:{team}:{scope}:{pt}", o.outcome1, o.k1),
             (f"itunder:{team}:{scope}:{pt}", o.outcome2, o.k2),
@@ -116,9 +286,11 @@ def _explode(o: MarketOdds):
     if o.market_key.startswith("hcap"):
         # hcap:<scope>:<линия team1>
         h1 = o.market_key.rsplit(":", 1)[1]
+        t1 = _canon(name_map, norm_team(o.team1))
+        t2 = _canon(name_map, norm_team(o.team2))
         return [
-            (f"hcap:{norm_team(o.team1)}:{h1}", o.outcome1, o.k1),
-            (f"hcap:{norm_team(o.team2)}:{_neg_hcap(h1)}", o.outcome2, o.k2),
+            (f"hcap:{t1}:{h1}", o.outcome1, o.k1),
+            (f"hcap:{t2}:{_neg_hcap(h1)}", o.outcome2, o.k2),
         ]
     if o.market_key.startswith("bothscore"):
         # «Обе забьют»: исходы Да/Нет не зависят от порядка команд
@@ -134,29 +306,33 @@ def _explode(o: MarketOdds):
         ]
     # победитель (в т.ч. дочерние росписи вроде winner:2сет)
     return [
-        (f"team:{norm_team(o.team1)}", o.outcome1, o.k1),
-        (f"team:{norm_team(o.team2)}", o.outcome2, o.k2),
+        (f"team:{_canon(name_map, norm_team(o.team1))}", o.outcome1, o.k1),
+        (f"team:{_canon(name_map, norm_team(o.team2))}", o.outcome2, o.k2),
     ]
 
 
-def _market_group(o: MarketOdds) -> str:
+def _market_group(o: MarketOdds, name_map: dict[str, str] | None = None) -> str:
     """Ключ рынка, ОДИНАКОВЫЙ у обеих БК независимо от порядка команд.
 
     Для победителя/тотала подходит сам market_key. Для форы линия зависит
     от того, какая команда «первая», поэтому привязываем знак к
-    алфавитно-первой нормализованной команде — тогда обе стороны рынка
-    (и при перевёрнутом порядке команд у другой БК) попадают в одну группу.
-    Индивидуальный тотал привязываем к нормализованному ИМЕНИ команды —
-    сторона (1/2) у разных БК может быть разной.
+    алфавитно-первой нормализованной (каноничной — см. name_map) команде —
+    тогда обе стороны рынка (и при перевёрнутом порядке команд у другой БК)
+    попадают в одну группу. Без канонизации имени алфавитный порядок мог
+    отличаться между БК из-за опечатки/транслитерации в имени — и анкер
+    фор выбирался бы по-разному, ломая сопоставление. Индивидуальный тотал
+    привязываем к нормализованному ИМЕНИ команды — сторона (1/2) у разных
+    БК может быть разной.
     """
     if o.market_key.startswith("itotal"):
         _, side, scope, pt = o.market_key.split(":", 3)
-        team = norm_team(o.team1 if side == "1" else o.team2)
+        team = _canon(name_map, norm_team(o.team1 if side == "1" else o.team2))
         return f"itotal:{team}:{scope}:{pt}"
     if not o.market_key.startswith("hcap"):
         return o.market_key
     prefix, h1 = o.market_key.rsplit(":", 1)  # prefix = hcap:<scope>
-    a, b = norm_team(o.team1), norm_team(o.team2)
+    a = _canon(name_map, norm_team(o.team1))
+    b = _canon(name_map, norm_team(o.team2))
     anchor = h1 if a <= b else _neg_hcap(h1)
     return f"{prefix}:{anchor}"
 
@@ -187,7 +363,8 @@ def _start_tolerance(sport: str) -> float:
     return START_TS_TOLERANCE
 
 
-def _time_clusters(odds: list[MarketOdds]) -> dict[tuple, dict]:
+def _time_clusters(odds: list[MarketOdds],
+                   name_map: dict[str, str] | None = None) -> dict[tuple, dict]:
     """Кластеры времени старта по каждому событию (kind, пара команд).
 
     Одна и та же пара команд может играть НЕСКОЛЬКО матчей (первый и
@@ -199,12 +376,17 @@ def _time_clusters(odds: list[MarketOdds]) -> dict[tuple, dict]:
     (START_TS_TOLERANCE), для «быстрых» турниров с повторами пары —
     строгий (START_TS_TOLERANCE_RAPID), для единоборств — большой
     (START_TS_TOLERANCE_COMBAT): там время боя оценочное.
+
+    name_map (build_name_canon_map) сливает разные написания имени одной
+    команды между БК ДО группировки по паре команд — иначе такие пары
+    вообще не встретились бы в одном ключе события.
     """
     ts_by_event: dict[tuple, set] = defaultdict(set)
     tol_by_event: dict[tuple, float] = {}
     for o in odds:
         if o.kind == KIND_PREMATCH and o.start_ts:
-            teams = frozenset((norm_team(o.team1), norm_team(o.team2)))
+            teams = frozenset((_canon(name_map, norm_team(o.team1)),
+                               _canon(name_map, norm_team(o.team2))))
             key = (o.kind, teams)
             ts_by_event[key].add(o.start_ts)
             tol = _start_tolerance(o.sport)
@@ -224,9 +406,12 @@ def _time_clusters(odds: list[MarketOdds]) -> dict[tuple, dict]:
     return clusters
 
 
-def find_arbs(odds: Iterable[MarketOdds]) -> list[Arb]:
+def find_arbs(odds: Iterable[MarketOdds],
+              name_map: dict[str, str] | None = None) -> list[Arb]:
     odds = list(odds)
-    time_clusters = _time_clusters(odds)
+    if name_map is None:
+        name_map = build_name_canon_map(odds)
+    time_clusters = _time_clusters(odds, name_map)
 
     # market_group одинаков у одного рынка одного события независимо от БК
     # и порядка команд: kind | пара_команд | кластер_времени | вид_рынка
@@ -244,7 +429,8 @@ def find_arbs(odds: Iterable[MarketOdds]) -> list[Arb]:
             continue
         if not (o.k1 and o.k2 and o.k1 > 1 and o.k2 > 1):
             continue
-        teams = frozenset((norm_team(o.team1), norm_team(o.team2)))
+        teams = frozenset((_canon(name_map, norm_team(o.team1)),
+                           _canon(name_map, norm_team(o.team2))))
         if len(teams) < 2:
             continue
         # разные матчи одной пары команд (по времени старта) — разные группы
@@ -253,12 +439,12 @@ def find_arbs(odds: Iterable[MarketOdds]) -> list[Arb]:
             cluster = time_clusters.get((o.kind, teams), {}).get(o.start_ts, 0)
         # вид рынка: winner / winner:<роспись> / total:<pt> / hcap:<линия>.
         # Для форы группа привязана к алфавитно-первой команде (см. _market_group)
-        market_group = _market_group(o)
+        market_group = _market_group(o, name_map)
         key = (o.kind, teams, cluster, market_group)
         g = groups[key]
         g["sample"] = g["sample"] or o
         g["books"].add(o.bookmaker)
-        for oid, label, k in _explode(o):
+        for oid, label, k in _explode(o, name_map):
             # по каждому исходу храним лучший кэф КАЖДОЙ БК отдельно —
             # дальше перебираются все комбинации пар БК
             per_bk = g["outcomes"].setdefault(oid, {})
@@ -300,7 +486,7 @@ def find_arbs(odds: Iterable[MarketOdds]) -> list[Arb]:
                     continue
                 # порядок исходов: для победителя выравниваем к
                 # team1/team2 образца
-                first, second = _order(s, o1, o2)
+                first, second = _order(s, o1, o2, name_map)
                 if s.market_key.startswith(("total", "hcap", "bothscore",
                                             "itotal", "oddeven")):
                     # метки берём у образца (он ориентирован team1→team2),
@@ -332,7 +518,8 @@ def find_arbs(odds: Iterable[MarketOdds]) -> list[Arb]:
     return arbs
 
 
-def find_arbs_1x2(odds: Iterable[MarketOdds]) -> list[Arb3]:
+def find_arbs_1x2(odds: Iterable[MarketOdds],
+                  name_map: dict[str, str] | None = None) -> list[Arb3]:
     """Ищет ТРЁХисходные вилки на рынке «Исход 1X2» (П1/X/П2).
 
     Отдельный движок от find_arbs: рынок с тремя взаимоисключающими
@@ -341,7 +528,9 @@ def find_arbs_1x2(odds: Iterable[MarketOdds]) -> list[Arb3]:
     комбинаций и формула маржи — трёхсторонние.
     """
     odds = list(odds)
-    time_clusters = _time_clusters(odds)
+    if name_map is None:
+        name_map = build_name_canon_map(odds)
+    time_clusters = _time_clusters(odds, name_map)
 
     groups: dict[tuple, dict] = defaultdict(lambda: {
         "outcomes": {}, "sample": None, "books": set(),
@@ -353,7 +542,8 @@ def find_arbs_1x2(odds: Iterable[MarketOdds]) -> list[Arb3]:
         if not (o.k1 and o.k2 and o.k3
                 and o.k1 > 1 and o.k2 > 1 and o.k3 > 1):
             continue
-        teams = frozenset((norm_team(o.team1), norm_team(o.team2)))
+        teams = frozenset((_canon(name_map, norm_team(o.team1)),
+                           _canon(name_map, norm_team(o.team2))))
         if len(teams) < 2:
             continue
         cluster = 0
@@ -363,8 +553,8 @@ def find_arbs_1x2(odds: Iterable[MarketOdds]) -> list[Arb3]:
         g = groups[key]
         g["sample"] = g["sample"] or o
         g["books"].add(o.bookmaker)
-        t1_id = f"team:{norm_team(o.team1)}"
-        t2_id = f"team:{norm_team(o.team2)}"
+        t1_id = f"team:{_canon(name_map, norm_team(o.team1))}"
+        t2_id = f"team:{_canon(name_map, norm_team(o.team2))}"
         for oid, label, k in ((t1_id, o.outcome1, o.k1),
                               ("draw", o.outcome3 or "X", o.k3),
                               (t2_id, o.outcome2, o.k2)):
@@ -380,8 +570,8 @@ def find_arbs_1x2(odds: Iterable[MarketOdds]) -> list[Arb3]:
         if len(outs) != 3 or len(g["books"]) < 2:
             continue  # нужны все 3 исхода и минимум 2 БК
         s = g["sample"]
-        want_t1 = f"team:{norm_team(s.team1)}"
-        want_t2 = f"team:{norm_team(s.team2)}"
+        want_t1 = f"team:{_canon(name_map, norm_team(s.team1))}"
+        want_t2 = f"team:{_canon(name_map, norm_team(s.team2))}"
         if want_t1 not in outs or want_t2 not in outs or "draw" not in outs:
             continue
         legs = [outs[want_t1], outs["draw"], outs[want_t2]]
@@ -427,7 +617,8 @@ def find_arbs_1x2(odds: Iterable[MarketOdds]) -> list[Arb3]:
     return arbs
 
 
-def _order(sample: MarketOdds, o1: _Outcome, o2: _Outcome):
+def _order(sample: MarketOdds, o1: _Outcome, o2: _Outcome,
+          name_map: dict[str, str] | None = None):
     """Ставит первым исход, соответствующий team1 образца (или ТБ),
     чтобы столбцы в таблице совпадали с отображаемым матчем."""
     if sample.market_key.startswith("itotal"):
@@ -439,10 +630,10 @@ def _order(sample: MarketOdds, o1: _Outcome, o2: _Outcome):
     elif sample.market_key.startswith("oddeven"):
         first = o1 if o1.oid == "oe:even" else o2
     elif sample.market_key.startswith("hcap"):
-        want = f"hcap:{norm_team(sample.team1)}:"
+        want = f"hcap:{_canon(name_map, norm_team(sample.team1))}:"
         first = o1 if o1.oid.startswith(want) else o2
     else:
-        want = f"team:{norm_team(sample.team1)}"
+        want = f"team:{_canon(name_map, norm_team(sample.team1))}"
         first = o1 if o1.oid == want else o2
     second = o2 if first is o1 else o1
     return first, second

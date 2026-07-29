@@ -26,8 +26,13 @@
    это сигнал, что допуск времени старта слишком строгий (или одна из БК
    даёт неточное время) для части событий.
 6. «Почти совпадения»: события с похожими, но НЕ идентичными после
-   нормализации именами команд — кандидаты на баг в norm_team/парсинге
-   имени (отдельно от пункта 5, где имена идентичны).
+   нормализации именами команд — кандидаты на РЕАЛЬНЫЙ баг в написании
+   имени (отдельно от пункта 5, где имена идентичны). ВАЖНО: сканер сам
+   теперь автоматически сливает такие имена при похожести
+   ≥ FUZZY_NAME_SIM_THRESHOLD (build_name_canon_map в arbitrage.py) — этот
+   раздел использует ТОТ ЖЕ порог, поэтому показывает только то, что
+   сканер сознательно оставил НЕ склеенным (похожесть ниже порога —
+   рискованно сливать автоматически, разбирайте вручную).
 
 ВАЖНО: низкая доля вилок именно в футболе/хоккее/баскетболе при ВЫСОКОЙ
 доле совпадения событий — это, скорее всего, НЕ баг, а реальная
@@ -36,13 +41,13 @@
 нишевых рынках/спорта (тоталы по сетам в волейболе, небольшие турниры
 киберспорта) — там маржа между БК расходится сильнее.
 """
-import difflib
 import logging
 from collections import defaultdict
 from itertools import combinations
 
-from .arbitrage import _market_group, _start_tolerance, find_arbs, norm_team
-from .config import START_TS_TOLERANCE
+from .arbitrage import (_market_group, _start_tolerance,
+                        _team_pair_similarity, find_arbs, norm_team)
+from .config import FUZZY_NAME_SIM_THRESHOLD, START_TS_TOLERANCE
 from .models import KIND_PREMATCH
 from .parsers import get_parsers
 from .parsers.html_utils import format_start
@@ -52,22 +57,13 @@ logging.basicConfig(level=logging.INFO,
                     format="%(levelname)s %(name)s: %(message)s")
 
 # Порог похожести имён (0..1, difflib.SequenceMatcher.ratio) для «почти
-# совпадений» и допуск времени старта, сек.
+# совпадений» и допуск времени старта, сек. Ниже боевого
+# FUZZY_NAME_SIM_THRESHOLD — специально: пары С похожестью ВЫШЕ него сканер
+# уже сливает сам (build_name_canon_map), их тут почти не будет видно (кроме
+# отсеянных по FUZZY_NAME_MIN_SINGLE_RATIO/окну кандидатов).
 _NAME_SIM_THRESHOLD = 0.6
 _NEAR_TS_TOLERANCE = 3 * 3600
 _MAX_NEAR_MISSES = 40
-
-
-def _team_pair_similarity(a: tuple[str, str], b: tuple[str, str]) -> float:
-    """Похожесть двух пар имён команд (порядок не важен) — среднее по
-    лучшему сопоставлению команда↔команда."""
-    ratios = [
-        (difflib.SequenceMatcher(None, a[0], b[0]).ratio()
-         + difflib.SequenceMatcher(None, a[1], b[1]).ratio()) / 2,
-        (difflib.SequenceMatcher(None, a[0], b[1]).ratio()
-         + difflib.SequenceMatcher(None, a[1], b[0]).ratio()) / 2,
-    ]
-    return max(ratios)
 
 
 def main() -> None:
@@ -219,7 +215,10 @@ def main() -> None:
     # ---------- 6. похожие, но не идентичные имена ----------
     print("-" * 72)
     print("Ищу «почти совпадения» (похожие, но НЕ идентичные после "
-          "нормализации имена, близкое время старта)...")
+          "нормализации имена, близкое время старта)... Пары с похожестью "
+          f">= {FUZZY_NAME_SIM_THRESHOLD:.2f} сканер уже сливает сам "
+          "(build_name_canon_map) — здесь останутся в основном отсеянные "
+          "по этому же порогу пары ниже, для ручного разбора.")
     near_misses = []
     for i, (eid_a, sport_a, t1a, t2a, tsa) in enumerate(singles):
         if tsa is None or eid_a in exact_dup_ids:
