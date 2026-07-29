@@ -459,10 +459,13 @@ def test_grouping_survives_new_odds_for_a_short_while():
     sc = Scanner(mode=KIND_PREMATCH, parsers=[_Fake("БК")])
     sc._groups_ttl = 30
     sc._store_odds("БК1", _odds("БК1"))
-    assert sc.matches_snapshot()[0]["bookmakers"] == ["БК1"]
+    first = sc.matches_snapshot()
+    assert first[0]["bookmakers"] == ["БК1"]
     sc._store_odds("БК2", _odds("БК2"))
     # окно ещё не истекло — отдаём прежний разбор, не считая заново
-    assert sc.matches_snapshot()[0]["bookmakers"] == ["БК1"]
+    again = sc.matches_snapshot()
+    assert again[0]["bookmakers"] == ["БК1"]
+    assert again[0] is first[0], "и сам список матчей собран один раз"
     sc._drop_stale_groups()           # моложе окна — уборка его не тронет
     assert sc._groups_rev >= 0
     sc._groups_ttl = 0                # окно истекло

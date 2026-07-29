@@ -311,7 +311,9 @@ class Scanner:
         out.sort(key=lambda m: (m["start_ts"] or float("inf"),
                                 m["sport"], m["match"]))
         with self._lock:
-            if rev == self._odds_rev:
+            # список отвечает разбору, а не «самым свежим» котировкам: пока
+            # отдаётся тот же разбор, пересобирать список незачем
+            if self._groups_rev == rev:
                 self._matches = out
                 self._matches_rev = rev
         return list(out)
