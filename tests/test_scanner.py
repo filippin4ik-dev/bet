@@ -381,10 +381,11 @@ def test_bk_toggle_persisted_in_db():
     bk_control.set_enabled(name, False)
     assert bk_control.is_enabled(name) is False
     assert db.get_bool_setting(f"bk_enabled:{name}", True) is False
-    assert name in bk_control.disabled_names()
+    # с пустым кэшем (как после перезапуска процесса) флаг читается из базы
+    bk_control._cache.clear()
+    assert bk_control.is_enabled(name) is False
     bk_control.set_enabled(name, True)
     assert bk_control.is_enabled(name) is True
-    assert name not in bk_control.disabled_names()
 
 
 def test_new_arbs_saved_to_history_once():

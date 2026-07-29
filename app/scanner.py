@@ -100,7 +100,8 @@ class Scanner:
         # поток пересчёта, см. _recalc_worker)
         self._dirty = False
         # по потоку на каждую БК + поток пересчёта вилок
-        self._executor = ThreadPoolExecutor(max_workers=len(self.parsers) + 1,
+        self._pool_size = len(self.parsers) + 1
+        self._executor = ThreadPoolExecutor(max_workers=self._pool_size,
                                             thread_name_prefix=f"scan-{mode}")
         self._stop = asyncio.Event()
         # Пока флаг установлен, воркеры БК работают. Лайв снимает его на
@@ -522,12 +523,17 @@ class Scanner:
             return parser
 
     def _ensure_executor(self) -> None:
-        """Держит в пуле поток на каждую БК + поток пересчёта."""
+        """Держит в пуле поток на каждую БК + поток пересчёта.
+
+        После перезапуска БК в наборе может стать больше (включили новую
+        переменной окружения), а пул потоков не растягивается — тогда
+        последние БК ждали бы свободного потока вместо обхода."""
         need = len(self.parsers) + 1
-        if self._executor._max_workers >= need:  # noqa: SLF001
+        if self._pool_size >= need:
             return
         old, self._executor = self._executor, ThreadPoolExecutor(
             max_workers=need, thread_name_prefix=f"scan-{self.mode}")
+        self._pool_size = need
         old.shutdown(wait=False)
 
     async def _stop_workers(self, workers: list, reason: str) -> None:

@@ -42,9 +42,3 @@ def set_enabled(name: str, value: bool) -> None:
     db.set_bool_setting(_PREFIX + name, value)
     with _lock:
         _cache[name] = (time.monotonic(), value)
-
-
-def disabled_names() -> list[str]:
-    """Имена БК, выключенных в админке (по записям в базе)."""
-    return sorted(name for name, value in db.get_settings_prefix(_PREFIX).items()
-                  if value != "1")
