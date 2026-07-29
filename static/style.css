@@ -183,6 +183,7 @@ td.empty { text-align: center; color: var(--muted); padding: 32px; }
 .bk-liga    { color: #4ade80; }   /* Лига Ставок — зелёный */
 .bk-bcgame  { color: #c084fc; }   /* bc.game — фиолетовый */
 .bk-leon    { color: #facc15; }   /* LeonBet — жёлтый */
+.bk-betcity { color: #22d3ee; }   /* Betcity — голубой (циан) */
 .bk-other   { color: var(--muted); }
 
 .bk-chip {
