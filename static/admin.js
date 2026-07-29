@@ -321,34 +321,69 @@ function parserModeRow(label, info, offText) {
     </div>`;
 }
 
-async function loadParsers() {
-  const data = await api("/api/admin/parsers");
+/* Карточки БК живут между обновлениями: состояние подтягивается раз в
+ * несколько секунд, и если каждый раз перерисовывать плитку целиком, клик
+ * по галке, пришедшийся на этот момент, теряется вместе со старым узлом. */
+const parserCards = new Map();
+// БК, у которых переключение уже отправлено, но ответа ещё нет: их галку
+// фоновое обновление не трогает, иначе она моргала бы в старое состояние
+const parserPending = new Set();
+
+function newParserCard(name) {
+  const card = document.createElement("div");
+  card.className = "parser-card";
+  card.innerHTML = `
+    <div class="parser-card-head">
+      <span class="parser-name ${bkClass(name)}">${escapeHtml(name)}</span>
+      <label class="switch" title="Включить или выключить эту БК">
+        <input type="checkbox" class="parser-toggle" data-name="${escapeHtml(name)}">
+        <span class="switch-state"></span>
+      </label>
+    </div>
+    <div class="parser-rows"></div>
+    <div class="parser-actions">
+      <button class="soft-btn parser-restart" data-name="${escapeHtml(name)}">↻ Перезапустить</button>
+    </div>`;
+  return card;
+}
+
+function renderParsers(data) {
   els.parsersNote.textContent =
     `Прематч обновляет каждую БК раз в ${Math.round(data.scan_interval)} c` +
     (data.live_enabled ? ", лайв включён" : ", лайв выключен");
-  els.parserGrid.innerHTML = data.parsers.map((p) => `
-    <div class="parser-card ${p.enabled ? "" : "off"}">
-      <div class="parser-card-head">
-        <span class="parser-name ${bkClass(p.name)}">${escapeHtml(p.name)}</span>
-        <label class="switch" title="Включить или выключить эту БК">
-          <input type="checkbox" class="parser-toggle" data-name="${escapeHtml(p.name)}"
-                 ${p.enabled ? "checked" : ""}>
-          <span>${p.enabled ? "вкл" : "выкл"}</span>
-        </label>
-      </div>
-      <div class="parser-rows">
-        ${parserModeRow("Прематч", p.prematch, p.enabled ? "" : "БК выключена")}
-        ${parserModeRow("Лайв", p.live,
-          !p.supports_live ? "нет лайва у этой БК"
-            : !p.enabled ? "БК выключена"
-              : !data.live_enabled ? "лайв-сканер выключен" : "")}
-        ${p.min_refresh ? `<div class="parser-row"><span class="mode">Обход</span>
-            <span>не чаще раза в ${Math.round(p.min_refresh)} c</span></div>` : ""}
-      </div>
-      <div class="parser-actions">
-        <button class="soft-btn parser-restart" data-name="${escapeHtml(p.name)}">↻ Перезапустить</button>
-      </div>
-    </div>`).join("");
+  for (const p of data.parsers) {
+    let card = parserCards.get(p.name);
+    if (!card) {
+      card = newParserCard(p.name);
+      parserCards.set(p.name, card);
+      els.parserGrid.appendChild(card);
+    }
+    card.classList.toggle("off", !p.enabled);
+    if (!parserPending.has(p.name)) {
+      card.querySelector(".parser-toggle").checked = p.enabled;
+      card.querySelector(".switch-state").textContent = p.enabled ? "вкл" : "выкл";
+    }
+    card.querySelector(".parser-rows").innerHTML =
+      parserModeRow("Прематч", p.prematch, p.enabled ? "" : "БК выключена")
+      + parserModeRow("Лайв", p.live,
+        !p.supports_live ? "нет лайва у этой БК"
+          : !p.enabled ? "БК выключена"
+            : !data.live_enabled ? "лайв-сканер выключен" : "")
+      + (p.min_refresh ? `<div class="parser-row"><span class="mode">Обход</span>
+          <span>не чаще раза в ${Math.round(p.min_refresh)} c</span></div>` : "");
+  }
+  // БК могла уйти из набора (перезапуск сканера после смены настроек)
+  const alive = new Set(data.parsers.map((p) => p.name));
+  for (const [name, card] of parserCards) {
+    if (!alive.has(name)) {
+      card.remove();
+      parserCards.delete(name);
+    }
+  }
+}
+
+async function loadParsers() {
+  renderParsers(await api("/api/admin/parsers"));
 }
 
 const BK_CLASS = {
@@ -362,6 +397,7 @@ els.parserGrid.addEventListener("change", async (e) => {
   const box = e.target.closest(".parser-toggle");
   if (!box) return;
   const name = box.dataset.name;
+  parserPending.add(name);
   try {
     await api(`/api/admin/parsers/${encodeURIComponent(name)}`, {
       method: "POST",
@@ -371,6 +407,8 @@ els.parserGrid.addEventListener("change", async (e) => {
   } catch (err) {
     box.checked = !box.checked;
     toast(err.message || "Не удалось изменить", "error");
+  } finally {
+    parserPending.delete(name);
   }
   await loadParsers();
 });
