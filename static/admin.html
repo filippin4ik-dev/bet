@@ -3,37 +3,142 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="color-scheme" content="dark light">
 <title>Админка — Сканер вилок</title>
 <link rel="stylesheet" href="/static/style.css">
 <link rel="stylesheet" href="/static/admin.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='26'>⚙</text></svg>">
+<script src="/static/theme.js"></script>
 </head>
 <body>
 <header>
-  <h1>Админка <span class="accent">Сканер вилок</span></h1>
-  <div class="status-bar">
-    <span id="whoami" class="badge"></span>
-    <a href="/" class="badge">← к вилкам</a>
-    <button id="logout-btn" class="badge" hidden>Выйти</button>
+  <div class="header-top">
+    <h1>
+      <span class="logo">⚙</span>
+      Админка <span class="accent">сканера</span>
+    </h1>
+    <div class="header-actions">
+      <span id="whoami" class="badge"></span>
+      <button type="button" class="icon-btn" id="theme-toggle" title="Сменить тему">🌙</button>
+      <a href="/" class="ghost-btn">← К вилкам</a>
+      <button id="logout-btn" class="ghost-btn" hidden>Выйти</button>
+    </div>
   </div>
 </header>
 
-<section id="login-view" class="admin-panel">
-  <h2>Вход в админку</h2>
-  <form id="login-form" class="admin-form">
-    <label>Логин
-      <input type="text" id="login-username" autocomplete="username" required>
-    </label>
-    <label>Пароль
-      <input type="password" id="login-password" autocomplete="current-password" required>
-    </label>
-    <button type="submit">Войти</button>
-    <div id="login-error" class="admin-error" hidden></div>
-  </form>
+<section id="login-view" class="gate">
+  <div class="gate-card">
+    <div class="gate-logo">⚙</div>
+    <h1>Вход в админку</h1>
+    <p class="gate-hint">Аккаунты БК, парсеры и защита сайта — только для администратора.</p>
+    <form id="login-form">
+      <label class="gate-field">
+        <span>Логин</span>
+        <input type="text" id="login-username" autocomplete="username" required>
+      </label>
+      <label class="gate-field">
+        <span>Пароль</span>
+        <input type="password" id="login-password" autocomplete="current-password" required>
+      </label>
+      <button type="submit" id="gate-submit">Войти</button>
+      <div id="login-error" class="gate-error" hidden></div>
+    </form>
+  </div>
 </section>
 
 <main id="admin-view" hidden>
-  <section class="admin-panel">
-    <h2>Аккаунты букмекеров</h2>
+  <nav class="admin-nav" id="admin-nav">
+    <a href="#panel-scanner">Сканер</a>
+    <a href="#panel-parsers">Парсеры БК</a>
+    <a href="#panel-access">Доступ к сайту</a>
+    <a href="#panel-accounts">Аккаунты БК</a>
+    <a href="#panel-autobet">Авто-ставки</a>
+    <a href="#panel-betlog">Журнал ставок</a>
+  </nav>
+
+  <section class="admin-panel" id="panel-scanner">
+    <div class="panel-head">
+      <h2>🛰 Сканер</h2>
+      <span id="scanner-state" class="panel-note"></span>
+    </div>
+    <p class="admin-hint">
+      Лайв-сканер работает отдельным быстрым циклом и делит с прематчем
+      процессор и сеть. На слабом VPS его лучше выключить: тогда все ресурсы
+      уходят прематчу — БК обновляются чаще и успевают отдать линию целиком.
+      Выключение сохраняется и после перезапуска сервера.
+    </p>
+    <div class="admin-form-row">
+      <label class="switch">
+        <input type="checkbox" id="setting-live-enabled">
+        <span>Лайв-сканер включён</span>
+      </label>
+      <button id="save-scanner-btn" class="primary-btn">Применить</button>
+    </div>
+    <div class="admin-form-row restart-row">
+      <button id="restart-prematch-btn" class="soft-btn">↻ Перезапустить прематч</button>
+      <button id="restart-live-btn" class="soft-btn">↻ Перезапустить лайв</button>
+      <button id="restart-app-btn" class="danger-btn">⏻ Перезапустить сервер</button>
+    </div>
+    <p class="admin-hint">
+      Перезапуск сканера пересоздаёт все парсеры: новые сессии, новые cookie,
+      котировки с чистого листа. Перезапуск сервера поднимает процесс заново
+      (нужен после смены переменных окружения или обновления кода) — сайт
+      будет недоступен несколько секунд.
+    </p>
+  </section>
+
+  <section class="admin-panel" id="panel-parsers">
+    <div class="panel-head">
+      <h2>🔌 Парсеры букмекеров</h2>
+      <span class="panel-note" id="parsers-note"></span>
+    </div>
+    <p class="admin-hint">
+      Каждую БК можно выключить, не трогая остальные: выключенная не
+      опрашивается вообще, её котировки убираются из вилок, и решение
+      переживает перезапуск. Кнопка «Перезапустить» пересоздаёт парсер одной
+      БК — помогает, когда БК отвечает, но линия перестала обновляться.
+    </p>
+    <div class="parser-grid" id="parser-grid"></div>
+  </section>
+
+  <section class="admin-panel" id="panel-access">
+    <div class="panel-head">
+      <h2>🔒 Доступ к сайту</h2>
+      <span class="panel-note" id="access-state"></span>
+    </div>
+    <p class="admin-hint">
+      Пока пароль не задан и белый список пуст, сайт видит любой, кто знает
+      адрес сервера. Пароль закрывает весь сайт (вилки, линию, страницу
+      админки); адреса из белого списка входят без пароля. Пароль хранится
+      в базе только хэшем.
+    </p>
+    <div class="admin-form">
+      <label>Новый пароль доступа (пусто — не менять)
+        <input type="password" id="access-password" autocomplete="new-password"
+               placeholder="минимум 4 символа">
+      </label>
+      <label>Белый список IP и подсетей — по одному в строке
+        <textarea id="access-whitelist" rows="3"
+                  placeholder="203.0.113.7&#10;198.51.100.0/24"></textarea>
+      </label>
+      <label class="switch">
+        <input type="checkbox" id="access-ip-only">
+        <span>Строгий режим: пускать только адреса из списка</span>
+      </label>
+      <div class="admin-form-row">
+        <button id="save-access-btn" class="primary-btn">Сохранить</button>
+        <button id="clear-access-btn" class="soft-btn">Снять пароль</button>
+        <button id="add-my-ip-btn" class="soft-btn">+ Мой адрес</button>
+      </div>
+      <div id="access-error" class="admin-error" hidden></div>
+    </div>
+  </section>
+
+  <section class="admin-panel" id="panel-accounts">
+    <div class="panel-head">
+      <h2>👤 Аккаунты букмекеров</h2>
+      <button id="add-account-btn" class="primary-btn">+ Добавить аккаунт</button>
+    </div>
     <p class="admin-hint">
       Логин/пароль хранятся в базе в зашифрованном виде. Баланс аккаунта
       используется для расчёта индивидуального лимита ставки (max_stake)
@@ -42,48 +147,36 @@
       всех БК: если чтение баланса упадёт с ошибкой — текст ошибки
       подскажет причину (капча, анти-бот-блок IP, неверный селектор).
     </p>
-    <p class="admin-hint">
-      🍪 <b>Вход по cookie (альтернатива автологину).</b> Если у БК капча
-      при входе (напр. BetBoom) или анти-бот блокирует IP сервера (напр.
-      Fonbet) — залогиньтесь в личный кабинет вручную в СВОЁМ браузере,
-      скопируйте заголовок <code>Cookie</code> залогиненного запроса
-      (DevTools → Network → любой XHR-запрос к сайту БК → Headers →
-      Request Headers → Cookie) и вставьте его в поле «Cookie» при
-      добавлении аккаунта или кнопкой «🍪» в таблице. Бот подставит эту
-      cookie в браузер вместо формы логина — капча/СМС-код при этом
-      обходятся, т.к. они относятся только к самому входу, а не к уже
-      авторизованной сессии. Cookie рано или поздно протухнет — тогда
-      обновите её тем же способом.
-    </p>
-    <table class="admin-table" id="accounts-table">
-      <thead>
-        <tr>
-          <th>БК</th><th>Метка</th><th>Логин</th><th>Cookie</th>
-          <th>Баланс</th><th>Обновлён</th><th>Статус</th><th>Вкл</th><th></th>
-        </tr>
-      </thead>
-      <tbody id="accounts-body"></tbody>
-    </table>
-    <button id="add-account-btn">+ Добавить аккаунт</button>
-  </section>
-
-  <section class="admin-panel">
-    <h2>Сканер</h2>
-    <p class="admin-hint">
-      Лайв-сканер работает отдельным быстрым циклом и делит с прематчем
-      процессор и сеть. На слабом VPS его лучше выключить: тогда все
-      ресурсы уходят прематчу — БК обновляются чаще и успевают отдать
-      линию целиком. Выключение сохраняется и после перезапуска сервера.
-    </p>
-    <div class="admin-form-row">
-      <label><input type="checkbox" id="setting-live-enabled"> Лайв-сканер включён</label>
-      <button id="save-scanner-btn">Применить</button>
-      <span id="scanner-state" class="admin-hint"></span>
+    <details class="admin-details">
+      <summary>🍪 Вход по cookie — когда автологин не проходит</summary>
+      <p class="admin-hint">
+        Если у БК капча при входе (напр. BetBoom) или анти-бот блокирует IP
+        сервера (напр. Fonbet) — залогиньтесь в личный кабинет вручную в
+        СВОЁМ браузере, скопируйте заголовок <code>Cookie</code>
+        залогиненного запроса (DevTools → Network → любой XHR-запрос к сайту
+        БК → Headers → Request Headers → Cookie) и вставьте его в поле
+        «Cookie» при добавлении аккаунта или кнопкой «🍪» в таблице. Бот
+        подставит эту cookie в браузер вместо формы логина — капча/СМС-код
+        при этом обходятся, т.к. они относятся только к самому входу, а не к
+        уже авторизованной сессии. Cookie рано или поздно протухнет — тогда
+        обновите её тем же способом.
+      </p>
+    </details>
+    <div class="table-scroll">
+      <table class="admin-table" id="accounts-table">
+        <thead>
+          <tr>
+            <th>БК</th><th>Метка</th><th>Логин</th><th>Cookie</th>
+            <th>Баланс</th><th>Обновлён</th><th>Статус</th><th>Вкл</th><th></th>
+          </tr>
+        </thead>
+        <tbody id="accounts-body"></tbody>
+      </table>
     </div>
   </section>
 
-  <section class="admin-panel">
-    <h2>Авто-ставки</h2>
+  <section class="admin-panel" id="panel-autobet">
+    <h2>⚡ Авто-ставки</h2>
     <p class="admin-hint admin-warning">
       ⚠️ Автоматическая постановка ставки — риск бана аккаунта у
       букмекера (вилочников банят/лимитируют почти все БК) и риск ошибки
@@ -92,9 +185,11 @@
       кнопки в логике, но реального запроса на сайт БК не делает.
     </p>
     <div class="admin-form-row">
-      <label><input type="checkbox" id="setting-enabled"> Разрешить авто-ставки (AUTOBET_ENABLED)</label>
-      <label><input type="checkbox" id="setting-dry-run"> Режим имитации, без реальных ставок (AUTOBET_DRY_RUN)</label>
-      <button id="save-settings-btn">Сохранить</button>
+      <label class="switch"><input type="checkbox" id="setting-enabled">
+        <span>Разрешить авто-ставки (AUTOBET_ENABLED)</span></label>
+      <label class="switch"><input type="checkbox" id="setting-dry-run">
+        <span>Режим имитации, без реальных ставок (AUTOBET_DRY_RUN)</span></label>
+      <button id="save-settings-btn" class="primary-btn">Сохранить</button>
     </div>
     <p class="admin-hint">
       Лимит одной ставки: не более <span id="limit-fraction"></span> от
@@ -104,23 +199,27 @@
     </p>
   </section>
 
-  <section class="admin-panel">
-    <h2>Журнал ставок</h2>
-    <table class="admin-table" id="betlog-table">
-      <thead>
-        <tr>
-          <th>Время</th><th>Матч</th><th>Рынок</th><th>Доходность</th>
-          <th>Режим</th><th>Итог</th><th>Ноги</th>
-        </tr>
-      </thead>
-      <tbody id="betlog-body"></tbody>
-    </table>
+  <section class="admin-panel" id="panel-betlog">
+    <h2>📜 Журнал ставок</h2>
+    <div class="table-scroll">
+      <table class="admin-table" id="betlog-table">
+        <thead>
+          <tr>
+            <th>Время</th><th>Матч</th><th>Рынок</th><th>Доходность</th>
+            <th>Режим</th><th>Итог</th><th>Ноги</th>
+          </tr>
+        </thead>
+        <tbody id="betlog-body"></tbody>
+      </table>
+    </div>
   </section>
 </main>
 
 <div id="account-modal" class="modal-backdrop" hidden>
   <div class="modal">
-    <h3>Добавить аккаунт БК</h3>
+    <div class="modal-head">
+      <h2>Добавить аккаунт БК</h2>
+    </div>
     <form id="account-form" class="admin-form">
       <label>Букмекер
         <select id="account-bookmaker"></select>
@@ -134,17 +233,19 @@
       <label>Пароль
         <input type="password" id="account-password" required>
       </label>
-      <label>Cookie (необязательно, см. подсказку выше)
+      <label>Cookie (необязательно, см. подсказку в разделе аккаунтов)
         <textarea id="account-cookies" rows="3" placeholder="name1=value1; name2=value2 …"></textarea>
       </label>
       <div class="modal-actions">
-        <button type="button" id="account-cancel">Отмена</button>
-        <button type="submit">Добавить</button>
+        <button type="button" id="account-cancel" class="soft-btn">Отмена</button>
+        <button type="submit" class="primary-btn">Добавить</button>
       </div>
       <div id="account-error" class="admin-error" hidden></div>
     </form>
   </div>
 </div>
+
+<div class="toast-host" id="toast-host"></div>
 
 <script src="/static/admin.js"></script>
 </body>

@@ -13,6 +13,11 @@ const els = {
   arbsTable: document.getElementById("arbs-table"),
   arbs1x2Table: document.getElementById("arbs1x2-table"),
   matchesTable: document.getElementById("matches-table"),
+  // карточки-обёртки таблиц: скрывать надо их, иначе от спрятанной таблицы
+  // остаётся пустая рамка
+  arbsCard: document.getElementById("arbs-card"),
+  arbs1x2Card: document.getElementById("arbs1x2-card"),
+  matchesCard: document.getElementById("matches-card"),
   matchDetail: document.getElementById("match-detail"),
   detailTitle: document.getElementById("detail-title"),
   detailMeta: document.getElementById("detail-meta"),
@@ -22,6 +27,8 @@ const els = {
   search: document.getElementById("search"),
   sportFilter: document.getElementById("sport-filter"),
   bkFilter: document.getElementById("bk-filter"),
+  resetFilters: document.getElementById("reset-filters"),
+  toastHost: document.getElementById("toast-host"),
   minProfit: document.getElementById("min-profit"),
   minProfitLabel: document.getElementById("min-profit-label"),
   bank: document.getElementById("bank"),
@@ -209,6 +216,16 @@ function cmp(a, b, key) {
 // Корневой вид спорта: «Футбол · США. MLS» -> «Футбол»
 const rootSport = (s) => String(s).split(" · ")[0].trim();
 
+/* Ячейка спорта: вид спорта заметно, турнир — второй строкой и мельче.
+ * Одной строкой «Киберспорт · Marvel Rivals. Ignite: Mid Season Finals. Bo3»
+ * занимала пол-таблицы, а глазом всё равно ищут вид спорта. */
+function sportCell(sport) {
+  const [root, ...rest] = String(sport).split(" · ");
+  const league = rest.join(" · ").trim();
+  return `<span class="sport-root">${escapeHtml(root)}</span>` +
+    (league ? `<span class="sport-league">${escapeHtml(league)}</span>` : "");
+}
+
 // Все БК, участвующие в строке: у матча — список БК, у вилки — БК её плеч
 // (в т.ч. третьего, ничейного, у вилок 1X2).
 function rowBookmakers(r) {
@@ -279,6 +296,9 @@ function escapeHtml(s) {
 /* ---------- отрисовка ---------- */
 
 const fmtMoney = (n) => Number(n).toLocaleString("ru-RU") + " ₽";
+// В таблице рубли выносим в заголовок столбца («Ставка 1, ₽»): 12 столбцов
+// и без повторяющегося знака еле влезают в ноутбучный экран.
+const fmtNum = (n) => Number(n).toLocaleString("ru-RU");
 
 function startLabel(r) {
   if (r.kind === "live") return null;
@@ -339,11 +359,11 @@ function renderMatches() {
     return;
   }
   els.matchesBody.innerHTML = rows.map((m) => `<tr class="match-row" data-id="${escapeHtml(m.id)}">
-      <td>${startCell(m)}</td>
-      <td>${escapeHtml(m.sport)}</td>
-      <td class="match-name">${escapeHtml(m.match)}</td>
-      <td>${(m.bookmakers || []).map(bkChip).join(" ")}</td>
-      <td class="num">${m.markets_count}</td>
+      <td data-label="Начало">${startCell(m)}</td>
+      <td data-label="Спорт" class="sport">${sportCell(m.sport)}</td>
+      <td data-label="Матч" class="match-name">${escapeHtml(m.match)}</td>
+      <td data-label="БК">${(m.bookmakers || []).map(bkChip).join(" ")}</td>
+      <td data-label="Рынков" class="num">${m.markets_count}</td>
     </tr>`).join("");
 }
 
@@ -377,10 +397,10 @@ function renderDetail() {
       : body;
   }).join(" ");
   els.detailBody.innerHTML = d.markets.map((m) => `<tr>
-      <td class="market-name">${escapeHtml(m.market)}</td>
-      <td><span class="out">${escapeHtml(m.outcome1)}</span> ${cell(m, 1)}</td>
-      <td>${m.outcome3 ? `<span class="out">${escapeHtml(m.outcome3)}</span> ${cell(m, 3)}` : '<span class="muted">—</span>'}</td>
-      <td><span class="out">${escapeHtml(m.outcome2)}</span> ${cell(m, 2)}</td>
+      <td data-label="Рынок" class="market-name">${escapeHtml(m.market)}</td>
+      <td data-label="Исход 1"><span class="out">${escapeHtml(m.outcome1)}</span> ${cell(m, 1)}</td>
+      <td data-label="Ничья">${m.outcome3 ? `<span class="out">${escapeHtml(m.outcome3)}</span> ${cell(m, 3)}` : '<span class="muted">—</span>'}</td>
+      <td data-label="Исход 2"><span class="out">${escapeHtml(m.outcome2)}</span> ${cell(m, 2)}</td>
     </tr>`).join("");
 }
 
@@ -393,17 +413,35 @@ function renderBkCounts(bookmakers) {
   // Каждая БК обновляется в своём темпе (медленная не тормозит быструю).
   // Возраст котировок показываем всегда, а у той, которую опрашивают прямо
   // сейчас, добавляем пометку: обход БК идёт десятки секунд, и без неё
-  // непонятно, БК «зависла» или как раз качает линию.
-  const parts = Object.entries(bookmakers || {}).map(([bk, v]) => {
+  // непонятно, БК «зависла» или как раз качает линию. Выключенную в админке
+  // БК видно отдельно — иначе её исчезновение из шапки выглядит как сбой.
+  const chips = Object.entries(bookmakers || {}).map(([bk, v]) => {
     const cls = bkClass(bk);
-    if (typeof v === "number") return `<span class="${cls}">${escapeHtml(bk)}: ${v}</span>`;
-    const fresh = v.count ? age(v.age_sec) : "";
-    const note = v.busy ? [fresh, "обновляется…"].filter(Boolean).join(", ")
-      : fresh;
-    if (!note) return `<span class="${cls}">${escapeHtml(bk)}: ${v.count}</span>`;
-    return `<span class="${cls}">${escapeHtml(bk)}: ${v.count}</span> <span class="muted">(${note})</span>`;
+    const count = typeof v === "number" ? v : v.count;
+    const state = typeof v === "number" ? {} : v;
+    const note = state.off
+      ? "выключена"
+      : [state.count ? age(state.age_sec) : "", state.busy ? "обновляется…" : ""]
+        .filter(Boolean).join(", ");
+    const extra = [state.busy ? "busy" : "", state.off ? "off" : ""].join(" ").trim();
+    return `<span class="bk-fresh ${cls} ${extra}" title="${escapeHtml(bk)}">
+        <span class="dot"></span>${escapeHtml(bk)}
+        <span class="bk-count">${count}</span>
+        ${note ? `<span class="bk-note">${note}</span>` : ""}
+      </span>`;
   });
-  els.bkCounts.innerHTML = parts.length ? parts.join(" · ") : "";
+  els.bkCounts.innerHTML = chips.join("");
+}
+
+/* Всплывающие плашки вместо alert(): о таких мелочах, как «сумма
+ * скопирована» или «сервер не ответил», незачем спрашивать разрешения. */
+function toast(message, kind = "") {
+  if (!els.toastHost) return;
+  const el = document.createElement("div");
+  el.className = `toast ${kind}`.trim();
+  el.textContent = message;
+  els.toastHost.appendChild(el);
+  setTimeout(() => el.remove(), 3200);
 }
 
 /* Закреплённые вилки: клик по строке «пришпиливает» её к верху таблицы —
@@ -421,7 +459,7 @@ function togglePin(key) {
 
 function renderArbs() {
   const bank = els.bank.value;
-  els.arbCount.textContent = `Вилок: ${lastArbs.length}`;
+  els.arbCount.innerHTML = `Вилок <b>${lastArbs.length}</b>`;
   const rows = applySort(applyFilters(lastArbs));
 
   // живые закреплённые — всегда сверху, в порядке закрепления и без
@@ -447,19 +485,21 @@ function renderArbs() {
     const cls = ["arb-row"];
     if (pinned) cls.push("pinned");
     if (a.profit_pct > soundAlertProfit) cls.push("hot");
+    // data-label подписывает ячейку на телефоне, где таблица превращается
+    // в карточки (см. @media в style.css)
     return `<tr class="${cls.join(" ")}" data-key="${escapeHtml(a.match_key)}"
         title="${pinned ? "Клик — открепить" : "Клик — закрепить вилку сверху"}">
-      <td>${pinned ? "📌 " : ""}${startCell(a)}</td>
-      <td>${escapeHtml(a.sport)}</td>
-      <td>${escapeHtml(a.match)}</td>
-      <td>${escapeHtml(a.market)}</td>
-      <td><span class="out">${escapeHtml(a.outcome1)}</span> <span class="coef">${a.k1_max.toFixed(2)}</span> ${bkChip(a.k1_bookmaker)}</td>
-      <td><span class="out">${escapeHtml(a.outcome2)}</span> <span class="coef">${a.k2_max.toFixed(2)}</span> ${bkChip(a.k2_bookmaker)}</td>
-      <td class="profit">${a.profit_pct.toFixed(2)} %</td>
-      <td class="num arb-age" data-first-seen="${a.first_seen || ""}">${fmtAge(a.first_seen)}</td>
-      <td class="stake">${fmtMoney(st.stake1)} <span class="bk">${escapeHtml(a.outcome1)} · ${escapeHtml(a.k1_bookmaker)}</span></td>
-      <td class="stake">${fmtMoney(st.stake2)} <span class="bk">${escapeHtml(a.outcome2)} · ${escapeHtml(a.k2_bookmaker)}</span></td>
-      <td class="stake">+${fmtMoney(st.profit)}</td>
+      <td data-label="Начало">${pinned ? "📌 " : ""}${startCell(a)}</td>
+      <td data-label="Спорт" class="sport">${sportCell(a.sport)}</td>
+      <td data-label="Матч">${escapeHtml(a.match)}</td>
+      <td data-label="Рынок">${escapeHtml(a.market)}</td>
+      <td data-label="Исход 1"><span class="out">${escapeHtml(a.outcome1)}</span> <span class="coef">${a.k1_max.toFixed(2)}</span> ${bkChip(a.k1_bookmaker)}</td>
+      <td data-label="Исход 2"><span class="out">${escapeHtml(a.outcome2)}</span> <span class="coef">${a.k2_max.toFixed(2)}</span> ${bkChip(a.k2_bookmaker)}</td>
+      <td data-label="Доходность"><span class="profit">${a.profit_pct.toFixed(2)} %</span></td>
+      <td data-label="Живёт" class="num arb-age" data-first-seen="${a.first_seen || ""}">${fmtAge(a.first_seen)}</td>
+      <td data-label="Ставка 1" class="stake">${fmtNum(st.stake1)}</td>
+      <td data-label="Ставка 2" class="stake">${fmtNum(st.stake2)}</td>
+      <td data-label="Прибыль" class="stake profit-cell">+${fmtNum(st.profit)}</td>
       <td><button type="button" class="bet-btn" data-key="${escapeHtml(a.match_key)}">Поставить</button></td>
     </tr>`;
   }).join("");
@@ -502,24 +542,38 @@ function renderArbs1x2() {
     if (a.profit_pct > soundAlertProfit) cls.push("hot");
     return `<tr class="${cls.join(" ")}" data-key="${escapeHtml(a.match_key)}"
         title="${pinned ? "Клик — открепить" : "Клик — закрепить вилку сверху"}">
-      <td>${pinned ? "📌 " : ""}${startCell(a)}</td>
-      <td>${escapeHtml(a.sport)}</td>
-      <td>${escapeHtml(a.match)}</td>
-      <td><span class="out">П1</span> <span class="coef">${a.k1_max.toFixed(2)}</span> ${bkChip(a.k1_bookmaker)}</td>
-      <td><span class="out">X</span> <span class="coef">${a.kx_max.toFixed(2)}</span> ${bkChip(a.kx_bookmaker)}</td>
-      <td><span class="out">П2</span> <span class="coef">${a.k2_max.toFixed(2)}</span> ${bkChip(a.k2_bookmaker)}</td>
-      <td class="profit">${a.profit_pct.toFixed(2)} %</td>
-      <td class="num arb-age" data-first-seen="${a.first_seen || ""}">${fmtAge(a.first_seen)}</td>
-      <td class="stake">${fmtMoney(st.stake1)}</td>
-      <td class="stake">${fmtMoney(st.stakex)}</td>
-      <td class="stake">${fmtMoney(st.stake2)}</td>
-      <td class="stake">+${fmtMoney(st.profit)}</td>
+      <td data-label="Начало">${pinned ? "📌 " : ""}${startCell(a)}</td>
+      <td data-label="Спорт" class="sport">${sportCell(a.sport)}</td>
+      <td data-label="Матч">${escapeHtml(a.match)}</td>
+      <td data-label="П1"><span class="out">П1</span> <span class="coef">${a.k1_max.toFixed(2)}</span> ${bkChip(a.k1_bookmaker)}</td>
+      <td data-label="X"><span class="out">X</span> <span class="coef">${a.kx_max.toFixed(2)}</span> ${bkChip(a.kx_bookmaker)}</td>
+      <td data-label="П2"><span class="out">П2</span> <span class="coef">${a.k2_max.toFixed(2)}</span> ${bkChip(a.k2_bookmaker)}</td>
+      <td data-label="Доходность"><span class="profit">${a.profit_pct.toFixed(2)} %</span></td>
+      <td data-label="Живёт" class="num arb-age" data-first-seen="${a.first_seen || ""}">${fmtAge(a.first_seen)}</td>
+      <td data-label="Ставка П1" class="stake">${fmtNum(st.stake1)}</td>
+      <td data-label="Ставка X" class="stake">${fmtNum(st.stakex)}</td>
+      <td data-label="Ставка П2" class="stake">${fmtNum(st.stake2)}</td>
+      <td data-label="Прибыль" class="stake profit-cell">+${fmtNum(st.profit)}</td>
       <td><button type="button" class="bet3-btn" data-key="${escapeHtml(a.match_key)}">Поставить</button></td>
     </tr>`;
   }).join("");
 }
 
 /* ---------- модалка быстрой ставки ---------- */
+
+/* Копирует сумму плеча в буфер: кнопка коротко подтверждает результат, а
+ * при отказе браузера (без https буфер недоступен) сумма показывается
+ * плашкой — иначе клик выглядел бы как «ничего не произошло». */
+function copyStake(btn, value) {
+  const done = () => {
+    const orig = btn.textContent;
+    btn.textContent = "✓ Скопировано";
+    setTimeout(() => { btn.textContent = orig; }, 1200);
+  };
+  const fail = () => toast(`Скопируйте сумму вручную: ${value} ₽`, "warn");
+  if (!navigator.clipboard) return fail();
+  navigator.clipboard.writeText(String(value)).then(done, fail);
+}
 
 let betArb = null;   // вилка, открытая в модалке (обновляется при опросе)
 
@@ -699,11 +753,7 @@ document.querySelectorAll(".copy-btn").forEach((btn) => {
     const bank = Math.max(0, parseFloat(els.betBank.value) || 0);
     const st = calcBetStakes(betArb.k1_max, betArb.k2_max, bank);
     const val = btn.dataset.copy === "1" ? st.stake1 : st.stake2;
-    navigator.clipboard?.writeText(String(val)).then(() => {
-      const orig = btn.textContent;
-      btn.textContent = "✓ Скопировано";
-      setTimeout(() => { btn.textContent = orig; }, 1200);
-    });
+    copyStake(btn, val);
   });
 });
 
@@ -838,19 +888,15 @@ document.querySelectorAll(".copy-btn3").forEach((btn) => {
     const bank = Math.max(0, parseFloat(els.bet3Bank.value) || 0);
     const st = calcBetStakes3(bet3Arb.k1_max, bet3Arb.kx_max, bet3Arb.k2_max, bank);
     const val = btn.dataset.copy === "1" ? st.stake1 : btn.dataset.copy === "x" ? st.stakex : st.stake2;
-    navigator.clipboard?.writeText(String(val)).then(() => {
-      const orig = btn.textContent;
-      btn.textContent = "✓ Скопировано";
-      setTimeout(() => { btn.textContent = orig; }, 1200);
-    });
+    copyStake(btn, val);
   });
 });
 
 function updateVisibility() {
   const detailOpen = isMatchesView(state.view) && state.openMatch !== null;
-  els.arbsTable.hidden = !isArbView(state.view);
-  els.arbs1x2Table.hidden = !isArb1x2View(state.view);
-  els.matchesTable.hidden = !isMatchesView(state.view) || detailOpen;
+  els.arbsCard.hidden = !isArbView(state.view);
+  els.arbs1x2Card.hidden = !isArb1x2View(state.view);
+  els.matchesCard.hidden = !isMatchesView(state.view) || detailOpen;
   els.matchDetail.hidden = !detailOpen;
 }
 
@@ -876,6 +922,11 @@ async function poll() {
   try {
     const minProfit = parseFloat(els.minProfit.value) || 0;
     const resp = await fetch(`${arbsUrl}?min_profit=${minProfit}`);
+    // сессия сайта истекла (сайт закрыт паролем) — опрашивать дальше нечего
+    if (resp.status === 401) {
+      location.replace("/login?next=" + encodeURIComponent(location.pathname));
+      return;
+    }
     const data = await resp.json();
 
     soundAlertProfit = data.sound_alert_profit ?? 2.5;
@@ -887,22 +938,23 @@ async function poll() {
     els.scanningBadge.hidden = !data.scanning;
 
     if (data.last_scan) {
-      els.lastScan.textContent = "Обновлено: " +
-        new Date(data.last_scan * 1000).toLocaleTimeString("ru-RU");
+      els.lastScan.innerHTML = "Обновлено <b>" +
+        new Date(data.last_scan * 1000).toLocaleTimeString("ru-RU") + "</b>";
     }
 
     if (data.events_checked) {
-      els.coverage.textContent =
-        `В памяти: ${data.events_checked} событий / ${data.quotes_checked} котировок`;
+      els.coverage.innerHTML =
+        `В линии <b>${data.events_checked.toLocaleString("ru-RU")}</b> событий, ` +
+        `<b>${data.quotes_checked.toLocaleString("ru-RU")}</b> котировок`;
     }
     renderBkCounts(data.bookmakers);
     lastBkNames = Object.keys(data.bookmakers || {});
 
     lastArbs = data.arbs;
     lastArbs1x2 = data.arbs_1x2 || [];
-    els.arbCount.textContent = isArb1x2View(state.view)
-      ? `Вилок 1X2: ${lastArbs1x2.length}`
-      : `Вилок: ${lastArbs.length}`;
+    els.arbCount.innerHTML = isArb1x2View(state.view)
+      ? `Вилок 1X2 <b>${lastArbs1x2.length}</b>`
+      : `Вилок <b>${lastArbs.length}</b>`;
     refreshBetModal();
     refreshBet3Modal();
 
@@ -915,7 +967,7 @@ async function poll() {
       alertedKeys = new Set(hot.map((a) => a.match_key));
     }
   } catch (err) {
-    els.lastScan.textContent = "Ошибка связи с сервером…";
+    els.lastScan.textContent = "Нет связи с сервером…";
   }
 
   if (isMatchesView(state.view)) {
@@ -984,6 +1036,16 @@ els.bkFilter.addEventListener("change", () => {
   state.bookmaker = els.bkFilter.value;
   saveState();
   rerender();
+});
+
+els.resetFilters.addEventListener("click", () => {
+  state.search = "";
+  state.sport = "";
+  state.bookmaker = "";
+  els.search.value = "";
+  els.minProfit.value = "0";
+  saveState();
+  poll();
 });
 
 els.viewTabs.addEventListener("click", (e) => {
