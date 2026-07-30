@@ -100,7 +100,8 @@ from ..config import (MELBET_API_HOST, MELBET_CHAMP_WORKERS, MELBET_CHAMPS,
 from ..models import KIND_LIVE, KIND_PREMATCH, MarketOdds
 from .base import BaseParser
 from .html_utils import (fmt_hcap, fmt_total, format_start, market_scope,
-                         neg_hcap, sane_1x2_margin, sane_pair_margin)
+                         neg_hcap, sane_1x2_margin, sane_pair_margin,
+                         slugify)
 from .melbet_layout import (BTS, HCAP, ITOTAL1, ITOTAL2, T_DRAW, T_W1, T_W2,
                             TOTAL, WINNER, FAMILY_CODES, Layout, RawEvent,
                             detect)
@@ -625,7 +626,7 @@ class MelbetParser(BaseParser):
         base = dict(bookmaker=self.name, sport=sport, team1=team1,
                     team2=team2, kind=KIND_LIVE if live else KIND_PREMATCH,
                     start_time=format_start(start_ts) if start_ts else None,
-                    start_ts=start_ts, url=_event_url(game))
+                    start_ts=start_ts, url=_event_url(game, live))
 
         out: list[MarketOdds] = []
         out.extend(self._winner(ev, layout, base))
@@ -850,10 +851,12 @@ def _subgame_event(parent: RawEvent, sub: dict) -> RawEvent | None:
 
 
 def _without_markets(sub: dict) -> dict:
-    """Поля подигры без её рынков: имена команд и время берём у родителя,
-    а вот id и название подигры пригодятся для ссылки."""
+    """Поля подигры без её рынков: имена команд и время берём у родителя.
+
+    Постоянный номер (CI) тоже оставляем родительский: у подигры своей
+    страницы на сайте нет, её рынки показываются на странице матча."""
     return {k: v for k, v in sub.items()
-            if k not in _MARKET_KEYS and k not in ("SG", "O1", "O2")}
+            if k not in _MARKET_KEYS and k not in ("SG", "O1", "O2", "CI")}
 
 
 def _game_id(game: dict) -> int | None:
@@ -890,13 +893,48 @@ def _start_ts(game: dict) -> float | None:
     return None
 
 
-def _event_url(game: dict) -> str:
-    """Ссылка на событие. Роутер сайта ориентируется на числовые id вида
-    спорта, чемпионата и события; не сойдётся формат — откроется линия."""
-    sport, champ, gid = game.get("SI"), game.get("LI"), _game_id(game)
-    if sport and champ and gid:
-        return f"{MELBET_SITE_HOST}/ru/line/{sport}/{champ}/{gid}"
-    return f"{MELBET_SITE_HOST}/ru/line"
+def _site_game_id(game: dict) -> int | None:
+    """Номер события В АДРЕСЕ страницы — это «CI», а не «I».
+
+    У события два номера: «I» — идентификатор в фиде (по нему ходят
+    запросы за росписью), «CI» — постоянный номер, который переживает
+    переезд из линии в лайв. В адресе страницы стоит именно CI (сверено с
+    проиндексированными страницами melbet.com: .../353889988-anderlecht-
+    hammarby, тогда как I у соседнего матча того же тура — 738821803).
+    Раньше в ссылку шёл I, и страница отвечала 404."""
+    for key in ("CI", "I", "Id", "ID"):
+        value = game.get(key)
+        if isinstance(value, int) and value:
+            return value
+    return None
+
+
+def _event_url(game: dict, live: bool) -> str:
+    """Страница матча на сайте.
+
+    Формат — «/ru/{line|live}/<спорт>/<id чемпионата>-<чемпионат>/<CI>-
+    <команды>»; такие адреса отдаёт сам сайт и индексируют поисковики.
+    Числовая форма «/ru/line/<id спорта>/<id чемпионата>/<I>», которая
+    стояла тут раньше, сайтом не обслуживается — отсюда 404.
+
+    Английские названия (SE/LE/O1E/O2E) — то, из чего БК строит слаги;
+    если их нет, транслитерируем русские. Без номера события ссылка ведёт
+    на чемпионат, а без него — на линию: пусть лучше откроется раздел,
+    чем несуществующая страница."""
+    section = "live" if live else "line"
+    root = f"{MELBET_SITE_HOST}/ru/{section}"
+    sport = slugify(game.get("SE") or game.get("SN"), "sport")
+    champ_id = game.get("LI")
+    if not isinstance(champ_id, int) or not champ_id:
+        return root
+    champ = f"{champ_id}-{slugify(game.get('LE') or game.get('L'), 'champ')}"
+    gid = _site_game_id(game)
+    if not gid:
+        return f"{root}/{sport}/{champ}"
+    teams = "-".join(
+        slugify(game.get(key + "E") or _team(game, key), key.lower())
+        for key in ("O1", "O2"))
+    return f"{root}/{sport}/{champ}/{gid}-{teams}"
 
 
 def _is_geo_stub(resp) -> bool:

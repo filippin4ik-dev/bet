@@ -46,7 +46,7 @@ from ..config import WINLINE_SNAPSHOT_WAIT
 from ..models import KIND_LIVE, KIND_PREMATCH, MarketOdds
 from .base import BaseParser
 from .html_utils import (fmt_hcap, fmt_total, format_start, market_scope,
-                         sane_1x2_margin)
+                         sane_1x2_margin, slugify)
 from .wl_feed import get_feed, is_decodable_exotic
 
 log = logging.getLogger("parsers.winline")
@@ -171,9 +171,7 @@ class WinlineParser(BaseParser):
                 kind=KIND_LIVE if live else KIND_PREMATCH,
                 start_time=format_start(ev["ts"]) if ev.get("ts") else None,
                 start_ts=float(ev["ts"]) if ev.get("ts") else None,
-                # страница события на сайте (роут снят с бандла main.js:
-                # router.navigate(['stavki/event/' + event.id]))
-                url=f"https://winline.ru/stavki/event/{ev['id']}",
+                url=_event_url(ev["id"], sport_name, champ, live),
             )
             o = self._market(ln, tl, sport_info, base)
             if o is not None:
@@ -420,3 +418,28 @@ class WinlineParser(BaseParser):
         scope = market_scope(f"{period_txt} {residual}".strip())
         label = f"({period_txt})" if period_txt else ""
         return scope, label
+
+
+def _event_url(event_id: int, sport_name: str, champ: tuple | None,
+               live: bool) -> str:
+    """Страница матча на сайте.
+
+    Раньше ссылка вела на «/stavki/event/<id>» — этот путь есть в разметке
+    самого сайта, но работает только при переходе ВНУТРИ приложения: при
+    открытии по ссылке роутер не успевает достать событие и сбрасывает на
+    главную. Настоящий адрес страницы содержит четыре сегмента —
+    «/{раздел}/sport/<спорт>/<страна>/<чемпионат>/<id>» (проверено в
+    браузере: по нему матч открывается с холодного захода, а с меньшим
+    числом сегментов роутер снова уходит на главную).
+
+    Роутер разбирает только id, слаги ему безразличны (адрес с «x/y/z»
+    открывает ту же страницу) — поэтому неизвестная страна не ломает
+    ссылку, а лишь делает её менее говорящей.
+    """
+    section = "live" if live else "stavki"
+    country = champ[2] if champ and len(champ) > 2 else ""
+    champ_name = champ[1] if champ else ""
+    return (f"https://winline.ru/{section}/sport/"
+            f"{slugify(sport_name, 'sport')}/"
+            f"{slugify(country, 'mir')}/"
+            f"{slugify(champ_name, 'liga')}/{event_id}")
