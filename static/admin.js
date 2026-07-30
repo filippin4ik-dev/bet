@@ -788,8 +788,10 @@ async function loadBetLog() {
 
 async function loadAll() {
   // Справочник БК — раньше аккаунтов: в их таблице стоит выбор способа
-  // входа, а какие способы БК принимает, знает только справочник.
-  await loadBookmakers();
+  // входа, а какие способы БК принимает, знает только справочник. Не
+  // сложился — это не повод не показать админку: без него выбор просто
+  // предложит оба способа вместо списка конкретной БК.
+  await loadBookmakers().catch(() => {});
   await Promise.all([loadAccounts(), loadSettings(), loadParsers(),
                      loadAccess(), loadVisitors(), loadBetLog()]);
 }

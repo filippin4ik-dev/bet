@@ -377,6 +377,31 @@ _DUMP_FORM_JS = """
     return {inputs: inputs, buttons: buttons, tabs: tabs};
 """
 
+# Признаки того, что БК не пустила на сайт ВООБЩЕ — до всякой формы
+# входа. Отличать это от «селектор устарел» обязательно: советовать
+# править селекторы человеку, которому сайт показал заглушку, — это
+# отправить его чинить не то. Подтверждено: melbet.ru отдаёт «Пожалуйста,
+# отключите VPN» адресам дата-центров, международные зеркала — /ru/block,
+# fonbet.ru — «Forbidden» от антибота ServicePipe.
+_BLOCK_PAGE_MARKERS = (
+    "отключите vpn", "отключите впн", "доступ ограничен", "доступ запрещен",
+    "доступ запрещён", "access denied", "forbidden", "/ru/block",
+)
+
+
+def _looks_blocked(driver) -> str:
+    """Пусто — страница как страница. Иначе — что именно на ней найдено."""
+    try:
+        title = driver.title or ""
+        url = driver.current_url or ""
+        body = driver.find_element("tag name", "body").text[:2000]
+    except Exception:  # noqa: BLE001
+        return ""
+    haystack = f"{title}\n{url}\n{body}".lower()
+    hits = [m for m in _BLOCK_PAGE_MARKERS if m in haystack]
+    return ", ".join(hits)
+
+
 # Проверка «виден ли на странице элемент с таким текстом» — без клика,
 # используется, чтобы понять, вернул ли сайт форму логина (значит, cookie
 # не подошла) или нет (значит, похоже, что уже залогинены).
@@ -922,7 +947,8 @@ class SeleniumGenericConnector(BookmakerConnector):
         driver.get(cfg_url)
         time.sleep(3.0)
         out: dict = {"bookmaker": self.bookmaker, "url": cfg_url,
-                     "title": driver.title, "opened_by": None, "tabs": {}}
+                     "title": driver.title, "opened_by": None, "tabs": {},
+                     "blocked": _looks_blocked(driver)}
 
         login_button_text = _text_setting(self.bookmaker, "login_button_text")
         if login_button_text:

@@ -22,7 +22,8 @@ from app.connectors import (LOGIN_BY_LOGIN, LOGIN_BY_PHONE,  # noqa: E402
                             default_login_type, env_prefix, get_connector,
                             login_types, national_phone, normalize_login_type)
 from app.connectors.selenium_generic import (  # noqa: E402
-    SELECTORS, _fill_username, _selector, _tab_text, _username_selector)
+    SELECTORS, _fill_username, _looks_blocked, _selector, _tab_text,
+    _username_selector)
 
 
 class FakeInput:
@@ -42,6 +43,23 @@ class FakeInput:
 
     def send_keys(self, value):
         self.typed += value
+
+
+class FakeBody:
+    def __init__(self, text):
+        self.text = text
+
+
+class FakePage:
+    """Заглушка браузера: отдаёт заголовок, адрес и текст страницы."""
+
+    def __init__(self, title="", url="https://example.com/", body=""):
+        self.title = title
+        self.current_url = url
+        self._body = body
+
+    def find_element(self, *_args):
+        return FakeBody(self._body)
 
 
 def test_unknown_login_type_falls_back_instead_of_crashing():
@@ -205,6 +223,31 @@ def test_filled_field_gets_the_right_string():
     print("OK: test_filled_field_gets_the_right_string")
 
 
+def test_block_page_is_not_mistaken_for_broken_selectors():
+    """Когда БК показала заглушку вместо сайта, полей на странице нет —
+    и разведка формы обязана сказать именно это. Совет «поправьте
+    селекторы» отправил бы оператора чинить не то: чинить надо адрес, с
+    которого он ходит."""
+    assert _looks_blocked(FakePage(title="Пожалуйста, отключите VPN")) \
+        == "отключите vpn"
+    assert _looks_blocked(FakePage(url="https://melbet.com/ru/block")) \
+        == "/ru/block"
+    assert _looks_blocked(FakePage(body="Forbidden")) == "forbidden"
+    # обычная страница БК заглушкой считаться не должна
+    assert _looks_blocked(FakePage(
+        title="Официальный сайт Букмекерской компании Winline",
+        url="https://winline.ru/",
+        body="Ставки на спорт Войти Регистрация Телефон Логин")) == ""
+
+    # браузер, который не отвечает, — не повод объявить сайт закрытым
+    class Dead:
+        @property
+        def title(self):
+            raise RuntimeError("no session")
+    assert _looks_blocked(Dead()) == ""
+    print("OK: test_block_page_is_not_mistaken_for_broken_selectors")
+
+
 if __name__ == "__main__":
     test_unknown_login_type_falls_back_instead_of_crashing()
     test_phone_is_typed_without_country_code()
@@ -215,4 +258,5 @@ if __name__ == "__main__":
     test_bookmaker_without_tabs_uses_one_field_for_both()
     test_selectors_are_overridable_without_touching_code()
     test_filled_field_gets_the_right_string()
+    test_block_page_is_not_mistaken_for_broken_selectors()
     print("Все тесты прошли.")

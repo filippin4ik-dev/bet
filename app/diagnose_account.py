@@ -167,6 +167,15 @@ def inspect_form(bookmaker: str) -> int:
     print("=" * 64)
     print(f"страница: {info['url']}")
     print(f"заголовок: {info['title']}")
+    if info.get("blocked"):
+        print(f"\nБК НЕ ПУСТИЛА НА САЙТ: на странице «{info['blocked']}» — "
+              f"это заглушка вместо сайта, формы входа на ней нет и быть "
+              f"не может.")
+        print("Селекторы тут ни при чём, править их бессмысленно. Нужен "
+              "адрес, который БК считает своим: домашний российский IP "
+              "(запустите разведку с боевого сервера) либо резидентный/"
+              f"мобильный прокси — {env_prefix(bookmaker)}_PROXY="
+              "socks5://host:port.\n")
     opened = True
     if info.get("opened_by"):
         opened = bool(info.get("opened"))
@@ -200,6 +209,10 @@ def inspect_form(bookmaker: str) -> int:
         _print_form(entry.get("form") or {}, indent="  ")
 
     print("-" * 64)
+    if info.get("blocked"):
+        print("Ничего не найдено, потому что сайта не было — см. про "
+              "заглушку выше. Повторите разведку оттуда, откуда БК пускает.")
+        return 2
     if not broken:
         print("Настроенные селекторы сошлись с формой — вход можно "
               "проверять реальным аккаунтом (<БК>_TEST_LOGIN/"
