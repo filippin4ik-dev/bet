@@ -552,16 +552,17 @@ function fmtSince(sec) {
 }
 
 function visitorTags(v, data) {
-  const tags = [];
+  const tags = [`<span class="tag">${escapeHtml(v.kind)}</span>`];
   if (v.device_id === data.my_device) tags.push('<span class="tag me">это вы</span>');
   if (v.admin) tags.push('<span class="tag admin">админка</span>');
-  if (v.authed) tags.push('<span class="tag" title="Вошёл по паролю доступа">по паролю</span>');
+  // «по паролю» у админского устройства не пишем: сессия админки открывает
+  // сайт сама, и пометка только сбивала бы с толку
+  else if (v.authed) tags.push('<span class="tag" title="Вошёл по паролю доступа">по паролю</span>');
   if (v.blocked) {
     tags.push(v.block_reason === "twin"
-      ? '<span class="tag banned" title="Вернулось тем же браузером с того же адреса, но без cookie">забанен (вернулся)</span>'
+      ? '<span class="tag banned" title="Вернулось тем же браузером с того же адреса, но уже без cookie">забанен (вернулся)</span>'
       : '<span class="tag banned">забанен</span>');
   }
-  if (v.kind === "бот") tags.push('<span class="tag">робот</span>');
   return tags.join(" ");
 }
 
@@ -580,13 +581,14 @@ function renderVisitors(data) {
       (e) => e === `${v.ip}/32` || e === `${v.ip}/128` || e === v.ip);
     const actions = v.blocked
       ? `<button class="vis-unblock" data-device="${escapeHtml(v.device_id)}">Разбанить</button>`
-      : `<button class="vis-block" data-device="${escapeHtml(v.device_id)}">Забанить</button>
-         <button class="vis-block-ip" data-device="${escapeHtml(v.device_id)}">Забанить с IP</button>`;
+      : `<button class="vis-block" data-device="${escapeHtml(v.device_id)}"
+                 title="Закрыть сайт для этого устройства">Забанить</button>
+         <button class="vis-block-ip" data-device="${escapeHtml(v.device_id)}"
+                 title="Забанить устройство и его текущий адрес">+ адрес</button>`;
     return `<tr class="${v.blocked ? "row-blocked" : ""}">
-      <td data-label="Устройство">
+      <td data-label="Устройство" class="vis-device">
         <span class="dev-dot ${v.online ? "online" : ""}"></span>
         <b>${escapeHtml(v.browser)}</b>${v.os ? " · " + escapeHtml(v.os) : ""}
-        <span class="tag">${escapeHtml(v.kind)}</span>
         ${visitorTags(v, data)}
       </td>
       <td data-label="Адрес" title="${escapeHtml(ips)}">
@@ -596,8 +598,8 @@ function renderVisitors(data) {
         ? '<span class="ok-text">сейчас на сайте</span>'
         : escapeHtml(fmtSince(v.age_sec))}</td>
       <td data-label="Запросов">${v.hits.toLocaleString("ru-RU")}</td>
-      <td data-label="Первый визит">${escapeHtml(fmtSince(v.seen_sec))}</td>
-      <td>${actions}
+      <td data-label="Впервые">${escapeHtml(fmtSince(v.seen_sec))}</td>
+      <td class="vis-actions">${actions}
         <button class="vis-forget" data-device="${escapeHtml(v.device_id)}"
                 title="Убрать из списка; при следующем заходе появится заново">Забыть</button>
       </td>

@@ -51,9 +51,12 @@ _last_flush = 0.0
 # «Chrome на Android, телефон», а не точная версия движка. Порядок правил
 # важен — почти все браузеры притворяются Chrome и Safari одновременно.
 
+# Имя робота берём тем же выражением, что и опознаём: у ботов полезное имя
+# лежит в своём токене («…compatible; SemrushBot/7~bl…»), а не в начале
+# строки, где у всех одинаковое «Mozilla».
 _BOT_RE = re.compile(
-    r"bot|crawler|spider|curl|wget|python-requests|httpx|go-http|headless|"
-    r"monitor|uptime|scan", re.I)
+    r"[\w.-]*(?:bot|crawler|spider|curl|wget|python-requests|httpx|go-http|"
+    r"headless|monitor|uptime|scan)[\w.-]*", re.I)
 
 _BROWSER_RULES = [
     (re.compile(r"YaBrowser/(\d+)"), "Яндекс.Браузер"),
@@ -86,9 +89,9 @@ def describe(user_agent: str) -> dict:
     ua = user_agent or ""
     if not ua.strip():
         return {"browser": "неизвестно", "os": "", "kind": "неизвестно"}
-    if _BOT_RE.search(ua):
-        name = ua.split("/")[0].strip()[:40] or "робот"
-        return {"browser": name, "os": "", "kind": "бот"}
+    bot = _BOT_RE.search(ua)
+    if bot:
+        return {"browser": bot.group(0)[:40], "os": "", "kind": "бот"}
 
     browser = "неизвестный браузер"
     for rx, title in _BROWSER_RULES:
