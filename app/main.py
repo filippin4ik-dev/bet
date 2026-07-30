@@ -12,7 +12,7 @@ from fastapi import Body, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import access, accounts_manager, autobet, config, db
+from . import access, accounts_manager, autobet, config, db, visitors
 from .access_api import router as access_router
 from .admin_api import require_admin
 from .admin_api import router as admin_router
@@ -55,6 +55,7 @@ async def lifespan(app: FastAPI):
              asyncio.create_task(live_scanner.run()),
              asyncio.create_task(balance_loop.run())]
     yield
+    visitors.flush()   # хвост посещений с момента последнего сброса
     scanner.stop()
     live_scanner.stop()
     balance_loop.stop()
@@ -77,19 +78,60 @@ def _gate_free(path: str) -> bool:
     return path in GATE_FREE_PATHS or path.startswith(GATE_FREE_PREFIXES)
 
 
+def _tracked(path: str) -> bool:
+    """Считать ли запрос посещением. Статику не считаем: одна открытая
+    страница тянет её пачкой, а устройство и так видно по самой странице."""
+    return not path.startswith("/static/") and path != "/favicon.ico"
+
+
 @app.middleware("http")
 async def access_gate(request: Request, call_next):
-    """Закрывает весь сайт паролем и/или белым списком IP (app/access.py).
+    """Шлюз сайта: учёт устройства посетителя и проверка доступа.
 
-    Пока пароль не задан и список пуст, шлюз пропускает всё — иначе первый
-    же запуск запер бы оператора снаружи."""
-    if _gate_free(request.url.path):
+    Порядок важен. Сначала запрос отмечается в списке посетителей
+    (app/visitors.py) и проверяется бан устройства — забаненного не пускают
+    даже на открытый сайт. Дальше работает обычная защита: пароль и/или
+    белый список IP (app/access.py). Пока пароль не задан и список пуст,
+    шлюз пропускает всё — иначе первый же запуск запер бы оператора."""
+    path = request.url.path
+    ip = access.client_ip(request)
+    visit = None
+    if config.VISITORS_ENABLED and _tracked(path):
+        visit = visitors.observe(
+            request, ip=ip, path=path,
+            authed=access.valid_session(request),
+            admin=access.admin_session(request))
+    response = await _gated_response(request, call_next, ip=ip, visit=visit)
+    if visit and visit["set_cookie"]:
+        response.set_cookie(
+            visitors.COOKIE_NAME, visit["cookie"],
+            max_age=int(config.VISITOR_COOKIE_TTL), httponly=True,
+            samesite="lax")
+    return response
+
+
+async def _gated_response(request: Request, call_next, *, ip: str,
+                          visit: dict | None):
+    path = request.url.path
+    api = path.startswith("/api/")
+    if visit and visit["blocked"] and not access.admin_session(request):
+        if api:
+            return JSONResponse(
+                {"detail": "Доступ с этого устройства закрыт."},
+                status_code=403)
+        return FileResponse(STATIC_DIR / "blocked.html", status_code=403,
+                            headers={"Cache-Control": "no-cache"})
+    if _gate_free(path):
         return await call_next(request)
     allowed, reason = access.check_request(request)
     if allowed:
         return await call_next(request)
-    ip = access.client_ip(request)
-    api = request.url.path.startswith("/api/")
+    if reason == "banned":
+        if api:
+            return JSONResponse({"detail": "Доступ с этого адреса закрыт."},
+                                status_code=403)
+        return FileResponse(STATIC_DIR / "blocked.html", status_code=403,
+                            headers={"Cache-Control": "no-cache"})
     if reason == "ip":
         detail = (f"Доступ только с разрешённых адресов. Ваш адрес: "
                   f"{ip or 'неизвестен'}.")
@@ -101,7 +143,7 @@ async def access_gate(request: Request, call_next):
         return JSONResponse(
             {"detail": "Требуется вход: сайт закрыт паролем."},
             status_code=401)
-    nxt = request.url.path
+    nxt = path
     if request.url.query:
         nxt += "?" + request.url.query
     return RedirectResponse(f"/login?next={quote(nxt, safe='')}")

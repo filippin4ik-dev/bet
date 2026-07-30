@@ -51,6 +51,7 @@
     <a href="#panel-scanner">Сканер</a>
     <a href="#panel-parsers">Парсеры БК</a>
     <a href="#panel-access">Доступ к сайту</a>
+    <a href="#panel-visitors">Кто на сайте</a>
     <a href="#panel-accounts">Аккаунты БК</a>
     <a href="#panel-autobet">Авто-ставки</a>
     <a href="#panel-betlog">Журнал ставок</a>
@@ -121,6 +122,10 @@
         <textarea id="access-whitelist" rows="3"
                   placeholder="203.0.113.7&#10;198.51.100.0/24"></textarea>
       </label>
+      <label>Забаненные адреса и подсети — по одному в строке
+        <textarea id="access-blacklist" rows="2"
+                  placeholder="пусто — никто не забанен"></textarea>
+      </label>
       <label class="switch">
         <input type="checkbox" id="access-ip-only">
         <span>Строгий режим: пускать только адреса из списка</span>
@@ -132,6 +137,32 @@
       </div>
       <div id="access-error" class="admin-error" hidden></div>
     </div>
+  </section>
+
+  <section class="admin-panel" id="panel-visitors">
+    <div class="panel-head">
+      <h2>👀 Кто на сайте</h2>
+      <span class="panel-note" id="visitors-note"></span>
+    </div>
+    <p class="admin-hint">
+      Каждому браузеру выдаётся cookie с меткой устройства: по ней видно, кто
+      смотрит сайт, даже когда адрес меняется (телефон, мобильный интернет).
+      «Забанить» закрывает сайт для устройства целиком; если оно вернётся тем
+      же браузером с того же адреса, но уже без cookie — бан применится сам.
+      Вход в админку баны не затрагивают, запереть себя нельзя.
+    </p>
+    <div class="table-scroll">
+      <table class="admin-table" id="visitors-table">
+        <thead>
+          <tr>
+            <th>Устройство</th><th>Адрес</th><th>Активность</th>
+            <th>Запросов</th><th>Первый визит</th><th></th>
+          </tr>
+        </thead>
+        <tbody id="visitors-body"></tbody>
+      </table>
+    </div>
+    <div class="banned-ips" id="banned-ips" hidden></div>
   </section>
 
   <section class="admin-panel" id="panel-accounts">
