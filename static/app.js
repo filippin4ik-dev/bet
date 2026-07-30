@@ -103,6 +103,7 @@ const BK_CLASS = {
   "bc.game": "bk-bcgame",      // фиолетовый
   "LeonBet": "bk-leon",        // жёлтый
   "Betcity": "bk-betcity",     // голубой (циан)
+  "Melbet": "bk-melbet",       // розовый
 };
 const bkClass = (bk) => BK_CLASS[bk] || "bk-other";
 const bkChip = (bk) => `<span class="bk-chip ${bkClass(bk)}">${escapeHtml(bk)}</span>`;

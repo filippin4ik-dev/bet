@@ -1,0 +1,558 @@
+"""Раскладка рынков в фиде Melbet: какой группе верить и не перепутаны ли
+стороны исходов.
+
+ЗАЧЕМ ЭТО НУЖНО. Движок 1xBet (на нём работает Melbet) не подписывает
+рынки словами: у исхода только числа — группа рынка G, код исхода T,
+коэффициент C и линия P:
+
+    {"G": 17, "T": 9, "C": 1.85, "P": 2.5}
+
+Что означает конкретный код, БК нигде не публикует, а открытые описания
+движка расходятся между собой: в одном разборе T=10 — это «тотал меньше»,
+в другом — «тотал больше, альтернативная линия». Ошибка тут не безобидна.
+Перепутав «больше» и «меньше», сканер сшил бы ТБ Melbet с ТМ другой БК и
+показал бы «вилку 15 %» там, где её нет, — а на такие ставятся деньги.
+
+ПОЭТОМУ КОДЫ ЗДЕСЬ — НЕ ИСТИНА, А ГИПОТЕЗА, которую каждый обход
+проверяет по самим данным. Проверки опираются на то, что в линии любой БК
+верно всегда, независимо от нумерации:
+
+1. Лестница тоталов монотонна: чем выше линия, тем ДОРОЖЕ «больше» и
+   ДЕШЕВЛЕ «меньше». Если по всей линии выходит наоборот — коды «больше»
+   и «меньше» стоят наоборот.
+2. Фора фаворита отрицательна: у пары форы с почти равными кэфами
+   (кэф ≈ кэф — это «справедливая» линия) знак линии показывает, кто
+   фаворит. Кто фаворит, известно из исхода 1X2 того же матча.
+3. Индивидуальный тотал фаворита выше, чем у аутсайдера.
+4. «Обе забьют» идёт следом за результативностью матча: в низовом матче
+   обе команды забивают реже чем в половине случаев, в результативном —
+   чаще. Сколько голов ждёт БК, видно из её же тотала (см. _decide_bts).
+
+Каждое событие снимка отдаёт по такому правилу один голос «за» гипотезу
+или «против». Решение принимается по всей линии сразу (тысячи событий),
+а не по одному матчу, поэтому шум отдельных матчей ничего не решает:
+- голоса «против» уверенно победили → стороны переворачиваются, в лог
+  идёт предупреждение (значит, БК сменила нумерацию);
+- голоса разделились примерно поровну → это НЕ шум, а признак того, что
+  в одну группу попали разные по смыслу рынки (например тотал матча и
+  тотал углов). Такое семейство рынков целиком пропускается: лучше не
+  показать рынок, чем показать вилку по ошибочной разметке.
+
+Вторая задача модуля — ВЫБОР ГРУППЫ. Один и тот же код исхода (T=9/10 —
+«тотал») встречается в фиде у нескольких групп: тотал матча, тотал тайма,
+азиатский тотал, тотал углов. По номеру группы их не различить (словаря
+имён у фида нет), а смешивать нельзя: «тотал 2.5 первого тайма» и «тотал
+2.5 матча» — разные рынки. Берём только ОДНУ группу на семейство — ту,
+что встречается в компактном снимке линии чаще всех (там у события лежат
+именно основные рынки матча, они есть почти у каждого события). Остальные
+группы пропускаются: они попадут в линию, только когда появится
+подтверждённый словарь имён рынков (см. app/diagnose_melbet.py).
+"""
+import logging
+from dataclasses import dataclass, field
+from statistics import median
+
+log = logging.getLogger("parsers.melbet")
+
+# ---------------------------------------------------------------------------
+# Гипотеза о кодах исходов
+# ---------------------------------------------------------------------------
+# Числа взяты из общедоступных разборов движка 1xBet и сходятся у разных
+# источников для основных рынков (1X2, тотал, фора). Всё, что ниже,
+# проверяется голосованием по живой линии — см. detect().
+T_W1, T_DRAW, T_W2 = 1, 2, 3
+T_HCAP1, T_HCAP2 = 7, 8
+T_OVER, T_UNDER = 9, 10
+T_IT1_OVER, T_IT1_UNDER = 11, 12
+T_IT2_OVER, T_IT2_UNDER = 13, 14
+T_BTS_YES, T_BTS_NO = 180, 181
+
+WINNER = "winner"
+HCAP = "hcap"
+TOTAL = "total"
+ITOTAL1 = "itotal1"
+ITOTAL2 = "itotal2"
+BTS = "bothscore"
+# Отдельный «вопрос» калибровки, а не семейство рынков: чей индивидуальный
+# тотал лежит в кодах 11/12 — первой команды или второй. Ошибиться тут
+# можно независимо от того, верно ли размечены «больше»/«меньше», поэтому
+# и голосование за него своё.
+ITOTAL_SIDES = "itotal_sides"
+
+# Семейство рынка → коды его исходов. Пара «прямых» сторон (первая —
+# «больше»/«фора первой команды») стоит первой: именно её и проверяет
+# голосование.
+FAMILY_CODES: dict[str, tuple[int, ...]] = {
+    WINNER: (T_W1, T_DRAW, T_W2),
+    HCAP: (T_HCAP1, T_HCAP2),
+    TOTAL: (T_OVER, T_UNDER),
+    ITOTAL1: (T_IT1_OVER, T_IT1_UNDER),
+    ITOTAL2: (T_IT2_OVER, T_IT2_UNDER),
+    BTS: (T_BTS_YES, T_BTS_NO),
+}
+FAMILY_OF: dict[int, str] = {
+    code: family for family, codes in FAMILY_CODES.items() for code in codes
+}
+# Семейства с линией (P): у них при выборе группы учитывается ещё и
+# величина линии, а стороны проверяются на монотонность лестницы.
+LINE_FAMILIES = (HCAP, TOTAL, ITOTAL1, ITOTAL2)
+
+# Сколько голосов нужно, чтобы вообще принимать решение по семейству.
+# Меньше — это уже не «вся линия», а несколько случайных матчей.
+MIN_VOTES = 20
+# Доля голосов, при которой сторона считается уверенно доказанной.
+# Между 0.4 и 0.6 голоса «размазаны» — семейство пропускается целиком.
+SURE_SHARE = 0.6
+# Насколько кэфы на победу должны различаться, чтобы считать команду
+# фаворитом (на равных соперниках знак форы неинформативен).
+FAV_GAP = 1.1
+
+# --- пороги для «обе забьют» (см. _decide_bts) ---
+# Матч с такой ожидаемой результативностью и ниже — низовой: обе команды
+# забивают меньше чем в половине случаев. Столько же и выше — наоборот.
+# Между порогами шансы близки к равным, и голос ничего не доказывает.
+# Пороги не привязаны к футболу: где бы ни крутилась результативность
+# (хоккей, гандбол), «обе забьют» переваливает за половину примерно на
+# 2.5–3 гола суммарно.
+BTS_LOW_TOTAL = 2.25
+BTS_HIGH_TOTAL = 3.25
+# Кэфы сторон, различающиеся меньше чем на столько, считаем равными:
+# какая сторона дороже — в пределах округления, сигнала нет.
+BTS_MIN_GAP = 0.05
+# В разгромном матче обе забивают реже, чем следует из общего тотала (все
+# голы кладёт фаворит), — такие матчи в голосовании не участвуют.
+BTS_HEAVY_FAV = 1.25
+# Голосов нужно с ОБЕИХ сторон: рынок обязан вести себя как «обе забьют»
+# и на низовых матчах, и на результативных. Односторонней уверенности
+# мало — так же выглядел бы, например, «обе забьют в 1-м тайме».
+BTS_MIN_BUCKET = 8
+
+
+@dataclass
+class RawEvent:
+    """Событие фида, разобранное до чисел: (группа, код, линия, кэф).
+
+    scope — область рынков: "" у рынков всего матча и канонический токен
+    периода (см. html_utils.market_scope) у подигры вроде «1-й тайм».
+
+    base_picks — исходы из КОМПАКТНОГО снимка линии (там лежат основные
+    рынки матча). По ним выбирается группа семейства: в полной росписи
+    (GetGameZip) групп на порядок больше, и «самая частая» там была бы
+    случайной.
+    """
+
+    game: dict
+    scope: str = ""
+    picks: list[tuple[int, int, float | None, float]] = field(
+        default_factory=list)
+    base_picks: list[tuple[int, int, float | None, float]] | None = None
+
+    def lines(self, family: str, group: int | None) -> dict[int, dict]:
+        """Исходы семейства в группе: {код исхода: {линия: кэф}}.
+
+        group=None — брать любую группу (для подигр, где своя группа
+        выбирается по однозначности, см. sole_group)."""
+        codes = FAMILY_CODES[family]
+        out: dict[int, dict] = {}
+        for g, t, p, c in self.picks:
+            if t not in codes or (group is not None and g != group):
+                continue
+            out.setdefault(t, {})[p] = c
+        return out
+
+    def sole_group(self, family: str) -> int | None:
+        """Единственная группа семейства в этом событии (или None, если её
+        нет или групп несколько — тогда рынок неоднозначен)."""
+        codes = FAMILY_CODES[family]
+        groups = {g for g, t, _p, _c in self.picks if t in codes}
+        return groups.pop() if len(groups) == 1 else None
+
+    def flat(self, family: str, group: int | None) -> tuple[float | None,
+                                                            float | None]:
+        """Кэфы рынка БЕЗ линии («обе забьют»): первая сторона, вторая.
+
+        Обычно у такого исхода поля P нет вовсе, но часть зеркал кладёт в
+        него ноль — принимаем оба варианта, иначе рынок пропал бы."""
+        sides = self.lines(family, group)
+        out = []
+        for code in FAMILY_CODES[family][:2]:
+            per_line = sides.get(code) or {}
+            out.append(per_line.get(None) or per_line.get(0.0))
+        return out[0], out[1]
+
+    def winner_odds(self, group: int | None) -> tuple[float, float] | None:
+        """Кэфы на победу первой и второй команды (для проверки фаворита)."""
+        win = self.lines(WINNER, group)
+        k1 = (win.get(T_W1) or {}).get(None)
+        k2 = (win.get(T_W2) or {}).get(None)
+        if not k1 or not k2 or k1 <= 1 or k2 <= 1:
+            return None
+        return k1, k2
+
+
+@dataclass
+class Layout:
+    """Итог калибровки одного снимка линии."""
+
+    groups: dict[str, int | None] = field(default_factory=dict)
+    # Семейства, у которых стороны исходов оказались перевёрнуты
+    # относительно гипотезы (T_OVER на самом деле «меньше» и т.п.).
+    inverted: set[str] = field(default_factory=set)
+    # Семейства, разметку которых подтвердить не удалось — не отдаём.
+    skipped: set[str] = field(default_factory=set)
+    votes: dict[str, tuple[int, int]] = field(default_factory=dict)
+    # Сколько событий стоит за каждой группой: {семейство: [(группа, событий,
+    # медиана линии)]} — нужно только для диагностики.
+    group_stats: dict[str, list[tuple[int, int, float]]] = field(
+        default_factory=dict)
+    # Средний перевес хозяев по всей линии (1/К1 − 1/К2). Ни на что не
+    # влияет, но в диагностике сразу видно, не перепутаны ли команды
+    # местами: у настоящей линии он положительный (хозяева выигрывают чаще).
+    home_edge: float | None = None
+
+    def group(self, family: str) -> int | None:
+        return self.groups.get(family)
+
+    def is_inverted(self, family: str) -> bool:
+        return family in self.inverted
+
+    def usable(self, family: str) -> bool:
+        if family in self.skipped:
+            return False
+        # Не знаем, чей индивидуальный тотал где, — не отдаём ни один.
+        if family in (ITOTAL1, ITOTAL2) and ITOTAL_SIDES in self.skipped:
+            return False
+        return True
+
+    def itotal_side(self, family: str) -> int:
+        """Команда (1 или 2), которой принадлежит семейство инд. тоталов."""
+        side = 1 if family == ITOTAL1 else 2
+        if ITOTAL_SIDES in self.inverted:
+            side = 3 - side
+        return side
+
+    def summary(self) -> str:
+        parts = []
+        for family in list(FAMILY_CODES) + [ITOTAL_SIDES]:
+            group = self.groups.get(family)
+            good, bad = self.votes.get(family, (0, 0))
+            if group is None and not (good or bad):
+                continue
+            mark = ""
+            if family in self.skipped:
+                mark = " (пропущено: разметка не подтвердилась)"
+            elif family in self.inverted:
+                mark = " (стороны перевёрнуты)"
+            where = f"=G{group}" if group is not None else ""
+            vote = f" голоса {good}/{bad}" if good or bad else ""
+            parts.append(f"{family}{where}{vote}{mark}")
+        return "; ".join(parts) or "рынков не найдено"
+
+
+def detect(events: list[RawEvent],
+           forced: dict[str, int] | None = None) -> Layout:
+    """Определяет раскладку рынков по снимку линии.
+
+    forced — группы, закреплённые оператором вручную (MELBET_GROUPS).
+    Нужны, если автоматический выбор промахнулся: например тотал тайма
+    вдруг стал попадаться чаще тотала матча. Что именно выбрано и какие
+    ещё группы есть, показывает python -m app.diagnose_melbet."""
+    layout = Layout()
+    layout.groups, layout.group_stats = _pick_groups(events)
+    for family, group in (forced or {}).items():
+        if family in FAMILY_CODES:
+            layout.groups[family] = group
+    layout.home_edge = _home_edge(events, layout.groups.get(WINNER))
+
+    for family, (good, bad) in _collect_votes(events, layout.groups).items():
+        layout.votes[family] = (good, bad)
+        total = good + bad
+        if total < MIN_VOTES:
+            continue          # мало данных — остаёмся при гипотезе
+        share = bad / total
+        if share >= SURE_SHARE:
+            layout.inverted.add(family)
+        elif share > 1 - SURE_SHARE:
+            layout.skipped.add(family)
+    _decide_bts(events, layout)
+    return layout
+
+
+# ---------------------------------------------------------------------------
+# Выбор группы
+# ---------------------------------------------------------------------------
+
+
+def _pick_groups(events: list[RawEvent]):
+    """Для каждого семейства — группа, покрывающая больше всего событий.
+
+    Считаем по компактному снимку и только по рынкам всего матча: у
+    подигр («1-й тайм») свои группы, и они бы смешались с основными.
+
+    Семейства, которого в снимке нет вовсе, это правило лишило бы группы,
+    а значит и линии. Так бывает у индивидуальных тоталов и «обе забьют»:
+    компактный фид отдаёт только самые ходовые рынки, а остальные лежат в
+    полной росписи. Для таких семейств считаем по росписи — выбор станет
+    менее надёжным (групп там кратно больше), но его всё равно проверит
+    голосование, а без него рынка не было бы совсем."""
+    base_counts, base_lines = _count_groups(events, full=False)
+    full_counts, full_lines = _count_groups(events, full=True)
+
+    groups: dict[str, int | None] = {}
+    stats: dict[str, list[tuple[int, int, float]]] = {}
+    for family in FAMILY_CODES:
+        per_group, lines = base_counts.get(family), base_lines
+        if not per_group:
+            per_group, lines = full_counts.get(family), full_lines
+        rows = []
+        for g, n in (per_group or {}).items():
+            ln = lines.get((family, g)) or [0.0]
+            rows.append((g, n, float(median(ln))))
+        # Больше событий — важнее; при равном покрытии берём группу с
+        # большей линией: тотал матча всегда выше тотала тайма.
+        rows.sort(key=lambda r: (r[1], r[2]), reverse=True)
+        if rows:
+            stats[family] = rows
+        groups[family] = rows[0][0] if rows else None
+    return groups, stats
+
+
+def _count_groups(events: list[RawEvent], full: bool):
+    """Сколько событий стоит за каждой парой «семейство + группа»."""
+    counts: dict[str, dict[int, int]] = {}
+    lines: dict[tuple[str, int], list[float]] = {}
+    for ev in events:
+        if ev.scope:
+            continue
+        picks = ev.picks if full or ev.base_picks is None else ev.base_picks
+        seen: set[tuple[str, int]] = set()
+        for g, t, p, _c in picks:
+            family = FAMILY_OF.get(t)
+            if family is None:
+                continue
+            seen.add((family, g))
+            if p is not None:
+                lines.setdefault((family, g), []).append(abs(p))
+        for family, g in seen:
+            per_group = counts.setdefault(family, {})
+            per_group[g] = per_group.get(g, 0) + 1
+    return counts, lines
+
+
+# ---------------------------------------------------------------------------
+# Голосование за стороны исходов
+# ---------------------------------------------------------------------------
+
+
+def _collect_votes(events: list[RawEvent],
+                   groups: dict[str, int | None]) -> dict[str, tuple[int, int]]:
+    votes = {
+        TOTAL: [0, 0],
+        HCAP: [0, 0],
+        ITOTAL1: [0, 0],
+        ITOTAL2: [0, 0],
+        ITOTAL_SIDES: [0, 0],
+    }
+    for ev in events:
+        if ev.scope:
+            continue    # подигры калибровку не решают: их рынки штучные
+        _vote_ladder(ev, TOTAL, groups.get(TOTAL), votes[TOTAL])
+        _vote_ladder(ev, ITOTAL1, groups.get(ITOTAL1), votes[ITOTAL1])
+        _vote_ladder(ev, ITOTAL2, groups.get(ITOTAL2), votes[ITOTAL2])
+        _vote_hcap(ev, groups, votes[HCAP])
+        _vote_itotal_sides(ev, groups, votes[ITOTAL_SIDES])
+    return {family: (v[0], v[1]) for family, v in votes.items()}
+
+
+def _vote_ladder(ev: RawEvent, family: str, group: int | None,
+                 tally: list[int]) -> None:
+    """Монотонность лестницы: «больше» дорожает с ростом линии.
+
+    Голос даёт КАЖДАЯ соседняя пара линий: у события с лестницей из
+    десяти тоталов сомнений в направлении быть не может, а у события с
+    единственной линией голоса нет вовсе."""
+    if group is None:
+        return
+    over_code, under_code = FAMILY_CODES[family]
+    sides = ev.lines(family, group)
+    over, under = sides.get(over_code) or {}, sides.get(under_code) or {}
+    common = sorted(p for p in over
+                    if p is not None and p in under
+                    and over[p] > 1 and under[p] > 1)
+    for prev, nxt in zip(common, common[1:]):
+        if over[nxt] > over[prev]:
+            tally[0] += 1
+        elif over[nxt] < over[prev]:
+            tally[1] += 1
+        if under[nxt] < under[prev]:
+            tally[0] += 1
+        elif under[nxt] > under[prev]:
+            tally[1] += 1
+
+
+def _vote_hcap(ev: RawEvent, groups: dict[str, int | None],
+               tally: list[int]) -> None:
+    """Знак «справедливой» форы: у фаворита она отрицательная.
+
+    Справедливой считаем ту линию лестницы, где кэфы сторон ближе всего
+    друг к другу, — именно там БК считает шансы равными."""
+    group = groups.get(HCAP)
+    if group is None:
+        return
+    odds = ev.winner_odds(groups.get(WINNER))
+    if odds is None:
+        return
+    k1, k2 = odds
+    if 1 / FAV_GAP < k2 / k1 < FAV_GAP:
+        return          # соперники равны — знак линии ничего не скажет
+    sides = ev.lines(HCAP, group)
+    first = sides.get(T_HCAP1) or {}
+    second = sides.get(T_HCAP2) or {}
+    best: tuple[float, float] | None = None
+    for line, ka in first.items():
+        if line is None or line == 0 or ka <= 1:
+            continue
+        kb = second.get(-line)
+        if not kb or kb <= 1:
+            continue
+        gap = abs(ka - kb)
+        if best is None or gap < best[0]:
+            best = (gap, line)
+    if best is None:
+        return
+    home_is_favourite = k1 < k2
+    if (best[1] < 0) == home_is_favourite:
+        tally[0] += 1
+    else:
+        tally[1] += 1
+
+
+def _vote_itotal_sides(ev: RawEvent, groups: dict[str, int | None],
+                       tally: list[int]) -> None:
+    """Чей индивидуальный тотал выше: у фаворита забитых больше."""
+    g1, g2 = groups.get(ITOTAL1), groups.get(ITOTAL2)
+    if g1 is None or g2 is None:
+        return
+    odds = ev.winner_odds(groups.get(WINNER))
+    if odds is None:
+        return
+    k1, k2 = odds
+    if 1 / FAV_GAP < k2 / k1 < FAV_GAP:
+        return
+    m1 = _median_line(ev, ITOTAL1, g1)
+    m2 = _median_line(ev, ITOTAL2, g2)
+    if m1 is None or m2 is None or abs(m1 - m2) < 0.25:
+        return
+    home_is_favourite = k1 < k2
+    tally[0 if (m1 > m2) == home_is_favourite else 1] += 1
+
+
+def _decide_bts(events: list[RawEvent], layout: Layout) -> None:
+    """«Обе забьют»: у рынка нет ни линии, ни лестницы — где «да»?
+
+    Монотонностью тут ничего не проверишь: две котировки без линии, и обе
+    около двойки. Зато рынок жёстко связан с результативностью матча —
+    чем больше голов ждёт БК, тем чаще забивают обе команды. Сколько
+    голов она ждёт, говорит её собственный тотал: линия, на которой кэфы
+    «больше» и «меньше» ближе всего друг к другу.
+
+    Голосуем по двум корзинам отдельно — низовые матчи и результативные,
+    — и принимаем разметку, только если ОБЕ пришли к одному выводу. Одной
+    корзины мало: рынок «обе забьют в 1-м тайме» на низовых матчах ведёт
+    себя точно так же и отличается только на результативных, где обе всё
+    равно забивают редко. Разошлись корзины — семейство не отдаём.
+
+    Опора здесь чужая (тотал), поэтому если сам тотал не подтвердился,
+    проверять «обе забьют» нечем и рынок пропускается."""
+    if layout.groups.get(BTS) is None:
+        return
+    if not layout.usable(TOTAL) or layout.groups.get(TOTAL) is None:
+        layout.skipped.add(BTS)
+        return
+    low, high = [0, 0], [0, 0]
+    for ev in events:
+        if ev.scope:
+            continue
+        _vote_bts(ev, layout.groups, low, high)
+    layout.votes[BTS] = (low[0] + high[0], low[1] + high[1])
+    verdicts = {_bucket_verdict(low), _bucket_verdict(high)}
+    if verdicts == {"straight"}:
+        return
+    if verdicts == {"inverted"}:
+        layout.inverted.add(BTS)
+        return
+    layout.skipped.add(BTS)
+
+
+def _vote_bts(ev: RawEvent, groups: dict[str, int | None], low: list[int],
+              high: list[int]) -> None:
+    k_yes, k_no = ev.flat(BTS, groups.get(BTS))
+    if not k_yes or not k_no or k_yes <= 1 or k_no <= 1:
+        return
+    if abs(k_yes - k_no) < BTS_MIN_GAP:
+        return
+    odds = ev.winner_odds(groups.get(WINNER))
+    if odds and min(odds) < BTS_HEAVY_FAV:
+        return
+    central = _central_total(ev, groups[TOTAL])
+    if central is None:
+        return
+    if central <= BTS_LOW_TOTAL:
+        low[0 if k_yes > k_no else 1] += 1
+    elif central >= BTS_HIGH_TOTAL:
+        high[0 if k_yes < k_no else 1] += 1
+
+
+def _bucket_verdict(tally: list[int]) -> str:
+    total = tally[0] + tally[1]
+    if total < BTS_MIN_BUCKET:
+        return "unknown"
+    share = tally[1] / total
+    if share >= SURE_SHARE:
+        return "inverted"
+    if share <= 1 - SURE_SHARE:
+        return "straight"
+    return "unknown"
+
+
+def _central_total(ev: RawEvent, group: int) -> float | None:
+    """Линия тотала с самыми близкими кэфами сторон — столько голов БК и
+    ждёт от матча. Какая сторона «больше», а какая «меньше», тут неважно:
+    разница по модулю от их порядка не зависит."""
+    sides = ev.lines(TOTAL, group)
+    over, under = sides.get(T_OVER) or {}, sides.get(T_UNDER) or {}
+    best: tuple[float, float] | None = None
+    for line, ka in over.items():
+        if line is None or ka <= 1:
+            continue
+        kb = under.get(line)
+        if not kb or kb <= 1:
+            continue
+        gap = abs(ka - kb)
+        if best is None or gap < best[0]:
+            best = (gap, line)
+    return best[1] if best else None
+
+
+def _median_line(ev: RawEvent, family: str, group: int) -> float | None:
+    values = [p for _t, per_line in ev.lines(family, group).items()
+              for p in per_line if p is not None]
+    return float(median(values)) if values else None
+
+
+def _home_edge(events: list[RawEvent], group: int | None) -> float | None:
+    """Средний перевес хозяев по линии — контрольная цифра для диагностики."""
+    if group is None:
+        return None
+    diffs = []
+    for ev in events:
+        if ev.scope:
+            continue
+        odds = ev.winner_odds(group)
+        if odds is None:
+            continue
+        k1, k2 = odds
+        diffs.append(1 / k1 - 1 / k2)
+    if len(diffs) < MIN_VOTES:
+        return None
+    return round(sum(diffs) / len(diffs), 4)

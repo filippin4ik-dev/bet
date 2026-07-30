@@ -309,6 +309,62 @@ BETCITY_EXT_MAX_REQUESTS = int(os.getenv("BETCITY_EXT_MAX_REQUESTS", "10"))
 # БК (Winline/BetBoom), и на слабом VPS длится минуты.
 BETCITY_EXT_MAX_AGE = float(os.getenv("BETCITY_EXT_MAX_AGE", "1800"))
 
+# ---- Melbet: публичный JSON-фид линии (движок 1xBet) ----
+# Melbet раздаёт линию тем же фидом, что и сайт: LineFeed/Get1x2_VZip на
+# каждый вид спорта плюс LineFeed/GetGameZip на полную роспись события.
+# Эндпоинты лежат под префиксом /service-api (на старых зеркалах — в
+# корне); домен и префикс парсер перебирает сам.
+# Здесь можно задать базу жёстко, если авто-перебор не сработал, например:
+#   MELBET_API_HOST=https://melbet.ru/service-api
+MELBET_API_HOST = os.getenv("MELBET_API_HOST", "").strip().rstrip("/")
+# Домены, которые перебираются автоматически (через запятую). Первый
+# рабочий запоминается до конца работы процесса.
+MELBET_HOSTS = [h.strip().rstrip("/") for h in os.getenv(
+    "MELBET_HOSTS", "https://melbet.ru,https://melbet.com").split(",")
+    if h.strip()]
+# Хост сайта — только для ссылок на страницу события (deep-link).
+MELBET_SITE_HOST = os.getenv("MELBET_SITE_HOST",
+                             "https://melbet.ru").rstrip("/")
+# Язык линии и «страна»/партнёр — обычные параметры фида движка. Русский
+# язык обязателен: по русским названиям команд события сшиваются с БК РФ.
+MELBET_LANG = os.getenv("MELBET_LANG", "ru")
+MELBET_COUNTRY = int(os.getenv("MELBET_COUNTRY", "1"))
+MELBET_PARTNER = int(os.getenv("MELBET_PARTNER", "8"))
+# Сколько событий запрашивать на один вид спорта (прематч и лайв).
+MELBET_SPORT_COUNT = int(os.getenv("MELBET_SPORT_COUNT", "500"))
+MELBET_LIVE_COUNT = int(os.getenv("MELBET_LIVE_COUNT", "200"))
+# Сколько видов спорта опрашивать параллельно.
+MELBET_SPORT_WORKERS = int(os.getenv("MELBET_SPORT_WORKERS", "6"))
+# Забирать ПОЛНУЮ роспись каждого события (отдельный запрос GetGameZip):
+# лестницы тоталов и фор, индивидуальные тоталы, рынки таймов и периодов.
+# 0 — только основные рынки из общего снимка (в разы меньше запросов).
+MELBET_FULL_MARKETS = os.getenv("MELBET_FULL_MARKETS", "1") not in (
+    "0", "false", "no")
+MELBET_FULL_MARKETS_WORKERS = int(
+    os.getenv("MELBET_FULL_MARKETS_WORKERS", "12"))
+# Сколько секунд максимум тратить на сбор всей линии за один обход.
+MELBET_FEED_TIMEOUT = float(os.getenv("MELBET_FEED_TIMEOUT", "120"))
+# Группы рынков Melbet, закреплённые вручную: «семейство=группа» через
+# запятую, например «total=17,hcap=2,itotal1=15,bothscore=19». Обычно не
+# нужно — парсер выбирает группу сам по всей линии. Пригодится, если
+# выбор промахнулся: какие группы есть и что выбрано, показывает
+# python -m app.diagnose_melbet.
+MELBET_GROUPS = {}
+for _pair in os.getenv("MELBET_GROUPS", "").split(","):
+    if "=" in _pair:
+        _family, _, _group = _pair.partition("=")
+        if _group.strip().lstrip("gG").isdigit():
+            MELBET_GROUPS[_family.strip()] = int(_group.strip().lstrip("gG"))
+# Минимальная пауза между обходами Melbet, сек. Полная роспись — это
+# запрос на КАЖДОЕ событие линии, и гонять её чаще нет смысла: прематч за
+# минуту почти не двигается, а частый обход быстрее приводит к блокировке.
+MELBET_MIN_REFRESH = float(os.getenv("MELBET_MIN_REFRESH", "60"))
+# Включена ли Melbet. Фид отвечает только российским адресам (с чужого IP
+# приходит 406 или страница «отключите VPN»), поэтому на зарубежном
+# сервере её лучше выключить, чтобы не тратить обходы впустую.
+MELBET_ENABLED = os.getenv("MELBET_ENABLED", "1") not in (
+    "0", "false", "no", "")
+
 # ---- Лайв-режим (матчи в игре) ----
 # Лайв сканируется ОТДЕЛЬНЫМ быстрым циклом: коэффициенты в игре меняются
 # ежесекундно, поэтому опрос чаще и котировки живут недолго.
