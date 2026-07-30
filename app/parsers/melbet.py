@@ -20,7 +20,8 @@ Melbet работает на том же движке, что 1xBet/Betwinner/Li
 и с IP дата-центров edge отвечает 406 ещё до фида, а melbet.ru отдаёт
 страницу «отключите VPN». То есть парсер рассчитан на тот же российский
 VPS, с которого работают Winline и Fonbet; проверить, что фид отвечает
-именно с вашего сервера, можно командой `python -m app.diagnose_melbet`.
+именно с вашего сервера, можно командой `venv/bin/python -m
+app.diagnose_melbet`.
 
 КАК РАЗБИРАЕТСЯ РЫНОК. В фиде нет ни одного слова о смысле котировки —
 только числа: {"G": 17, "T": 9, "C": 1.85, "P": 2.5} (группа рынка, код
@@ -139,7 +140,7 @@ class MelbetParser(BaseParser):
         log.warning(
             "Melbet: ни одно зеркало не отдало линию (повтор через %d с). "
             "Фид доступен только с российского адреса; проверить — "
-            "python -m app.diagnose_melbet, задать домен вручную — "
+            "venv/bin/python -m app.diagnose_melbet, задать домен вручную — "
             "MELBET_API_HOST.", PROBE_BACKOFF)
         return None
 

@@ -5,8 +5,8 @@ market_key всех БК для события, чтобы разобрать к
 
 Запускать на сервере с российским IP:
 
-    python -m app.debug_market София Трнава
-    python -m app.debug_market KBO
+    cd /opt/arb-scanner && venv/bin/python -m app.debug_market София Трнава
+    cd /opt/arb-scanner && venv/bin/python -m app.debug_market KBO
 
 Ищет события, где ВСЕ переданные подстроки (без учёта регистра) находятся
 в строке "<sport> <team1> <team2>". Печатает по каждой найденной БК все
@@ -26,8 +26,8 @@ from .parsers.html_utils import format_start
 def main() -> None:
     needles = [a.lower() for a in sys.argv[1:]]
     if not needles:
-        print("Использование: python -m app.debug_market <подстрока1> "
-              "[подстрока2] ...")
+        print("Использование: venv/bin/python -m app.debug_market "
+              "<подстрока1> [подстрока2] ...")
         return
 
     all_odds = []

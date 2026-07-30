@@ -348,7 +348,7 @@ MELBET_FEED_TIMEOUT = float(os.getenv("MELBET_FEED_TIMEOUT", "120"))
 # запятую, например «total=17,hcap=2,itotal1=15,bothscore=19». Обычно не
 # нужно — парсер выбирает группу сам по всей линии. Пригодится, если
 # выбор промахнулся: какие группы есть и что выбрано, показывает
-# python -m app.diagnose_melbet.
+# venv/bin/python -m app.diagnose_melbet.
 MELBET_GROUPS = {}
 for _pair in os.getenv("MELBET_GROUPS", "").split(","):
     if "=" in _pair:
