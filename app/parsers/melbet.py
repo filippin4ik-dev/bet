@@ -54,9 +54,10 @@ import requests
 
 from ..config import (MELBET_API_HOST, MELBET_COUNTRY, MELBET_FEED_TIMEOUT,
                       MELBET_FULL_MARKETS, MELBET_FULL_MARKETS_WORKERS,
-                      MELBET_HOSTS, MELBET_LANG, MELBET_LIVE_COUNT,
-                      MELBET_MIN_REFRESH, MELBET_PARTNER, MELBET_SITE_HOST,
-                      MELBET_SPORT_COUNT, MELBET_SPORT_WORKERS)
+                      MELBET_GROUPS, MELBET_HOSTS, MELBET_LANG,
+                      MELBET_LIVE_COUNT, MELBET_MIN_REFRESH, MELBET_PARTNER,
+                      MELBET_SITE_HOST, MELBET_SPORT_COUNT,
+                      MELBET_SPORT_WORKERS)
 from ..models import KIND_LIVE, KIND_PREMATCH, MarketOdds
 from .base import BaseParser
 from .html_utils import (fmt_hcap, fmt_total, format_start, market_scope,
@@ -176,7 +177,7 @@ class MelbetParser(BaseParser):
         if MELBET_FULL_MARKETS and not live:
             events = self._enrich(base, feed, events, deadline)
 
-        layout = detect(events)
+        layout = detect(events, forced=MELBET_GROUPS)
         self._log_layout(layout)
 
         now = time.time()

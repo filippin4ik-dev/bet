@@ -210,10 +210,19 @@ class Layout:
         return "; ".join(parts) or "рынков не найдено"
 
 
-def detect(events: list[RawEvent]) -> Layout:
-    """Определяет раскладку рынков по снимку линии."""
+def detect(events: list[RawEvent],
+           forced: dict[str, int] | None = None) -> Layout:
+    """Определяет раскладку рынков по снимку линии.
+
+    forced — группы, закреплённые оператором вручную (MELBET_GROUPS).
+    Нужны, если автоматический выбор промахнулся: например тотал тайма
+    вдруг стал попадаться чаще тотала матча. Что именно выбрано и какие
+    ещё группы есть, показывает python -m app.diagnose_melbet."""
     layout = Layout()
     layout.groups, layout.group_stats = _pick_groups(events)
+    for family, group in (forced or {}).items():
+        if family in FAMILY_CODES:
+            layout.groups[family] = group
     layout.home_edge = _home_edge(events, layout.groups.get(WINNER))
 
     for family, (good, bad) in _collect_votes(events, layout.groups).items():

@@ -293,6 +293,22 @@ def test_nameless_subgame_is_skipped():
     assert _subgames(_game(), "", outcomes) == []
 
 
+def test_forced_group_overrides_automatic_choice():
+    """Оператор может закрепить группу руками, если автовыбор промахнулся."""
+    half = _ladder_outcomes(G_HALF_TOTAL, (9, 10), {0.5: (1.7, 2.1)})
+    events = []
+    for game in _line(count=15, extra=half):
+        ev = RawEvent(game=game, picks=_picks(game))
+        ev.base_picks = ev.picks
+        events.append(ev)
+    layout = detect(events, forced={TOTAL: G_HALF_TOTAL})
+    odds = []
+    for ev in events:
+        odds.extend(MelbetParser()._event_odds(ev, layout, NOW, False))
+    keys = {o.market_key for o in odds}
+    assert "total:0.5" in keys and "total:2.5" not in keys
+
+
 def test_full_cycle_over_fake_feed():
     """Полный обход: список видов спорта → линия по каждому виду →
     роспись каждого события. Сеть подменена, но маршруты и параметры

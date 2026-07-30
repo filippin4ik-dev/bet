@@ -344,6 +344,17 @@ MELBET_FULL_MARKETS_WORKERS = int(
     os.getenv("MELBET_FULL_MARKETS_WORKERS", "12"))
 # Сколько секунд максимум тратить на сбор всей линии за один обход.
 MELBET_FEED_TIMEOUT = float(os.getenv("MELBET_FEED_TIMEOUT", "120"))
+# Группы рынков Melbet, закреплённые вручную: «семейство=группа» через
+# запятую, например «total=17,hcap=2,itotal1=15,itotal2=62». Обычно не
+# нужно — парсер выбирает группу сам по всей линии. Пригодится, если
+# выбор промахнулся: какие группы есть и что выбрано, показывает
+# python -m app.diagnose_melbet.
+MELBET_GROUPS = {}
+for _pair in os.getenv("MELBET_GROUPS", "").split(","):
+    if "=" in _pair:
+        _family, _, _group = _pair.partition("=")
+        if _group.strip().lstrip("gG").isdigit():
+            MELBET_GROUPS[_family.strip()] = int(_group.strip().lstrip("gG"))
 # Минимальная пауза между обходами Melbet, сек. Полная роспись — это
 # запрос на КАЖДОЕ событие линии, и гонять её чаще нет смысла: прематч за
 # минуту почти не двигается, а частый обход быстрее приводит к блокировке.

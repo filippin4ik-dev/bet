@@ -19,6 +19,7 @@
 import logging
 from collections import Counter
 
+from .config import MELBET_GROUPS
 from .parsers.melbet import MelbetParser, _picks, _subgame_events
 from .parsers.melbet_layout import FAMILY_OF, RawEvent, detect
 
@@ -97,13 +98,18 @@ def main() -> None:
     _print_codes(events)
 
     print("-" * 64)
-    layout = detect(events)
+    layout = detect(events, forced=MELBET_GROUPS)
+    if MELBET_GROUPS:
+        print("Группы закреплены вручную (MELBET_GROUPS):", MELBET_GROUPS)
     print("Раскладка рынков:", layout.summary())
     print("Перевес хозяев по линии (должен быть > 0):", layout.home_edge)
     for family, rows in sorted(layout.group_stats.items()):
         pretty = ", ".join(f"G{g}: {n} соб., медиана линии {m:g}"
                            for g, n, m in rows[:5])
         print(f"  {family:<9} {pretty}")
+    if len(layout.group_stats.get("total", [])) > 1:
+        print("  (если выбрана не та группа — закрепите нужную вручную: "
+              "MELBET_GROUPS=total=17,hcap=2)")
 
     print("-" * 64)
     odds = []
