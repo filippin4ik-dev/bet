@@ -551,20 +551,77 @@ def test_count_is_clamped_to_feed_limits():
     assert _count(47) == 45
 
 
-def test_probe_reports_why_mirror_refused():
-    """Причина отказа зеркала попадает и в лог, и в диагностику: 406 и 404
-    лечатся по-разному."""
+def _refusing_parser(status=406, body=""):
     parser = MelbetParser()
 
     def refuse(url, *, params=None, timeout=None, **_kw):
         resp = requests.Response()
-        resp.status_code = 406
+        resp.status_code = status
+        resp._content = body.encode("utf-8")
         raise requests.HTTPError("не принято", response=resp)
 
     parser.get_json = refuse
+    return parser
+
+
+def test_probe_reports_why_mirror_refused():
+    """Причина отказа зеркала попадает и в лог, и в диагностику: 406 и 404
+    лечатся по-разному."""
+    parser = _refusing_parser()
     assert parser._resolve_base() is None
     assert parser.probe_notes and all("406" in note
                                       for _base, note in parser.probe_notes)
+
+
+def test_probe_names_the_disable_vpn_stub():
+    """Заглушка «отключите VPN» — это про адрес сервера, а не про строку
+    запроса, и чинится она другим зеркалом."""
+    parser = _refusing_parser(403, "<html><title>Пожалуйста, отключите "
+                                   "VPN</title></html>")
+    assert parser._resolve_base() is None
+    assert all("VPN" in note for _base, note in parser.probe_notes)
+
+
+def test_first_probe_runs_right_after_machine_boot(monkeypatch):
+    """time.monotonic() считает секунды с загрузки машины, и у свежего
+    парсера «прошлая попытка» обязана быть бесконечно давно: иначе первые
+    PROBE_BACKOFF секунд после перезагрузки сервера база не искалась бы
+    вовсе и Melbet молча отдавала пустую линию."""
+    monkeypatch.setattr("app.parsers.melbet.time.monotonic", lambda: 1.0)
+    parser = _refusing_parser()
+    assert parser._resolve_base() is None
+    assert parser.probe_notes, "зеркала должны быть перебраны сразу"
+
+
+def test_failed_probe_is_not_repeated_every_cycle(monkeypatch):
+    """Неудачный перебор повторяется не чаще PROBE_BACKOFF: он стоит
+    таймаута на каждое зеркало."""
+    clock = {"now": 10_000.0}
+    monkeypatch.setattr("app.parsers.melbet.time.monotonic",
+                        lambda: clock["now"])
+    parser = _refusing_parser()
+    assert parser._resolve_base() is None
+    tried = len(parser.probe_notes)
+
+    parser.probe_notes = []
+    clock["now"] += 10
+    assert parser._resolve_base() is None
+    assert parser.probe_notes == []
+
+    clock["now"] += 300
+    assert parser._resolve_base() is None
+    assert len(parser.probe_notes) == tried
+
+
+def test_diagnostics_probe_ignores_the_backoff(monkeypatch):
+    """Диагностику запускают именно тогда, когда линия пуста, — и она
+    обязана сходить к зеркалам, а не пересказать пустой список."""
+    monkeypatch.setattr("app.parsers.melbet.time.monotonic", lambda: 10_000.0)
+    parser = _refusing_parser()
+    parser._last_probe = 10_000.0
+    assert parser._resolve_base() is None and not parser.probe_notes
+    assert parser._resolve_base(force=True) is None
+    assert parser.probe_notes
 
 
 def test_ambiguous_subgame_group_is_skipped():

@@ -40,14 +40,18 @@ Melbet работает на том же движке, что 1xBet/Betwinner/Li
 
 База — это домен сайта плюс префикс: сейчас это «/service-api», на
 зеркалах постарше эндпоинты лежат прямо в корне. Домен и префикс парсер
-перебирает сам (как у Fonbet) и запоминает первый рабочий; жёстко задать
-можно через MELBET_API_HOST.
+перебирает сам (как у Fonbet) и запоминает первый рабочий; неудачный
+перебор повторяется не чаще раза в PROBE_BACKOFF секунд.
 
-ВАЖНО ПРО ДОСТУП. Сайт пускает только российские адреса: с зарубежного IP
-и с IP дата-центров edge отвечает 406 ещё до фида, а melbet.ru отдаёт
-страницу «отключите VPN». То есть парсер рассчитан на тот же российский
-VPS, с которого работают Winline и Fonbet; проверить, что фид отвечает
-именно с вашего сервера, можно командой `venv/bin/python -m
+ВАЖНО ПРО ДОСТУП, И ЭТО ГЛАВНАЯ ПРИЧИНА ПУСТОЙ ЛИНИИ. Зеркала пускают
+разные адреса. melbet.ru отвечает страницей «Пожалуйста, отключите VPN»
+(HTTP 403) на ЛЮБОЙ путь, если адрес клиента ему не нравится, — и IP
+дата-центра ему как раз не нравится, хотя сканер именно на VPS и живёт.
+Международные зеркала (melbet.com, melbet.org, mel-bet.com) на тот же
+запрос с того же адреса отдают линию — проверено на живом фиде
+2026-07-30. Поэтому перебирается несколько доменов (MELBET_HOSTS), а не
+один; жёстко задать базу можно через MELBET_API_HOST. Что ответило
+каждое зеркало ИМЕННО С ВАШЕГО сервера, показывает `venv/bin/python -m
 app.diagnose_melbet`.
 
 КАК РАЗБИРАЕТСЯ РЫНОК. В фиде нет ни одного слова о смысле котировки —
@@ -107,6 +111,12 @@ log = logging.getLogger("parsers.melbet")
 API_PREFIXES = ["/service-api", ""]
 # Если ни один домен не ответил — не перебираем весь список каждый цикл
 PROBE_BACKOFF = 300
+# «Зеркала ещё ни разу не перебирались». Именно минус бесконечность, а не
+# ноль: time.monotonic() на Linux считает секунды с загрузки МАШИНЫ, и с
+# нулём первые PROBE_BACKOFF секунд после каждой перезагрузки сервера
+# выглядели для парсера как «только что перебирал» — база не искалась
+# вовсе, а обход молча возвращал пустую линию.
+NEVER_PROBED = float("-inf")
 # Пауза перед повторной попыткой, когда фид оборвал соединение
 RETRY_PAUSE = 0.5
 # Если по чемпионатам собралось меньше этой доли линии — фид отвечал не
@@ -133,7 +143,7 @@ class MelbetParser(BaseParser):
     def __init__(self) -> None:
         super().__init__()
         self._base: str | None = None
-        self._last_probe = 0.0
+        self._last_probe = NEVER_PROBED
         self._layout_note = ""
         # Что ответило каждое зеркало на последнем переборе — для лога и
         # для app/diagnose_melbet.py.
@@ -160,11 +170,16 @@ class MelbetParser(BaseParser):
                 bases.append(host + prefix)
         return bases
 
-    def _resolve_base(self) -> str | None:
+    def _resolve_base(self, force: bool = False) -> str | None:
         if self._base:
             return self._base
         now = time.monotonic()
-        if now - self._last_probe < PROBE_BACKOFF:
+        if not force and now - self._last_probe < PROBE_BACKOFF:
+            # Без этой строки обход, пропущенный из-за паузы, выглядел в
+            # логе как «Melbet: 0 котировок» безо всякой причины.
+            log.info("Melbet: рабочей базы фида нет, следующий перебор "
+                     "зеркал через %.0f с — в этом обходе линии не будет",
+                     PROBE_BACKOFF - (now - self._last_probe))
             return None
         self._last_probe = now
         notes: list[tuple[str, str]] = []
@@ -200,8 +215,12 @@ class MelbetParser(BaseParser):
             # значит эндпоинты лежат под другим префиксом.
             return "ответ не JSON (это страница сайта, а не фид)"
         except requests.RequestException as exc:
-            code = getattr(getattr(exc, "response", None), "status_code", None)
+            resp = getattr(exc, "response", None)
+            code = getattr(resp, "status_code", None)
             if code in (403, 406):
+                if _is_geo_stub(resp):
+                    return (f"HTTP {code} — вместо фида страница «отключите "
+                            f"VPN»: зеркало не пускает адрес этого сервера")
                 return (f"HTTP {code} — фид отклонил запрос (адрес не пускают "
                         f"либо строка запроса не та)")
             if code == 404:
@@ -871,6 +890,20 @@ def _event_url(game: dict) -> str:
     if sport and champ and gid:
         return f"{MELBET_SITE_HOST}/ru/line/{sport}/{champ}/{gid}"
     return f"{MELBET_SITE_HOST}/ru/line"
+
+
+def _is_geo_stub(resp) -> bool:
+    """Ответ — это заглушка «Пожалуйста, отключите VPN», а не отказ фида.
+
+    Зеркало отдаёт её с кодом 403 на ЛЮБОЙ путь, когда адрес клиента ему
+    не нравится (проверено: melbet.ru так отвечает и на корень сайта, и
+    на эндпоинты фида). Отличить её от «строка запроса не та» важно:
+    первое лечится другим зеркалом или прокси, второе — правкой парсера."""
+    try:
+        head = (resp.text or "")[:2000].lower()
+    except Exception:  # noqa: BLE001 — тело могло не приехать
+        return False
+    return "отключите vpn" in head or "disable vpn" in head
 
 
 def _reason(exc: BaseException) -> str:
