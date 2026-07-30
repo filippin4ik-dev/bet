@@ -6,6 +6,7 @@
 путь с идентификатором события из фида вместо постоянного номера. Здесь
 проверяется форма адреса, а не то, что она «непустая».
 """
+from app.parsers import melbet
 from app.parsers.html_utils import slugify
 from app.parsers.melbet import _event_url as melbet_url
 from app.parsers.melbet import _subgame_event
@@ -15,7 +16,7 @@ from app.parsers.wl_feed import WinlineFeed
 # Событие в том виде, в каком его отдаёт фид 1xBet: I — номер в фиде,
 # CI — постоянный номер, который стоит в адресе страницы.
 GAME = {
-    "I": 738821803, "CI": 353889982, "LI": 118593, "SI": 1,
+    "I": 738821803, "CI": 353889982, "LI": 118593, "SI": 1, "COI": 223,
     "SN": "Футбол", "SE": "Football",
     "L": "Лига Европы УЕФА", "LE": "UEFA Europa League",
     "O1": "Маккаби Тель-Авив", "O1E": "Maccabi Tel Aviv",
@@ -28,12 +29,12 @@ CHAMP = (1, "Кубок «Путь регионов»", "Россия")
 
 # ---------------------------------------------------------------- Melbet
 
-def test_melbet_link_matches_the_pages_the_site_serves():
-    """Ровно тот формат, что отдаёт сам сайт и индексируют поисковики:
-    /ru/line/<спорт>/<id чемпионата>-<чемпионат>/<CI>-<команды>."""
+def test_melbet_link_matches_the_route_the_site_opens():
+    """Формат melbet.ru — внутренний маршрут приложения, снятый с живых
+    ссылок сайта: <чемпионат>-<событие>-<страна>-<спорт>-0-<лайв>-0."""
     assert melbet_url(GAME, live=False) == (
-        "https://melbet.ru/ru/line/football/118593-uefa-europa-league/"
-        "353889982-maccabi-tel-aviv-sheriff-tiraspol")
+        "https://melbet.ru/ru/sport/event-details/"
+        "118593-353889982-223-1-0-0-0-maccabi-tel-aviv-sheriff-tiraspol")
 
 
 def test_melbet_takes_the_number_from_the_address_not_from_the_feed():
@@ -44,19 +45,56 @@ def test_melbet_takes_the_number_from_the_address_not_from_the_feed():
     assert "738821803" not in url
 
 
-def test_melbet_live_match_opens_in_the_live_section():
-    assert melbet_url(GAME, live=True).startswith(
-        "https://melbet.ru/ru/live/football/")
+def test_melbet_live_match_is_marked_as_live():
+    """Раздел тот же, лайв отличается флагом в предпоследней позиции."""
+    assert melbet_url(GAME, live=True) == (
+        "https://melbet.ru/ru/sport/event-details/"
+        "118593-353889982-223-1-0-1-0-maccabi-tel-aviv-sheriff-tiraspol")
 
 
 def test_melbet_falls_back_to_a_page_that_exists():
-    """Без номера события — страница чемпионата, без чемпионата — раздел.
-    Выдуманный адрес хуже раздела: по нему пользователь получит 404."""
+    """Без номера события ссылка ведёт в раздел линии: выдуманный адрес
+    хуже раздела, по нему пользователь получит 404."""
     no_game = {k: v for k, v in GAME.items() if k not in ("I", "CI")}
-    assert melbet_url(no_game, live=False) == (
-        "https://melbet.ru/ru/line/football/118593-uefa-europa-league")
-    assert melbet_url({"SN": "Футбол"}, live=False) == (
-        "https://melbet.ru/ru/line")
+    assert melbet_url(no_game, live=False) == "https://melbet.ru/ru/line"
+    assert melbet_url(no_game, live=True) == "https://melbet.ru/ru/live"
+
+
+def test_melbet_link_leads_to_the_platform_the_odds_came_from(monkeypatch):
+    """Номера событий у melbet.ru и международных зеркал СВОИ. Если линия
+    пришла с .com (так бывает, когда melbet.ru не пускает адрес сервера),
+    ссылка на melbet.ru не откроется ни в каком формате — сайт не знает
+    таких номеров. Поэтому хост ссылки следует за базой фида, а формат —
+    за хостом."""
+    monkeypatch.setattr(melbet, "MELBET_SITE_HOST_SET", False)
+    url = melbet_url(GAME, live=False, base="https://melbet.com/service-api")
+    assert url == (
+        "https://melbet.com/ru/line/football/118593-uefa-europa-league/"
+        "353889982-maccabi-tel-aviv-sheriff-tiraspol")
+
+
+def test_melbet_explicit_site_host_wins(monkeypatch):
+    monkeypatch.setattr(melbet, "MELBET_SITE_HOST_SET", True)
+    monkeypatch.setattr(melbet, "MELBET_SITE_HOST", "https://melbet.ru")
+    url = melbet_url(GAME, live=False, base="https://melbet.com/service-api")
+    assert url.startswith("https://melbet.ru/ru/sport/event-details/")
+
+
+def test_melbet_format_can_be_changed_without_touching_code(monkeypatch):
+    """У международных зеркал формат другой, а проверить их отсюда нельзя
+    — поэтому шаблон вынесен в настройку."""
+    monkeypatch.setattr(melbet, "MELBET_EVENT_URL", melbet.EVENT_URL_SEO)
+    assert melbet_url(GAME, live=False) == (
+        "https://melbet.ru/ru/line/football/118593-uefa-europa-league/"
+        "353889982-maccabi-tel-aviv-sheriff-tiraspol")
+
+
+def test_melbet_broken_template_does_not_break_the_link(monkeypatch):
+    """Опечатка в настройке не должна лишать ссылок всю БК."""
+    monkeypatch.setattr(melbet, "MELBET_EVENT_URL", "/ru/{такого-нет}")
+    monkeypatch.setattr(melbet, "_bad_template_logged", False)
+    assert melbet_url(GAME, live=False).startswith(
+        "https://melbet.ru/ru/sport/event-details/118593-353889982-")
 
 
 def test_melbet_subgame_points_at_the_parent_match():
@@ -77,8 +115,8 @@ def test_melbet_survives_a_feed_without_english_names():
     russian = {k: v for k, v in GAME.items()
                if k not in ("SE", "LE", "O1E", "O2E")}
     assert melbet_url(russian, live=False) == (
-        "https://melbet.ru/ru/line/futbol/118593-liga-evropy-uefa/"
-        "353889982-makkabi-tel-aviv-sherif")
+        "https://melbet.ru/ru/sport/event-details/"
+        "118593-353889982-223-1-0-0-0-makkabi-tel-aviv-sherif")
 
 
 # --------------------------------------------------------------- Winline

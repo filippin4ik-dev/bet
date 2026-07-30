@@ -19,14 +19,28 @@
   таблице видно, если БК поменяла нумерацию;
 - как разложились рынки и с каким счётом голосов;
 - пример события с готовыми котировками — их и увидит сканер.
+
+Отдельный режим — подбор ссылки на страницу матча:
+
+    cd /opt/arb-scanner && venv/bin/python -m app.diagnose_melbet --links
+
+Формат адреса у площадок движка разный (у melbet.ru — внутренний маршрут
+приложения, у международных зеркал — SEO-адрес), да и номера событий у них
+свои. Угадать снаружи нельзя: melbet.ru отвечает только российским
+адресам. Поэтому режим строит варианты ссылки на живых событиях, дёргает
+каждый и показывает, какой из них действительно открыл матч.
 """
 import logging
+import sys
 import time
 from collections import Counter
 
-from .config import MELBET_GROUPS
-from .parsers.melbet import (MelbetParser, _picks, _subgame_event, _subgames,
-                             _subgame_scope)
+import requests
+
+from .config import (MELBET_EVENT_URL, MELBET_GROUPS, MELBET_SITE_HOST_SET)
+from .parsers.melbet import (EVENT_URL_DEFAULT, EVENT_URL_SEO, MelbetParser,
+                             _picks, _subgame_event, _subgame_scope,
+                             _subgames, _team, event_url_parts, site_host)
 from .parsers.melbet_layout import FAMILY_OF, RawEvent, detect
 
 logging.basicConfig(level=logging.INFO,
@@ -46,6 +60,9 @@ SAMPLE_FULL = 15
 
 
 def main() -> None:
+    if "--links" in sys.argv[1:]:
+        check_links()
+        return
     print("=" * 64)
     print("ДИАГНОСТИКА ПАРСЕРА MELBET")
     print("=" * 64)
@@ -179,6 +196,134 @@ def main() -> None:
     else:
         print("Ни одной котировки: разметка рынков не подтвердилась — "
               "смотрите таблицу кодов выше и предупреждения в логе.")
+
+
+# Варианты формата ссылки на матч. Точный формат снаружи не угадать: у
+# melbet.ru и международных зеркал разные и маршруты, и пространства
+# номеров, а сама melbet.ru отвечает только с российского адреса — поэтому
+# варианты проверяются здесь, на живом сайте, с вашего сервера.
+LINK_CANDIDATES = [
+    ("внутренний маршрут сайта (формат melbet.ru)", EVENT_URL_DEFAULT),
+    ("то же, но номер события из фида (I вместо CI)",
+     "/ru/sport/event-details/"
+     "{champ}-{game_feed}-{country}-{sport}-0-{live}-0-{teams}"),
+    ("то же, но чемпионат и страна местами",
+     "/ru/sport/event-details/"
+     "{country}-{game}-{champ}-{sport}-0-{live}-0-{teams}"),
+    ("SEO-адрес (формат melbet.com / melbet.mobi)", EVENT_URL_SEO),
+    ("SEO-адрес с номером события из фида (I)",
+     "/ru/{section}/{sport_slug}/{champ}-{champ_slug}/{game_feed}-{teams}"),
+]
+
+UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+      "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
+
+
+def check_links() -> None:
+    """Подбирает формат ссылки на страницу матча прямо на живом сайте.
+
+    Запускать на сервере сканера: melbet.ru пускает только российские
+    адреса, из песочницы разработки её страницы не открываются вовсе."""
+    print("=" * 64)
+    print("ПОДБОР ССЫЛКИ НА СТРАНИЦУ МАТЧА (MELBET)")
+    print("=" * 64)
+
+    parser = MelbetParser()
+    base = parser._resolve_base(force=True)
+    if not base:
+        print("Фид не ответил ни на одном зеркале — сначала разберитесь с "
+              "этим: python -m app.diagnose_melbet")
+        return
+    host = site_host(base)
+    print(f"База фида: {base}")
+    print(f"Хост ссылок: {host}"
+          + ("  (задан в MELBET_SITE_HOST)" if MELBET_SITE_HOST_SET
+             else "  (взят от базы фида)"))
+    if not base.startswith(host):
+        print("\n!!! ВНИМАНИЕ: линия приходит с одной площадки, а ссылки "
+              "ведут на другую. Номера событий, чемпионатов и стран у них "
+              "не совпадают, и ссылка не откроется НИ В КАКОМ формате: "
+              "сайт просто не знает таких номеров. Уберите "
+              "MELBET_SITE_HOST — тогда ссылки пойдут туда же, откуда "
+              "линия, — либо задайте MELBET_API_HOST под нужный сайт.\n")
+
+    games = _link_sample(parser, base)
+    if not games:
+        print("В линии не нашлось событий — смотреть нечего.")
+        return
+
+    session = requests.Session()
+    session.headers["User-Agent"] = UA
+    for game, live in games:
+        title = f"{_team(game, 'O1')} — {_team(game, 'O2')}"
+        print("-" * 64)
+        print(f"{title} ({'лайв' if live else 'прематч'}, "
+              f"{game.get('L') or '—'})")
+        parts = event_url_parts(game, live)
+        print("  номера из фида: " + ", ".join(
+            f"{k}={parts[k]}" for k in ("champ", "country", "sport", "game",
+                                        "game_feed")))
+        for name, template in LINK_CANDIDATES:
+            url = host + template.format(**parts)
+            print(f"  · {name}")
+            print(f"    {url}")
+            print(f"    {_probe_link(session, url, game)}")
+
+    print("-" * 64)
+    print("Что делать с результатом: если один из вариантов открыл матч, "
+          "пропишите его шаблон в переменную окружения, например")
+    print(f'  MELBET_EVENT_URL="{EVENT_URL_DEFAULT}"')
+    current = MELBET_EVENT_URL or (
+        (EVENT_URL_DEFAULT if host.endswith(".ru") else EVENT_URL_SEO)
+        + "  (по умолчанию, по хосту ссылок)")
+    print(f"и перезапустите сканер. Сейчас используется: {current}")
+    print("Если ни один не открыл — откройте любой матч на сайте руками и "
+          "пришлите адрес из строки браузера вместе с этой распечаткой: по "
+          "номерам выше видно, из каких полей он собирается.")
+
+
+def _link_sample(parser: MelbetParser, base: str) -> list[tuple[dict, bool]]:
+    """По одному событию из прематча и из лайва: маршруты у них разные."""
+    out: list[tuple[dict, bool]] = []
+    for feed, live in (("LineFeed", False), ("LiveFeed", True)):
+        try:
+            games = parser._games(base, feed, "sports", parser._sports(
+                base, feed)[:1], 50, time.monotonic() + 30)
+        except Exception as exc:  # noqa: BLE001
+            print(f"  {feed}: не получилось взять события ({exc})")
+            continue
+        for game in games.values():
+            if _team(game, "O1") and _team(game, "O2"):
+                out.append((game, live))
+                break
+    return out
+
+
+def _probe_link(session: requests.Session, url: str, game: dict) -> str:
+    """Что отвечает сайт: открылась страница матча или что-то другое."""
+    try:
+        resp = session.get(url, timeout=20, allow_redirects=True)
+    except Exception as exc:  # noqa: BLE001
+        return f"не открылось: {type(exc).__name__}"
+    text = resp.content.decode("utf-8", "replace").lower()
+    if "отключите vpn" in text or "cloudflare_error_1000s_box" in text:
+        return ("адрес сервера сайт не пускает («отключите VPN») — проверку "
+                "надо гонять с российского IP")
+    if resp.url.rstrip("/").endswith("/block"):
+        return (f"сайт увёл на заглушку {resp.url} — этот адрес он не "
+                "обслуживает для вашей страны, проверить формат по нему "
+                "нельзя")
+    names = [n.lower() for n in (_team(game, "O1"), _team(game, "O2"),
+                                 game.get("O1E") or "", game.get("O2E") or "")
+             if n]
+    found = [n for n in names if n in text]
+    where = "" if resp.url == url else f", увёл на {resp.url}"
+    if found:
+        return (f"HTTP {resp.status_code}, {len(resp.content)} байт{where} — "
+                f"МАТЧ НА СТРАНИЦЕ (нашлось: {', '.join(found[:2])})")
+    return (f"HTTP {resp.status_code}, {len(resp.content)} байт{where} — "
+            "команд на странице нет (либо не тот адрес, либо страница "
+            "рисуется скриптом: откройте её в браузере)")
 
 
 def _print_codes(events: list[RawEvent]) -> None:

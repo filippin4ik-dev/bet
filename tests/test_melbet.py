@@ -186,7 +186,10 @@ def test_event_fields_and_link():
     assert o.bookmaker == "Melbet"
     assert o.sport == "Футбол · РПЛ"
     assert o.start_ts == int(FUTURE)
-    assert o.url.endswith("/ru/line/1/10/1") or "/ru/line/" in o.url
+    # Ссылка ведёт на страницу матча: чемпионат, постоянный номер события
+    # и флаг «не лайв» — подробнее в tests/test_event_urls.py
+    assert o.url.startswith("https://melbet.ru/ru/sport/event-details/10-1-")
+    assert o.url.endswith("-0-0-0-hozyaeva-0-gosti-0")
 
 
 def test_started_matches_are_skipped_in_prematch():
