@@ -473,7 +473,7 @@ tr.hot .profit { background: var(--hot-soft); color: var(--hot); }
 .bk-bcgame  { color: #c084fc; }   /* bc.game — фиолетовый */
 .bk-leon    { color: #eab308; }   /* LeonBet — жёлтый */
 .bk-betcity { color: #22d3ee; }   /* Betcity — голубой (циан) */
-.bk-melbet  { color: #fb923c; }   /* Melbet — оранжевый */
+.bk-melbet  { color: #f472b6; }   /* Melbet — розовый */
 .bk-other   { color: var(--muted); }
 
 /* На светлом фоне те же цвета теряются (жёлтый LeonBet почти не читается) —
@@ -485,7 +485,7 @@ tr.hot .profit { background: var(--hot-soft); color: var(--hot); }
 [data-theme="light"] .bk-bcgame  { color: #7e22ce; }
 [data-theme="light"] .bk-leon    { color: #a16207; }
 [data-theme="light"] .bk-betcity { color: #0e7490; }
-[data-theme="light"] .bk-melbet  { color: #c2410c; }
+[data-theme="light"] .bk-melbet  { color: #be185d; }
 
 .bk-chip {
   display: inline-block;
