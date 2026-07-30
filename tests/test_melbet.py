@@ -10,8 +10,8 @@ import time
 
 import requests
 
-from app.parsers.melbet import (MelbetParser, _count, _picks, _subgame_event,
-                                _subgames)
+from app.parsers.melbet import (MelbetParser, _count, _is_geo_stub, _picks,
+                                _subgame_event, _subgames)
 from app.parsers.melbet_layout import (BTS, HCAP, ITOTAL_SIDES, TOTAL,
                                        RawEvent, detect)
 
@@ -551,20 +551,130 @@ def test_count_is_clamped_to_feed_limits():
     assert _count(47) == 45
 
 
-def test_probe_reports_why_mirror_refused():
-    """Причина отказа зеркала попадает и в лог, и в диагностику: 406 и 404
-    лечатся по-разному."""
+def _refusing_parser(status=406, body="", content_type="text/html"):
     parser = MelbetParser()
 
     def refuse(url, *, params=None, timeout=None, **_kw):
         resp = requests.Response()
-        resp.status_code = 406
+        resp.status_code = status
+        resp._content = body.encode("utf-8")
+        # Заголовок как у живого сайта: «text/html» БЕЗ charset — и
+        # кодировка выводится из него ровно так же, как это делает сам
+        # requests при настоящем запросе. Без этих двух строк ответ
+        # раскодировался бы по содержимому, русский текст читался бы, и
+        # тест был бы зелёным там, где боевой ответ приезжает
+        # кракозябрами (ISO-8859-1 по умолчанию для text/html).
+        resp.headers["Content-Type"] = content_type
+        resp.encoding = requests.utils.get_encoding_from_headers(resp.headers)
         raise requests.HTTPError("не принято", response=resp)
 
     parser.get_json = refuse
+    return parser
+
+
+# Заглушка melbet.ru в том виде, в каком она приходит на боевой сервер
+# (снято живьём 2026-07-30): русский текст в UTF-8, а Content-Type — без
+# charset, см. _refusing_parser выше.
+VPN_STUB_HTML = (
+    '<!DOCTYPE html>\n<html lang="ru">\n<head>\n'
+    '    <meta charset="UTF-8">\n'
+    '    <title>Пожалуйста, отключите VPN</title>\n</head>\n<body>\n'
+    '    <section class="site-unavailable">\n'
+    '        <div class="site-unavailable__title">Данный сайт <br> '
+    'недоступен в <br> вашей стране</div>\n'
+    '    </section>\n</body>\n</html>\n'
+    '<p style="display: none;">::CLOUDFLARE_ERROR_1000S_BOX:: </p>'
+)
+
+
+def test_probe_reports_why_mirror_refused():
+    """Причина отказа зеркала попадает и в лог, и в диагностику: 406 и 404
+    лечатся по-разному."""
+    parser = _refusing_parser()
     assert parser._resolve_base() is None
     assert parser.probe_notes and all("406" in note
                                       for _base, note in parser.probe_notes)
+
+
+def test_probe_names_the_disable_vpn_stub():
+    """Заглушка «отключите VPN» — это про адрес сервера, а не про строку
+    запроса, и чинится она другим зеркалом.
+
+    Страница подставляется целиком и с боевым заголовком: сайт отдаёт её
+    как «text/html» без charset, requests по стандарту разбирает такой
+    ответ как ISO-8859-1, и поиск русских слов в resp.text ничего не
+    находил — на живом сервере заглушка так и отчитывалась обычным
+    «фид отклонил запрос», отправляя чинить строку запроса вместо
+    адреса."""
+    parser = _refusing_parser(403, VPN_STUB_HTML)
+    assert parser._resolve_base() is None
+    assert all("VPN" in note for _base, note in parser.probe_notes)
+
+
+def test_geo_stub_survives_a_page_without_russian_text():
+    """Опознание не должно держаться на одной формулировке заголовка:
+    вёрстку заглушки (`site-unavailable`, cloudflare-маркер) видно в любой
+    кодировке и при любой смене текста."""
+    resp = requests.Response()
+    resp.status_code = 403
+    resp._content = (b'<html><head><title>Nope</title></head><body>'
+                     b'<section class="site-unavailable"></section>'
+                     b'</body></html>')
+    resp.headers["Content-Type"] = "text/html"
+    assert _is_geo_stub(resp)
+
+    # обычный отказ фида заглушкой считаться не должен
+    ok = requests.Response()
+    ok.status_code = 406
+    ok._content = b'{"Error":"bad params","Success":false}'
+    assert not _is_geo_stub(ok)
+
+    # тело не приехало вовсе — не падаем
+    empty = requests.Response()
+    empty.status_code = 403
+    assert not _is_geo_stub(empty)
+
+
+def test_first_probe_runs_right_after_machine_boot(monkeypatch):
+    """time.monotonic() считает секунды с загрузки машины, и у свежего
+    парсера «прошлая попытка» обязана быть бесконечно давно: иначе первые
+    PROBE_BACKOFF секунд после перезагрузки сервера база не искалась бы
+    вовсе и Melbet молча отдавала пустую линию."""
+    monkeypatch.setattr("app.parsers.melbet.time.monotonic", lambda: 1.0)
+    parser = _refusing_parser()
+    assert parser._resolve_base() is None
+    assert parser.probe_notes, "зеркала должны быть перебраны сразу"
+
+
+def test_failed_probe_is_not_repeated_every_cycle(monkeypatch):
+    """Неудачный перебор повторяется не чаще PROBE_BACKOFF: он стоит
+    таймаута на каждое зеркало."""
+    clock = {"now": 10_000.0}
+    monkeypatch.setattr("app.parsers.melbet.time.monotonic",
+                        lambda: clock["now"])
+    parser = _refusing_parser()
+    assert parser._resolve_base() is None
+    tried = len(parser.probe_notes)
+
+    parser.probe_notes = []
+    clock["now"] += 10
+    assert parser._resolve_base() is None
+    assert parser.probe_notes == []
+
+    clock["now"] += 300
+    assert parser._resolve_base() is None
+    assert len(parser.probe_notes) == tried
+
+
+def test_diagnostics_probe_ignores_the_backoff(monkeypatch):
+    """Диагностику запускают именно тогда, когда линия пуста, — и она
+    обязана сходить к зеркалам, а не пересказать пустой список."""
+    monkeypatch.setattr("app.parsers.melbet.time.monotonic", lambda: 10_000.0)
+    parser = _refusing_parser()
+    parser._last_probe = 10_000.0
+    assert parser._resolve_base() is None and not parser.probe_notes
+    assert parser._resolve_base(force=True) is None
+    assert parser.probe_notes
 
 
 def test_ambiguous_subgame_group_is_skipped():

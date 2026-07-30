@@ -319,8 +319,19 @@ BETCITY_EXT_MAX_AGE = float(os.getenv("BETCITY_EXT_MAX_AGE", "1800"))
 MELBET_API_HOST = os.getenv("MELBET_API_HOST", "").strip().rstrip("/")
 # Домены, которые перебираются автоматически (через запятую). Первый
 # рабочий запоминается до конца работы процесса.
+#
+# Зеркал в списке несколько не «на всякий случай»: они пускают РАЗНЫЕ
+# адреса. melbet.ru отдаёт заглушку «Пожалуйста, отключите VPN» (HTTP 403)
+# всему, что не похоже на домашний российский адрес, — в том числе IP
+# дата-центров, а сканер как раз на VPS и живёт. Международные зеркала
+# (.com/.org и mel-bet.com) на тот же запрос отвечают линией с датацентрового
+# IP — проверено на живом фиде 2026-07-30. Поэтому порядок такой: сначала
+# российский домен (там линия «своя», с русскими названиями), потом
+# международные — они и вытягивают обход, когда .ru не пускает сервер.
 MELBET_HOSTS = [h.strip().rstrip("/") for h in os.getenv(
-    "MELBET_HOSTS", "https://melbet.ru,https://melbet.com").split(",")
+    "MELBET_HOSTS",
+    "https://melbet.ru,https://melbet.com,https://melbet.org,"
+    "https://mel-bet.com").split(",")
     if h.strip()]
 # Хост сайта — только для ссылок на страницу события (deep-link).
 MELBET_SITE_HOST = os.getenv("MELBET_SITE_HOST",
