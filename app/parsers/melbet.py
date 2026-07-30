@@ -195,18 +195,21 @@ class MelbetParser(BaseParser):
             # ровном месте — обидно потерять обход из-за одного обрыва.
             data = self._get(base, "LineFeed", "GetSportsShortZip",
                              self._sports_params(), 8, attempts=3)
+        except requests.JSONDecodeError:
+            # Ответ есть, но это не фид: обычно так отвечает сам сайт —
+            # значит эндпоинты лежат под другим префиксом.
+            return "ответ не JSON (это страница сайта, а не фид)"
         except requests.RequestException as exc:
-            resp = getattr(exc, "response", None)
-            code = getattr(resp, "status_code", None)
+            code = getattr(getattr(exc, "response", None), "status_code", None)
             if code in (403, 406):
                 return (f"HTTP {code} — фид отклонил запрос (адрес не пускают "
-                        f"либо параметры не те)")
+                        f"либо строка запроса не та)")
             if code == 404:
                 return f"HTTP {code} — нет такого пути (не тот префикс базы)"
             if code:
                 return f"HTTP {code}"
             return f"нет ответа ({type(exc).__name__})"
-        except Exception as exc:  # noqa: BLE001 — в т.ч. битый JSON
+        except Exception as exc:  # noqa: BLE001 — мало ли что вернут
             return f"ответ не разобрать ({type(exc).__name__})"
         if not (isinstance(data, dict) and data.get("Value")):
             return "ответ без списка видов спорта"

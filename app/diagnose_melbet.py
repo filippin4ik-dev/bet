@@ -32,8 +32,13 @@ from .parsers.melbet_layout import FAMILY_OF, RawEvent, detect
 logging.basicConfig(level=logging.INFO,
                     format="%(levelname)s %(name)s: %(message)s")
 
-# Сколько событий брать на вид спорта: диагностике хватает верхушки
-# линии, а сервер БК не стоит грузить полным обходом ради проверки.
+# Сколько чемпионатов первого вида спорта (это футбол) брать в выборку.
+# Выборка нарочно «узкая и густая», а не по верхушке всех видов спорта:
+# разметка рынков проверяется по повторяющимся закономерностям линии, и на
+# сотне матчей одного вида она подтверждается так же, как на полной линии,
+# а на пёстрой выборке из всех видов — нет.
+SAMPLE_CHAMPS = 80
+# Столько событий берём с вида спорта, если чемпионаты не пришли.
 SAMPLE_PER_SPORT = 50
 # По скольким событиям смотреть полную роспись (по одному запросу на
 # событие — больше и не нужно, чтобы увидеть лестницы и подигры).
@@ -69,17 +74,19 @@ def main() -> None:
     if champs:
         print(f"Чемпионатов у первого вида спорта: {len(champs)}, событий в "
               f"них: {sum(gc for _li, gc in champs)}")
+        sample = [("champs", li) for li, _gc in champs[:SAMPLE_CHAMPS]]
     else:
         print("Чемпионаты не пришли — линия будет собираться только по "
               "видам спорта, то есть верхушкой (до 50 событий на вид).")
+        sample = [("sports", sid) for sid in sports]
 
     games: dict = {}
-    for sport_id in sports:
+    for key, value in sample:
         try:
-            chunk = parser._chunk_games(base, "LineFeed", "sports", sport_id,
+            chunk = parser._chunk_games(base, "LineFeed", key, value,
                                         SAMPLE_PER_SPORT)
         except Exception as exc:  # noqa: BLE001
-            print(f"  вид спорта {sport_id}: ошибка {exc}")
+            print(f"  {key}={value}: ошибка {exc}")
             continue
         for game in chunk:
             gid = game.get("I")
