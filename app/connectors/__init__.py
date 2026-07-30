@@ -19,24 +19,33 @@ get_connector(bookmaker, login, password) возвращает подходящ�
 сессионной cookie («name1=v1; name2=v2»), вставленная оператором из
 СВОЕГО браузера (где вход уже пройден вручную, в т.ч. капча/СМС) — см.
 раздел «Вход по cookie» README и docstring selenium_generic.py.
+
+`login_type` — чем оператор входит в этот аккаунт: номером телефона
+(`phone`) или логином (`login`). Это не косметика: у БК это разные
+вкладки формы входа с разными полями, а телефон ещё и вводится без кода
+страны. Какие способы принимает конкретная БК, говорит `login_types()`.
 """
-from .base import BetLeg, BetResult, BookmakerConnector
+from .base import (LOGIN_BY_LOGIN, LOGIN_BY_PHONE, LOGIN_TYPE_NAMES,
+                   LOGIN_TYPES, BetLeg, BetResult, BookmakerConnector,
+                   national_phone, normalize_login_type)
 from .mock import MockConnector
-from .selenium_generic import BOOKMAKER_CONNECTORS
+from .selenium_generic import (BOOKMAKER_CONNECTORS, default_login_type,
+                               env_prefix, login_types, resolve_login_type)
 
 
 def get_connector(bookmaker: str, login: str, password: str,
                   account_id: int | None = None,
-                  cookies: str | None = None) -> BookmakerConnector:
-    cls = BOOKMAKER_CONNECTORS.get(bookmaker)
-    if cls is None:
-        return MockConnector(bookmaker, login, password, account_id=account_id,
-                             cookies=cookies)
+                  cookies: str | None = None,
+                  login_type: str | None = None) -> BookmakerConnector:
+    login_type = resolve_login_type(bookmaker, login_type)
+    cls = BOOKMAKER_CONNECTORS.get(bookmaker, MockConnector)
     return cls(bookmaker, login, password, account_id=account_id,
-              cookies=cookies)
+               cookies=cookies, login_type=login_type)
 
 
 __all__ = [
+    "LOGIN_BY_LOGIN", "LOGIN_BY_PHONE", "LOGIN_TYPES", "LOGIN_TYPE_NAMES",
     "BetLeg", "BetResult", "BookmakerConnector", "MockConnector",
-    "get_connector",
+    "default_login_type", "env_prefix", "get_connector", "login_types",
+    "national_phone", "normalize_login_type", "resolve_login_type",
 ]

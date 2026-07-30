@@ -25,7 +25,8 @@ def refresh_balance(account_id: int) -> None:
     login, password = creds
     cookies = db.get_account_cookies(account_id)
     connector = get_connector(acc["bookmaker"], login, password,
-                              account_id=account_id, cookies=cookies)
+                              account_id=account_id, cookies=cookies,
+                              login_type=acc.get("login_type"))
     try:
         balance = connector.get_balance()
         db.set_account_balance(account_id, balance, None)

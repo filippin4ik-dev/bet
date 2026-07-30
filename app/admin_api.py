@@ -14,7 +14,8 @@ import time
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel
 
-from . import access, accounts_manager, bk_control, config, db, otp, visitors
+from . import (access, accounts_manager, bk_control, config, connectors, db,
+               otp, visitors)
 from .runtime import live_scanner, scanner
 from .security import create_session_token, verify_admin_password, \
     verify_session_token
@@ -65,12 +66,37 @@ def me(username: str = Depends(require_admin)):
 # Аккаунты БК
 # ---------------------------------------------------------------------------
 
-BOOKMAKERS = ["Winline", "BetBoom", "Fonbet", "Liga Stavok", "bc.game"]
+BOOKMAKERS = ["Winline", "Melbet", "BetBoom", "Fonbet", "Liga Stavok",
+              "bc.game"]
 
 
 @router.get("/bookmakers")
 def bookmakers(username: str = Depends(require_admin)):
-    return {"bookmakers": BOOKMAKERS}
+    """БК, к которым можно привязать аккаунт, и чем в каждую входят.
+
+    `login_types` фронтенд показывает переключателем «по телефону / по
+    логину»: предлагать телефон там, где БК его не принимает (bc.game),
+    значит обречь оператора на форму, которая молча не отправляется."""
+    return {
+        "bookmakers": BOOKMAKERS,
+        "login_types": {bk: connectors.login_types(bk) for bk in BOOKMAKERS},
+        "login_type_names": connectors.LOGIN_TYPE_NAMES,
+    }
+
+
+def _checked_login_type(bookmaker: str, value: str | None) -> str:
+    allowed = connectors.login_types(bookmaker)
+    if value is None:
+        return allowed[0]
+    value = value.strip().lower()
+    if value not in allowed:
+        names = ", ".join(f"«{connectors.LOGIN_TYPE_NAMES[t]}»"
+                          for t in allowed)
+        raise HTTPException(
+            status_code=400,
+            detail=f"{bookmaker} так не пускает. Доступные способы входа: "
+                   f"{names}.")
+    return value
 
 
 @router.get("/accounts")
@@ -83,6 +109,9 @@ class AccountBody(BaseModel):
     login: str
     password: str
     label: str = ""
+    # Чем входим: "phone" или "login". None — способ по умолчанию для
+    # этой БК (см. connectors.login_types).
+    login_type: str | None = None
     # Опционально: сессионная cookie, скопированная оператором из СВОЕГО
     # браузера (где вход уже пройден вручную — в т.ч. капча/СМС-код). См.
     # README «Вход по cookie». Формат — как заголовок Cookie в DevTools:
@@ -96,8 +125,10 @@ def add_account(body: AccountBody, username: str = Depends(require_admin)):
         raise HTTPException(status_code=400, detail="Неизвестная БК")
     if not body.login or not body.password:
         raise HTTPException(status_code=400, detail="Логин и пароль обязательны")
+    login_type = _checked_login_type(body.bookmaker, body.login_type)
     account_id = db.add_account(body.bookmaker, body.login, body.password,
-                                body.label, body.cookies)
+                                body.label, body.cookies,
+                                login_type=login_type)
     accounts_manager.refresh_balance_async(account_id)
     return {"ok": True, "id": account_id}
 
@@ -107,6 +138,7 @@ class AccountUpdateBody(BaseModel):
     label: str | None = None
     login: str | None = None
     password: str | None = None
+    login_type: str | None = None
     # "" — явно очистить сохранённую cookie (напр. протухла); None — не
     # трогать текущее значение.
     cookies: str | None = None
@@ -115,13 +147,19 @@ class AccountUpdateBody(BaseModel):
 @router.put("/accounts/{account_id}")
 def update_account(account_id: int, body: AccountUpdateBody,
                    username: str = Depends(require_admin)):
-    if db.get_account(account_id) is None:
+    acc = db.get_account(account_id)
+    if acc is None:
         raise HTTPException(status_code=404, detail="Аккаунт не найден")
+    login_type = None
+    if body.login_type is not None:
+        login_type = _checked_login_type(acc["bookmaker"], body.login_type)
     db.update_account(account_id, enabled=body.enabled, label=body.label,
                       login=body.login, password=body.password,
-                      cookies=body.cookies)
+                      cookies=body.cookies, login_type=login_type)
+    # Способ входа меняет саму форму, по которой коннектор ходит, — баланс
+    # после этого надо перечитать так же, как после смены пароля.
     if body.login is not None or body.password is not None \
-            or body.cookies is not None:
+            or body.cookies is not None or login_type is not None:
         accounts_manager.refresh_balance_async(account_id)
     return {"ok": True}
 
