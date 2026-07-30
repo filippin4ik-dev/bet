@@ -256,7 +256,7 @@ def detect(events: list[RawEvent],
     forced — группы, закреплённые оператором вручную (MELBET_GROUPS).
     Нужны, если автоматический выбор промахнулся: например тотал тайма
     вдруг стал попадаться чаще тотала матча. Что именно выбрано и какие
-    ещё группы есть, показывает python -m app.diagnose_melbet."""
+    ещё группы есть, показывает venv/bin/python -m app.diagnose_melbet."""
     layout = Layout()
     layout.groups, layout.group_stats = _pick_groups(events)
     for family, group in (forced or {}).items():
