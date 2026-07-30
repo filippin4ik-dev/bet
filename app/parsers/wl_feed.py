@@ -271,6 +271,17 @@ class WinlineFeed:
         return {cid: (sport_id, name, self.countries.get(country_id, ""))
                 for cid, (sport_id, name, country_id) in self.champs.items()}
 
+    def _merge_champs(self, new_champs: dict[int, tuple]) -> None:
+        """Обновляет справочник чемпионатов, не теряя известную страну.
+
+        Вызывать под локом. Лайв-кадр страну не присылает, и без этого он
+        затирал бы ту, что пришла с прематчем по тому же чемпионату."""
+        for cid, (sport_id, name, country_id) in new_champs.items():
+            if not country_id:
+                known = self.champs.get(cid)
+                country_id = known[2] if known else 0
+            self.champs[cid] = (sport_id, name, country_id)
+
     # ---------- цикл подключения ----------
 
     def _run(self) -> None:
@@ -485,7 +496,7 @@ class WinlineFeed:
                 raise ValueError(f"неизвестный шаг прематча {st} @{r.i}")
 
         with self._lock:
-            self.champs.update(new_champs)
+            self._merge_champs(new_champs)
             self.countries.update(new_countries)
             for ev in upd_events:
                 self.pre_events[ev["id"]] = ev
@@ -609,11 +620,13 @@ class WinlineFeed:
             if st == L_CHAMP:
                 cid = r.u32()
                 sport_id = r.u32()
-                country_id = r.i32()
-                r.u32(); r.u8()
+                # страны в лайв-кадре нет: поля на её месте дают чушь
+                # (у товарищеских матчей российских клубов получалась
+                # Хорватия). 0 — «неизвестна», см. _merge_champs
+                r.i32(); r.u32(); r.u8()
                 name = r.utf()
                 r.u8(); r.u32(); r.u32()
-                new_champs[cid] = (sport_id, name, country_id)
+                new_champs[cid] = (sport_id, name, 0)
             elif st == L_EVENT:
                 eid = r.i32()
                 r.u32(); r.u32(); r.u8(); r.u8()
@@ -673,7 +686,7 @@ class WinlineFeed:
                 raise ValueError(f"неизвестный шаг лайва {st} @{r.i}")
 
         with self._lock:
-            self.champs.update(new_champs)
+            self._merge_champs(new_champs)
             for ev in upd_events:
                 self.live_events[ev["id"]] = ev
             for upd in partial:

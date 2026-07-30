@@ -10,6 +10,7 @@ from app.parsers.html_utils import slugify
 from app.parsers.melbet import _event_url as melbet_url
 from app.parsers.melbet import _subgame_event
 from app.parsers.winline import _event_url as winline_url
+from app.parsers.wl_feed import WinlineFeed
 
 # Событие в том виде, в каком его отдаёт фид 1xBet: I — номер в фиде,
 # CI — постоянный номер, который стоит в адресе страницы.
@@ -113,6 +114,21 @@ def test_winline_champ_without_country_still_gets_a_segment():
     """В лайв-кадре справочника стран нет — страна приходит пустой."""
     url = winline_url(77, "Теннис", (5, "Уимблдон", ""), live=True)
     assert url == "https://winline.ru/live/sport/tennis/mir/uimbldon/77"
+
+
+def test_live_frame_neither_invents_nor_loses_the_country():
+    """Лайв-кадр страну не присылает. Он не должен ни затирать ту, что
+    пришла с прематчем, ни подставлять взятую с потолка: на месте страны
+    в лайве лежит другое поле, из-за которого товарищеский матч
+    череповецкого «Металлурга» ехал в Хорватию."""
+    feed = WinlineFeed()
+    feed.countries[1] = "Россия"
+    feed._merge_champs({10: (4, "КХЛ", 1)})              # кадр прематча
+    feed._merge_champs({10: (4, "КХЛ", 0)})              # кадр лайва
+    assert feed._champs_named()[10] == (4, "КХЛ", "Россия")
+
+    feed._merge_champs({11: (4, "Товарищеские Матчи", 0)})
+    assert feed._champs_named()[11] == (4, "Товарищеские Матчи", "")
 
 
 # ---------------------------------------------------------------- слаги
