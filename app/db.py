@@ -10,6 +10,10 @@ from .security import decrypt_str, encrypt_str
 
 _lock = threading.Lock()
 
+# Способ входа, который достаётся аккаунту, если он не указан: и новым
+# записям, и старым, заведённым до появления выбора (см. init_db).
+DEFAULT_LOGIN_TYPE = "phone"
+
 
 def _connect() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH)
@@ -101,6 +105,16 @@ def init_db() -> None:
         cols = {r["name"] for r in conn.execute("PRAGMA table_info(bk_accounts)")}
         if "cookies_enc" not in cols:
             conn.execute("ALTER TABLE bk_accounts ADD COLUMN cookies_enc TEXT")
+        # login_type — чем оператор входит в этот аккаунт: 'phone' или
+        # 'login' (см. app/connectors/base.py). У БК это разные вкладки
+        # формы входа с разными полями, а по самой строке способ не
+        # угадать: номер клубной карты Melbet — тоже одни цифры.
+        # Аккаунтам, заведённым до появления выбора, достаётся 'phone':
+        # именно так они и вводились — поле телефона у Winline/BetBoom
+        # стояло в селекторах первым.
+        if "login_type" not in cols:
+            conn.execute("ALTER TABLE bk_accounts ADD COLUMN login_type "
+                         "TEXT NOT NULL DEFAULT 'phone'")
 
         # Журнал попыток авто-ставки (реальных и в режиме имитации) —
         # для аудита: что, когда и с каким результатом бот пытался поставить.
@@ -294,16 +308,25 @@ def get_history(limit: int = 100) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 def add_account(bookmaker: str, login: str, password: str,
-               label: str = "", cookies: str = "") -> int:
+               label: str = "", cookies: str = "",
+               login_type: str | None = None) -> int:
+    """Заводит аккаунт БК. Реквизиты шифруются, `login_type` — нет: это
+    не секрет, а способ входа ('phone'/'login'), и он нужен интерфейсу.
+
+    Проверяет способ на допустимость не эта функция, а API админки: там
+    известно, какие способы принимает конкретная БК (см.
+    app/connectors/selenium_generic.py::login_types). Сюда тянуть это
+    знание нельзя — пакет коннекторов подтягивает за собой все парсеры."""
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    login_type = login_type or DEFAULT_LOGIN_TYPE
     with _lock, _connect() as conn:
         cur = conn.execute(
             """INSERT INTO bk_accounts
                (bookmaker, label, login_enc, password_enc, cookies_enc,
-                enabled, created_at)
-               VALUES (?,?,?,?,?,1,?)""",
+                login_type, enabled, created_at)
+               VALUES (?,?,?,?,?,?,1,?)""",
             (bookmaker, label, encrypt_str(login), encrypt_str(password),
-             encrypt_str(cookies) if cookies else None, now),
+             encrypt_str(cookies) if cookies else None, login_type, now),
         )
         return cur.lastrowid
 
@@ -321,6 +344,7 @@ def _account_row_to_dict(r: sqlite3.Row, reveal: bool = False) -> dict:
     # что она задана, чтобы фронтенд мог показать «cookie: есть/нет».
     d["has_cookies"] = bool(d.pop("cookies_enc", None))
     d["enabled"] = bool(d["enabled"])
+    d["login_type"] = d.get("login_type") or DEFAULT_LOGIN_TYPE
     return d
 
 
@@ -375,11 +399,15 @@ def update_account(account_id: int, *, enabled: bool | None = None,
                    label: str | None = None,
                    login: str | None = None,
                    password: str | None = None,
-                   cookies: str | None = None) -> None:
+                   cookies: str | None = None,
+                   login_type: str | None = None) -> None:
     fields, params = [], []
     if enabled is not None:
         fields.append("enabled=?")
         params.append(1 if enabled else 0)
+    if login_type is not None:
+        fields.append("login_type=?")
+        params.append(login_type)
     if label is not None:
         fields.append("label=?")
         params.append(label)

@@ -1,8 +1,17 @@
 """Best-effort Selenium-коннектор к личному кабинету БК.
 
-⚠️ ЭКСПЕРИМЕНТАЛЬНО. Статус по каждой БК на 2026-07-27 (реальная проверка
-живым тестовым аккаунтом/браузером из облачной песочницы — см.
-app/diagnose_account.py):
+ВЫБОР СПОСОБА ВХОДА. В российскую БК входят либо номером телефона, либо
+логином, и это НЕ одно и то же поле: у Winline и Melbet форма разведена
+на две вкладки, каждая со своим input. Угадать способ по самой строке
+нельзя — номер клубной карты Melbet тоже состоит из одних цифр, — поэтому
+способ хранится вместе с аккаунтом (`login_type`, см.
+app/connectors/base.py) и выбирается оператором в админке. Здесь он
+решает, какую вкладку нажать (`tab_phone`/`tab_login`), какое поле
+заполнить (`username_phone`/`username_login`) и надо ли отрезать у
+номера код страны.
+
+⚠️ ЭКСПЕРИМЕНТАЛЬНО. Статус по каждой БК (реальная проверка живым
+браузером из облачной песочницы — см. app/diagnose_account.py):
 
 - **Fonbet** — форма входа НЕДОСТУПНА из этой песочницы: fonbet.ru и
   fon.bet отдают анти-бот-заглушку «Forbidden» (антибот ServicePipe) на
@@ -36,21 +45,43 @@ app/diagnose_account.py):
   мобильный российский IP того же региона, что и исходный вход (через
   `BETBOOM_PROXY`, аналогично Fonbet), иначе даже валидный токен не
   примется.
-- **Winline** — форма входа ОТКРЫВАЕТСЯ и поля логина/пароля/кнопка входа
-  найдены и подтверждены (`input[name='auth-phone-base']` /
-  `input[name='auth-password-base']` / `button.ww-login__btn[type=
-  'submit']`, открывается кнопкой «Войти» в хедере), капчи на этом шаге
-  не обнаружено. Дальше вход НЕ проверен целиком (в этой песочнице не было
-  тестового аккаунта Winline с известным паролем) — вероятен запрос
-  СМС/пуш-кода (см. `_maybe_handle_otp`), это не проверено.
+- **Winline** (2026-07-30) — сценарий входа ПРОЙДЕН ЦЕЛИКОМ до проверки
+  реквизитов, ОБОИМИ способами. Модалка открывается кнопкой «Войти» в
+  хедере; внутри две вкладки — `<span class="ww-tabs__item">Телефон</span>`
+  и `…>Логин</span>`. Вкладка «Телефон» рисует
+  `input[name='auth-phone-base']` (рядом ОТКЛЮЧЁННЫЙ
+  `input[name='auth-phone-code']` со значением «+7» — значит в поле идут
+  10 цифр без кода страны), вкладка «Логин» —
+  `input[name='auth-username']`. Пароль в обоих случаях
+  `input[name='auth-password-base']`, отправка —
+  `button.ww-login__btn[type='submit']`, и она приходит С АТРИБУТОМ
+  `disabled`: включается, только когда фронтенд принял оба поля (отсюда
+  `_wait_submit_enabled`). Отправка заведомо неверных реквизитов даёт
+  «Неверный телефон или пароль» и «Неверный логин или пароль»
+  соответственно — то есть запрос доходит до проверки на стороне БК.
+  Капчи на форме нет. НЕ проверено: сам успешный вход (тестового
+  аккаунта с известным паролем не было), возможный СМС/пуш-код после
+  него (см. `_maybe_handle_otp`) и селектор баланса.
+- **Melbet** — движок 1xBet, вход тоже двумя способами (телефон и
+  «ID/номер счёта»). Селекторы НЕ ПРОВЕРЕНЫ и проверены быть не могут из
+  этой песочницы: melbet.ru отдаёт «отключите VPN» адресам дата-центров,
+  а международные зеркала — страницу `/ru/block` на всё, кроме фида линии
+  (проверено 2026-07-30; у парсера линии та же беда, см.
+  app/parsers/melbet.py). Поэтому селекторы ниже заданы намеренно широко,
+  а уточняются они НА БОЕВОМ СЕРВЕРЕ и без правки кода: `python -m
+  app.diagnose_account --form Melbet` печатает, что реально лежит в
+  форме, а переменные `MELBET_TAB_PHONE`, `MELBET_USERNAME_LOGIN_SELECTOR`
+  и т.п. заменяют не подошедшее.
 - **Liga Stavok**, **bc.game** — форма входа НЕ проверена (нет тестового
   аккаунта в этой сессии); селекторы ниже — типовые заготовки, как и
   было изначально.
 
 Ни для одной БК не было ни одного успешного end-to-end чтения баланса
 (get_balance()) живым логином — Fonbet блокируется на уровне сети,
-BetBoom — капчей, для Winline/Liga Stavok/bc.game не было тестовых
-паролей. Поэтому элемент баланса (`SELECTORS[...]["balance"]`) ниже
+BetBoom — капчей, Melbet не пускает на сайт вовсе, для Winline/Liga
+Stavok/bc.game не было тестовых паролей (у Winline пройдено всё вплоть
+до ответа «Неверный телефон или пароль», но не сам вход). Поэтому
+элемент баланса (`SELECTORS[...]["balance"]`) ниже
 ПО-ПРЕЖНЕМУ не подтверждён ни для одной БК — прежде чем включать реальный
 (не dry-run) режим:
 
@@ -96,7 +127,9 @@ import time
 
 from .. import otp
 from ..parsers import selenium_helper
-from .base import BetLeg, BetResult, BookmakerConnector
+from .base import (LOGIN_BY_LOGIN, LOGIN_BY_PHONE, LOGIN_TYPE_NAMES,
+                   BetLeg, BetResult, BookmakerConnector, national_phone,
+                   normalize_login_type)
 
 log = logging.getLogger("connectors.selenium")
 
@@ -127,19 +160,67 @@ OTP_RELAY_TIMEOUT = 180.0     # сколько ждать, пока операт
 # классы вида `sc-zdin7l-0` — искать их по CSS бессмысленно, они меняются
 # при каждой пересборке фронтенда БК). Используется, если `submit` не
 # задан (или не найден).
+#
+# ВЫБОР СПОСОБА ВХОДА (телефон или логин). У БК это разные вкладки одной
+# модалки, и на каждой — СВОЁ поле имени пользователя. Поэтому вместо
+# одного `username` здесь пара `username_phone` / `username_login`, а
+# переключает вкладки `tab_phone` / `tab_login` — видимый текст вкладки,
+# который ищется СТРОГО среди элементов `tab_selector`. Искать вкладку по
+# тексту на всей странице нельзя: слово «Логин» встречается и в шапке
+# сайта, и в подсказках, и клик ушёл бы не туда. Если у БК вкладок нет
+# (одно поле на оба способа), `tab_*` не задаются, а поле берётся из
+# общего `username`.
 SELECTORS: dict[str, dict[str, str]] = {
     "Winline": {
         "login_url": "https://winline.ru/",
         "login_button_text": "Войти",
-        "username": "input[name='auth-phone-base'], input[name='login']",
-        "password": "input[name='auth-password-base'], input[name='password']",
-        "submit": "button.ww-login__btn[type='submit'], button[type='submit']",
+        # Всё ниже снято с живой модалки 2026-07-30 (см. докстринг модуля):
+        # <span class="ww-tabs__item ww-tabs__item--active"> Телефон </span>
+        # <span class="ww-tabs__item"> Логин </span>
+        "tab_selector": ".ww-tabs__item",
+        "tab_active_class": "ww-tabs__item--active",
+        "tab_phone": "Телефон",
+        "tab_login": "Логин",
+        "username_phone": "input[name='auth-phone-base']",
+        "username_login": "input[name='auth-username']",
+        "password": "input[name='auth-password-base']",
+        "submit": "button.ww-login__btn[type='submit']",
         "balance": "[class*='balance'], [class*='Balance']",
+    },
+    # Melbet работает на движке 1xBet, и вход у неё — те же две вкладки:
+    # по номеру телефона и по «ID/логину» (у 1xBet это номер клубной
+    # карты). СЕЛЕКТОРЫ НИЖЕ НЕ ПРОВЕРЕНЫ на живом сайте: melbet.ru не
+    # пускает адреса дата-центров, а международные зеркала отдают
+    # страницу-заглушку `/ru/block` на всё, кроме фида линии (проверено
+    # 2026-07-30 — то же ограничение, что и у парсера, см.
+    # app/parsers/melbet.py). Поэтому селекторы заданы «широко» (по
+    # нескольким вариантам имени поля сразу), а уточнить их на реальном
+    # сервере можно, не трогая код: `venv/bin/python -m
+    # app.diagnose_account --form Melbet` покажет, что реально лежит в
+    # форме, а переменные MELBET_USERNAME_PHONE_SELECTOR /
+    # MELBET_USERNAME_LOGIN_SELECTOR / MELBET_TAB_PHONE / … их заменят.
+    "Melbet": {
+        "login_url": "https://melbet.ru/ru/",
+        "login_button_text": "Вход",
+        "tab_selector": "[class*='tab' i], [role='tab']",
+        "tab_phone": "По номеру телефона",
+        "tab_login": "По номеру счета",
+        "username_phone": "input[type='tel'], input[name*='phone' i]",
+        "username_login": "input[name*='login' i], input[name*='userId' i], "
+                          "input[type='text']",
+        "username": "input[type='tel'], input[name*='login' i], "
+                    "input[type='text']",
+        "password": "input[type='password'], input[name*='password' i]",
+        "submit": "button[type='submit']",
+        "submit_text": "Вход",
+        "balance": "[class*='balance' i], [class*='Balance']",
     },
     "BetBoom": {
         "login_url": "https://betboom.ru/",
         "login_button_text": "Вход",
         "username": "input[name='phone'], input[name='login']",
+        "username_phone": "input[name='phone']",
+        "username_login": "input[name='login']",
         "password": "input[name='password']",
         "submit_text": "Войти",
         # "[class*='MobileBalanceText']" — подтверждено по реальному DOM
@@ -173,6 +254,32 @@ SELECTORS: dict[str, dict[str, str]] = {
     },
 }
 
+# Чем в принципе можно войти в каждую БК. Список нужен интерфейсу: не
+# предлагать «вход по телефону» там, где БК его не принимает, — оператор
+# иначе полчаса разбирался бы, почему форма не отправляется. Первый
+# элемент — способ по умолчанию.
+LOGIN_TYPES_BY_BOOKMAKER: dict[str, tuple[str, ...]] = {
+    "Winline": (LOGIN_BY_PHONE, LOGIN_BY_LOGIN),
+    "Melbet": (LOGIN_BY_PHONE, LOGIN_BY_LOGIN),
+    "BetBoom": (LOGIN_BY_PHONE, LOGIN_BY_LOGIN),
+    "Fonbet": (LOGIN_BY_LOGIN, LOGIN_BY_PHONE),
+    "Liga Stavok": (LOGIN_BY_PHONE, LOGIN_BY_LOGIN),
+    # bc.game — международный сайт, входа по российскому номеру у него нет
+    # вовсе: там e-mail либо никнейм, и то и другое — «логин».
+    "bc.game": (LOGIN_BY_LOGIN,),
+}
+
+
+def login_types(bookmaker: str) -> list[str]:
+    """Способы входа, которые принимает эта БК (первый — по умолчанию)."""
+    return list(LOGIN_TYPES_BY_BOOKMAKER.get(
+        bookmaker, (LOGIN_BY_PHONE, LOGIN_BY_LOGIN)))
+
+
+def default_login_type(bookmaker: str) -> str:
+    return login_types(bookmaker)[0]
+
+
 _BALANCE_RE = re.compile(r"([\d\s]{1,9}[.,]?\d{0,2})\s*(?:₽|руб)", re.I)
 
 # Общий признак виджета капчи (reCAPTCHA/hCaptcha/собственный виджет БК) —
@@ -202,6 +309,59 @@ _CLICK_BY_TEXT_JS = """
     return true;
 """
 
+# Переключение вкладки способа входа. Ищем ТОЛЬКО среди элементов
+# tab_selector, а не по всей странице: слово «Логин» есть и в шапке
+# сайта. Точное совпадение текста предпочтительнее вхождения — «Логин»
+# не должен выбрать вкладку «Логин или e-mail», если рядом есть точная.
+# Возвращаем и список надписей всех вкладок: когда нужной не нашлось, по
+# нему сразу видно, как БК назвала свои вкладки на самом деле.
+_CLICK_TAB_JS = """
+    const sel = arguments[0], want = arguments[1];
+    const norm = s => (s || '').replace(/\\s+/g, ' ').trim();
+    const all = Array.from(document.querySelectorAll(sel)).filter(el => {
+        const r = el.getBoundingClientRect();
+        return r.width > 0 && r.height > 0;
+    });
+    const options = all.map(el => norm(el.textContent)).filter(t => t);
+    const lower = want.toLowerCase();
+    let hit = all.find(el => norm(el.textContent) === want);
+    if (!hit) {
+        hit = all.find(el => norm(el.textContent).toLowerCase() === lower);
+    }
+    if (!hit) {
+        hit = all.find(el => norm(el.textContent).toLowerCase()
+                                .includes(lower));
+    }
+    if (!hit) return {clicked: false, text: null, options: options};
+    hit.scrollIntoView({block: 'center'});
+    hit.click();
+    return {clicked: true, text: norm(hit.textContent), options: options};
+"""
+
+# Снимок формы входа для диагностики (inspect_login_form): видимые поля,
+# кнопки и всё, что похоже на вкладку. Только чтение — ничего не жмём.
+_DUMP_FORM_JS = """
+    const norm = s => (s || '').replace(/\\s+/g, ' ').trim();
+    const seen = el => {
+        const r = el.getBoundingClientRect();
+        return r.width > 0 && r.height > 0;
+    };
+    const inputs = Array.from(document.querySelectorAll('input'))
+        .filter(seen)
+        .map(el => ({type: el.type, name: el.name, id: el.id,
+                     placeholder: el.placeholder,
+                     autocomplete: el.getAttribute('autocomplete'),
+                     disabled: el.disabled, cls: el.className}));
+    const buttons = Array.from(document.querySelectorAll(
+        'button, [type="submit"]')).filter(seen)
+        .map(el => ({text: norm(el.textContent), type: el.type,
+                     disabled: el.disabled, cls: el.className}));
+    const tabs = Array.from(document.querySelectorAll(
+        '[class*="tab" i], [role="tab"]')).filter(seen)
+        .map(el => norm(el.textContent)).filter(t => t && t.length < 40);
+    return {inputs: inputs, buttons: buttons, tabs: tabs};
+"""
+
 # Проверка «виден ли на странице элемент с таким текстом» — без клика,
 # используется, чтобы понять, вернул ли сайт форму логина (значит, cookie
 # не подошла) или нет (значит, похоже, что уже залогинены).
@@ -216,9 +376,42 @@ _FIND_TEXT_VISIBLE_JS = """
 """
 
 
+def _env_prefix(bookmaker: str) -> str:
+    """«Liga Stavok» → LIGA_STAVOK, «bc.game» → BCGAME: приставка всех
+    переменных окружения, которыми настраивают вход в эту БК."""
+    return bookmaker.upper().replace(" ", "_").replace(".", "") \
+                            .replace("-", "_")
+
+
 def _selector(bookmaker: str, key: str) -> str:
-    env_key = f"{bookmaker.upper().replace(' ', '_').replace('.', '')}_{key.upper()}_SELECTOR"
+    env_key = f"{_env_prefix(bookmaker)}_{key.upper()}_SELECTOR"
     return os.getenv(env_key, "") or SELECTORS.get(bookmaker, {}).get(key, "")
+
+
+def _text_setting(bookmaker: str, key: str) -> str:
+    """Настройка формы, которая не селектор, а видимый текст (название
+    вкладки, надпись на кнопке). Переопределяется переменной окружения
+    БЕЗ суффикса _SELECTOR: `WINLINE_TAB_LOGIN=Логин`."""
+    env_key = f"{_env_prefix(bookmaker)}_{key.upper()}"
+    return os.getenv(env_key, "") or SELECTORS.get(bookmaker, {}).get(key, "")
+
+
+def _username_selector(bookmaker: str, login_type: str) -> str:
+    """Поле имени пользователя для выбранного способа входа.
+
+    У БК с вкладками поля разные (Winline: auth-phone-base против
+    auth-username), у остальных — одно общее `username` на оба способа."""
+    key = ("username_phone" if login_type == LOGIN_BY_PHONE
+           else "username_login")
+    return _selector(bookmaker, key) or _selector(bookmaker, "username")
+
+
+def _tab_text(bookmaker: str, login_type: str) -> str:
+    """Видимая надпись вкладки нужного способа входа («Телефон»/«Логин»).
+    Пусто — у БК вкладок нет, переключать нечего."""
+    return _text_setting(bookmaker,
+                         "tab_phone" if login_type == LOGIN_BY_PHONE
+                         else "tab_login")
 
 
 def _proxy_for(bookmaker: str) -> str | None:
@@ -226,8 +419,7 @@ def _proxy_for(bookmaker: str) -> str | None:
     в эту БК (см. предупреждение о Fonbet/ServicePipe в докстринге модуля
     и LIGASTAVOK_PROXY в app/config.py — та же идея, но per-БК и только
     для standalone-браузера аккаунтов, не для общего браузера сканера)."""
-    prefix = bookmaker.upper().replace(" ", "_").replace(".", "").replace("-", "_")
-    value = os.getenv(f"{prefix}_PROXY", "").strip()
+    value = os.getenv(f"{_env_prefix(bookmaker)}_PROXY", "").strip()
     return value or None
 
 
@@ -281,29 +473,47 @@ def _parse_local_storage_string(raw: str) -> dict[str, str]:
     return items
 
 
-def _fill_username(user_el, login: str) -> None:
-    """Заполняет поле логина, при необходимости нормализуя номер телефона.
+def _fill_username(user_el, login: str, login_type: str) -> None:
+    """Заполняет поле имени пользователя, нормализуя номер телефона.
 
     Подтверждено на Winline: поле телефона показывает фиксированный
-    префикс «+7» ОТДЕЛЬНО от самого input — туда нужно вводить 10 цифр
-    без кода страны. Если передать полный номер (11 цифр, начинается на
-    7/8), маска сдвигает цифры и получается неверный номер. Срабатывает
-    только для полей типа tel/с именем, содержащим «phone» — обычные
-    текстовые логины (email, никнейм) не трогаем."""
+    префикс «+7» ОТДЕЛЬНО от самого input (рядом лежит отключённый
+    input[name='auth-phone-code'] со значением «+7») — туда нужно вводить
+    10 цифр без кода страны. Если передать полный номер (11 цифр,
+    начинается на 7/8), маска сдвигает цифры и получается чужой номер.
+
+    Решает выбранный оператором способ входа, а не догадка по атрибутам
+    поля: у 1xBet-движка (Melbet) «логин» — это номер клубной карты, тоже
+    одни цифры, и от телефона его не отличить. Атрибуты поля остаются
+    страховкой на случай, если БК держит оба способа в одном input и
+    переключает у него только маску."""
     value = login
-    try:
-        is_phone = (user_el.get_attribute("type") or "").lower() == "tel" or \
-            "phone" in (user_el.get_attribute("name") or "").lower()
-    except Exception:  # noqa: BLE001
-        is_phone = False
-    if is_phone:
-        digits = re.sub(r"\D", "", value)
-        if len(digits) == 11 and digits[0] in "78":
-            value = digits[1:]
-        elif len(digits) == 10:
-            value = digits
+    if login_type == LOGIN_BY_PHONE:
+        value = national_phone(value)
+    else:
+        try:
+            attrs = (user_el.get_attribute("type") or "").lower() + " " + \
+                (user_el.get_attribute("name") or "").lower()
+        except Exception:  # noqa: BLE001
+            attrs = ""
+        if "tel" in attrs or "phone" in attrs:
+            value = national_phone(value)
     user_el.clear()
     user_el.send_keys(value)
+
+
+def _count_matches(driver, css: str) -> int:
+    """Сколько ВИДИМЫХ элементов находит настроенный селектор. Ноль —
+    селектор устарел; больше одного — он слишком широкий, и коннектор
+    возьмёт первый попавшийся."""
+    from selenium.webdriver.common.by import By
+    if not css:
+        return 0
+    try:
+        els = driver.find_elements(By.CSS_SELECTOR, css)
+    except Exception:  # noqa: BLE001
+        return 0
+    return sum(1 for e in els if e.is_displayed())
 
 
 def _has_visible_captcha(driver) -> bool:
@@ -340,9 +550,12 @@ class SeleniumGenericConnector(BookmakerConnector):
 
     def __init__(self, bookmaker: str, login: str, password: str,
                 account_id: int | None = None,
-                cookies: str | None = None):
+                cookies: str | None = None,
+                login_type: str = LOGIN_BY_PHONE):
         super().__init__(bookmaker, login, password, account_id=account_id,
-                         cookies=cookies)
+                         cookies=cookies,
+                         login_type=normalize_login_type(
+                             login_type, default_login_type(bookmaker)))
         self._driver = None
 
     def _ensure_driver(self):
@@ -379,28 +592,29 @@ class SeleniumGenericConnector(BookmakerConnector):
         # рисуется в модалке только по клику. Без этого шага коннектор
         # раньше ждал 20 с и падал с «сайт изменил вёрстку», хотя вёрстка
         # была той же самой — просто форма скрыта до клика.
-        login_button_text = SELECTORS.get(self.bookmaker, {}).get(
-            "login_button_text")
-        if login_button_text:
-            try:
-                WebDriverWait(driver, 15).until(
-                    lambda d: _click_by_text(d, login_button_text))
-            except Exception as exc:  # noqa: BLE001
-                raise RuntimeError(
-                    f"Не удалось найти/нажать кнопку «{login_button_text}» "
-                    f"для открытия формы входа {self.bookmaker} (сайт "
-                    f"изменил вёрстку?): {exc}") from exc
+        login_button_text = _text_setting(self.bookmaker,
+                                          "login_button_text")
+        if login_button_text and not self._open_login_form(driver):
+            raise RuntimeError(
+                f"Не удалось найти/нажать кнопку «{login_button_text}» для "
+                f"открытия формы входа {self.bookmaker} — сайт изменил "
+                f"вёрстку? Что на странице есть на самом деле, покажет "
+                f"`python -m app.diagnose_account --form {self.bookmaker}`.")
 
-        user_sel = _selector(self.bookmaker, "username")
+        self._select_login_tab(driver)
+
+        user_sel = _username_selector(self.bookmaker, self.login_type)
         pass_sel = _selector(self.bookmaker, "password")
         try:
             user_el = wait.until(
                 EC.presence_of_element_located((By.CSS_SELECTOR, user_sel)))
         except Exception as exc:  # noqa: BLE001
             raise RuntimeError(
-                f"Не удалось найти форму входа {self.bookmaker} по "
-                f"настроенным селекторам (сайт изменил вёрстку?): {exc}"
-            ) from exc
+                f"Не удалось найти поле входа {LOGIN_TYPE_NAMES[self.login_type]} "
+                f"у {self.bookmaker} (селектор {user_sel!r}) — сайт изменил "
+                f"вёрстку или эта БК так не пускает. Что реально лежит в "
+                f"форме, покажет `python -m app.diagnose_account --form "
+                f"{self.bookmaker}`: {exc}") from exc
 
         if _wait_for_captcha(driver):
             raise RuntimeError(
@@ -411,7 +625,7 @@ class SeleniumGenericConnector(BookmakerConnector):
                 f"прежде чем доверять авто-ставкам для этой БК.")
 
         try:
-            _fill_username(user_el, self.login)
+            _fill_username(user_el, self.login, self.login_type)
             pass_el = driver.find_element(By.CSS_SELECTOR, pass_sel)
             pass_el.clear()
             pass_el.send_keys(self.password)
@@ -428,11 +642,13 @@ class SeleniumGenericConnector(BookmakerConnector):
                 f"невозможен без её решения человеком.")
 
         submit_sel = _selector(self.bookmaker, "submit")
-        submit_text = SELECTORS.get(self.bookmaker, {}).get("submit_text")
+        submit_text = _text_setting(self.bookmaker, "submit_text")
         submitted = False
         if submit_sel:
             try:
-                driver.find_element(By.CSS_SELECTOR, submit_sel).click()
+                button = driver.find_element(By.CSS_SELECTOR, submit_sel)
+                self._wait_submit_enabled(button)
+                button.click()
                 submitted = True
             except Exception:  # noqa: BLE001
                 submitted = False
@@ -444,6 +660,87 @@ class SeleniumGenericConnector(BookmakerConnector):
                 f"{self.bookmaker} (селектор {submit_sel!r}, текст "
                 f"{submit_text!r}) — сайт изменил вёрстку?")
         self._maybe_handle_otp(driver)
+
+    def _open_login_form(self, driver, wait_seconds: float = 15.0) -> bool:
+        """Открывает модалку входа кнопкой в шапке сайта.
+
+        У некоторых БК (подтверждено на Winline/BetBoom) полей логина и
+        пароля просто НЕТ в DOM, пока эту кнопку не нажать. Клик именно с
+        ожиданием: шапка у Winline рисуется Angular'ом через несколько
+        секунд после загрузки страницы, и одна попытка «сразу» стабильно
+        промахивается — выглядит это как «сайт поменял вёрстку», хотя
+        вёрстка та же.
+
+        True — кнопки не было в настройках (открывать нечего) либо она
+        нажата."""
+        text = _text_setting(self.bookmaker, "login_button_text")
+        if not text:
+            return True
+        deadline = time.monotonic() + wait_seconds
+        while True:
+            if _click_by_text(driver, text):
+                time.sleep(1.5)     # модалке нужно дорисоваться
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.5)
+
+    def _wait_submit_enabled(self, button, wait_seconds: float = 6.0) -> None:
+        """Ждёт, пока форма признает введённое и разблокирует кнопку.
+
+        Подтверждено на Winline: «Войти» приходит с `disabled` и
+        включается, только когда фронтенд принял и телефон, и пароль.
+        Клик по отключённой кнопке Selenium выполняет молча и без
+        ошибки — форма не отправляется, а коннектор идёт дальше и падает
+        уже на чтении баланса, где причина не видна. Поэтому ждём здесь и
+        говорим прямо: чаще всего это неверный ФОРМАТ реквизита (в поле
+        телефона — логин или наоборот), а не сломанные селекторы."""
+        deadline = time.monotonic() + wait_seconds
+        while time.monotonic() < deadline:
+            if button.is_enabled():
+                return
+            time.sleep(0.3)
+        if button.is_enabled():
+            return
+        raise RuntimeError(
+            f"{self.bookmaker}: кнопка входа осталась заблокированной — "
+            f"форма не приняла реквизиты, введённые как «"
+            f"{LOGIN_TYPE_NAMES[self.login_type]}». Проверьте, тем ли "
+            f"способом входа заведён аккаунт (телефон против логина) и "
+            f"нет ли в нём лишних символов.")
+
+    def _select_login_tab(self, driver) -> None:
+        """Переключает форму на нужный способ входа (телефон/логин).
+
+        У БК без вкладок (`tab_phone`/`tab_login` не заданы) шаг
+        пропускается: там одно поле на оба способа."""
+        tab_selector = _selector(self.bookmaker, "tab_selector")
+        want = _tab_text(self.bookmaker, self.login_type)
+        if not tab_selector or not want:
+            return
+        try:
+            res = driver.execute_script(_CLICK_TAB_JS, tab_selector, want)
+        except Exception as exc:  # noqa: BLE001
+            log.info("%s: не удалось переключить вкладку входа «%s» (%s) — "
+                     "пробую форму как есть", self.bookmaker, want, exc)
+            return
+        res = res or {}
+        if res.get("clicked"):
+            log.info("%s: вход %s — выбрана вкладка «%s»", self.bookmaker,
+                     LOGIN_TYPE_NAMES[self.login_type], res.get("text"))
+            time.sleep(1.0)     # вкладка перерисовывает поля формы
+            return
+        # Не нашли — не молчим: список реальных надписей и есть ответ на
+        # вопрос «как эта БК назвала свои вкладки».
+        raise RuntimeError(
+            f"{self.bookmaker}: на форме входа нет вкладки «{want}» для "
+            f"входа {LOGIN_TYPE_NAMES[self.login_type]}. Вкладки, которые "
+            f"сайт показывает сейчас: "
+            f"{', '.join(res.get('options') or []) or '— ни одной —'}. "
+            f"Поправьте без правки кода: "
+            f"{_env_prefix(self.bookmaker)}_TAB_"
+            f"{'PHONE' if self.login_type == LOGIN_BY_PHONE else 'LOGIN'}"
+            f"=<надпись>.")
 
     def _try_cookie_session(self, driver, cfg_url: str) -> bool:
         """Пытается войти по сохранённой cookie вместо сценария логина —
@@ -495,8 +792,8 @@ class SeleniumGenericConnector(BookmakerConnector):
             return False
         driver.get(cfg_url)  # перезагрузка — чтобы сайт увидел новую сессию
         time.sleep(2.0)
-        login_button_text = SELECTORS.get(self.bookmaker, {}).get(
-            "login_button_text")
+        login_button_text = _text_setting(self.bookmaker,
+                                          "login_button_text")
         if login_button_text and _text_visible(driver, login_button_text):
             log.info("%s: сохранённая cookie не даёт вход (кнопка «%s» "
                      "всё ещё видна на странице) — сессия протухла, "
@@ -591,6 +888,51 @@ class SeleniumGenericConnector(BookmakerConnector):
         num = m.group(1) if m.lastindex else m.group(0)
         num = num.replace(" ", "").replace("\xa0", "").replace(",", ".")
         return float(num)
+
+    def inspect_login_form(self) -> dict:
+        """Что РЕАЛЬНО лежит в форме входа этой БК: вкладки, поля, кнопки.
+
+        Нужно там, где селекторы не проверить из среды разработки:
+        Melbet, например, не пускает на сайт никого, кроме российских
+        домашних адресов, — DOM её формы можно увидеть только с боевого
+        сервера. Ничего не заполняет и не отправляет: только открывает
+        модалку и переписывает её содержимое, чтобы оператор мог сверить
+        селекторы и при необходимости заменить их переменными окружения
+        (см. `_selector`/`_text_setting`), не трогая код."""
+        cfg_url = _selector(self.bookmaker, "login_url")
+        if not cfg_url:
+            raise NotImplementedError(
+                f"Для {self.bookmaker} не настроен URL входа.")
+        driver = self._ensure_driver()
+        driver.get(cfg_url)
+        time.sleep(3.0)
+        out: dict = {"bookmaker": self.bookmaker, "url": cfg_url,
+                     "title": driver.title, "opened_by": None, "tabs": {}}
+
+        login_button_text = _text_setting(self.bookmaker, "login_button_text")
+        if login_button_text:
+            out["opened_by"] = login_button_text
+            out["opened"] = self._open_login_form(driver)
+        out["form"] = driver.execute_script(_DUMP_FORM_JS)
+        out["captcha"] = _has_visible_captcha(driver)
+
+        for login_type in login_types(self.bookmaker):
+            want = _tab_text(self.bookmaker, login_type)
+            tab_selector = _selector(self.bookmaker, "tab_selector")
+            entry: dict = {"tab_text": want, "selector":
+                           _username_selector(self.bookmaker, login_type)}
+            if want and tab_selector:
+                res = driver.execute_script(_CLICK_TAB_JS, tab_selector,
+                                            want) or {}
+                entry["clicked"] = bool(res.get("clicked"))
+                entry["matched_tab"] = res.get("text")
+                entry["tabs_on_page"] = res.get("options")
+                time.sleep(1.5)
+            entry["form"] = driver.execute_script(_DUMP_FORM_JS)
+            entry["selector_matches"] = _count_matches(driver,
+                                                       entry["selector"])
+            out["tabs"][login_type] = entry
+        return out
 
     def place_bet(self, leg: BetLeg) -> BetResult:
         raise NotImplementedError(

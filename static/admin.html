@@ -178,6 +178,15 @@
       всех БК: если чтение баланса упадёт с ошибкой — текст ошибки
       подскажет причину (капча, анти-бот-блок IP, неверный селектор).
     </p>
+    <p class="admin-hint">
+      <b>Способ входа выбирается вместе с аккаунтом.</b> У БК вход по
+      телефону и вход по логину — это разные вкладки формы с разными
+      полями, и угадать способ по самой строке нельзя: номер клубной
+      карты Melbet — тоже одни цифры. Укажите тот же способ, которым вы
+      входите руками. Телефон можно писать как угодно
+      (<code>+7 912 345-67-89</code>, <code>89123456789</code>) — бот
+      сам приведёт его к виду, который ждёт форма.
+    </p>
     <details class="admin-details">
       <summary>🍪 Вход по cookie — когда автологин не проходит</summary>
       <p class="admin-hint">
@@ -197,7 +206,7 @@
       <table class="admin-table" id="accounts-table">
         <thead>
           <tr>
-            <th>БК</th><th>Метка</th><th>Логин</th><th>Cookie</th>
+            <th>БК</th><th>Метка</th><th>Вход</th><th>Логин</th><th>Cookie</th>
             <th>Баланс</th><th>Обновлён</th><th>Статус</th><th>Вкл</th><th></th>
           </tr>
         </thead>
@@ -258,7 +267,18 @@
       <label>Метка (необязательно)
         <input type="text" id="account-label" placeholder="напр. основной">
       </label>
-      <label>Логин/телефон/email
+      <fieldset class="admin-choice" id="account-login-type">
+        <legend>Способ входа</legend>
+        <label class="admin-choice__option">
+          <input type="radio" name="login-type" value="phone">
+          <span>По телефону</span>
+        </label>
+        <label class="admin-choice__option">
+          <input type="radio" name="login-type" value="login">
+          <span>По логину</span>
+        </label>
+      </fieldset>
+      <label><span id="account-login-label">Телефон</span>
         <input type="text" id="account-login" required>
       </label>
       <label>Пароль

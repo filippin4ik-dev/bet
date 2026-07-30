@@ -90,6 +90,36 @@ main#admin-view { max-width: 1080px; margin: 0 auto; }
 }
 .restart-row { margin-top: 12px; }
 
+/* Выбор из нескольких вариантов (способ входа в БК). Радиокнопки, а не
+   выпадающий список: вариантов два, и оба должны быть видны сразу —
+   выбрать не тот способ значит получить форму входа, которая молча не
+   отправляется. */
+.admin-choice {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 9px 12px 11px;
+  margin: 0;
+}
+.admin-choice legend {
+  font-size: 0.83rem;
+  color: var(--muted);
+  padding: 0 4px;
+}
+.admin-choice__option {
+  flex-direction: row !important;
+  align-items: center;
+  gap: 7px !important;
+  cursor: pointer;
+}
+.admin-choice__option input { width: auto !important; }
+.admin-choice__option span { color: var(--text-dim); font-size: 0.9rem; }
+.admin-choice__option[hidden] { display: none; }
+
+.login-type-cell { font-size: 0.85rem; }
+
 .switch { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; }
 /* внутри .admin-form подписи стоят столбиком, но у переключателя галка
    должна быть РЯДОМ с текстом, а не над ним */

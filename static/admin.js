@@ -15,6 +15,8 @@ const els = {
   accountForm: document.getElementById("account-form"),
   accountBookmaker: document.getElementById("account-bookmaker"),
   accountLabel: document.getElementById("account-label"),
+  accountLoginType: document.getElementById("account-login-type"),
+  accountLoginLabel: document.getElementById("account-login-label"),
   accountLogin: document.getElementById("account-login"),
   accountPassword: document.getElementById("account-password"),
   accountCookies: document.getElementById("account-cookies"),
@@ -136,10 +138,53 @@ function fmtDate(s) {
   return s.replace("T", " ").replace(/\+00:00$/, " UTC");
 }
 
+/* Чем можно входить в каждую БК: {Winline: ["phone", "login"], …}.
+ * Приходит с сервера, потому что знание живёт там же, где селекторы
+ * формы входа — предлагать «по телефону» у БК, которая телефон не
+ * принимает, значит подсунуть оператору форму, которая не отправится. */
+let bkCatalog = { bookmakers: [], loginTypes: {}, names: {} };
+
+async function loadBookmakers() {
+  const data = await api("/api/admin/bookmakers");
+  bkCatalog = {
+    bookmakers: data.bookmakers || [],
+    loginTypes: data.login_types || {},
+    names: data.login_type_names || {},
+  };
+  return bkCatalog;
+}
+
+function loginTypeName(type) {
+  return bkCatalog.names[type] || type;
+}
+
+/* Подпись поля реквизита — не «Логин/телефон/email» на все случаи, а то,
+ * что реально просят ввести: иначе непонятно, в каком виде писать. */
+function loginFieldLabel(type) {
+  return type === "phone" ? "Телефон" : "Логин";
+}
+
+function loginFieldPlaceholder(type) {
+  return type === "phone" ? "+7 912 345-67-89" : "логин или ID счёта";
+}
+
+function loginTypeSelect(account) {
+  const allowed = bkCatalog.loginTypes[account.bookmaker] || ["phone", "login"];
+  if (allowed.length < 2) {
+    return `<span class="muted">${escapeHtml(loginTypeName(account.login_type))}</span>`;
+  }
+  const options = allowed.map((t) =>
+    `<option value="${t}"${t === account.login_type ? " selected" : ""}>`
+    + `${escapeHtml(loginTypeName(t))}</option>`).join("");
+  return `<select class="acc-login-type" data-id="${account.id}"
+      title="Способ входа: телефон и логин — разные вкладки формы у БК"
+    >${options}</select>`;
+}
+
 async function loadAccounts() {
   const { accounts } = await api("/api/admin/accounts");
   els.accountsBody.innerHTML = accounts.length ? "" :
-    '<tr><td colspan="9" class="muted">Аккаунтов нет. Они нужны только для '
+    '<tr><td colspan="10" class="muted">Аккаунтов нет. Они нужны только для '
     + 'лимитов ставки и авто-ставок — вилки считаются и без них.</td></tr>';
   for (const a of accounts) {
     const tr = document.createElement("tr");
@@ -150,6 +195,7 @@ async function loadAccounts() {
     tr.innerHTML = `
       <td>${escapeHtml(a.bookmaker)}</td>
       <td>${escapeHtml(a.label || "")}</td>
+      <td class="login-type-cell">${loginTypeSelect(a)}</td>
       <td>${escapeHtml(a.login)}</td>
       <td>${a.has_cookies ? '<span class="ok-text" title="Cookie задана — вход по ней, минуя форму/капчу">есть</span>' : "—"}</td>
       <td>${fmtMoney(a.balance)}</td>
@@ -205,22 +251,69 @@ els.accountsBody.addEventListener("click", async (e) => {
 });
 
 els.accountsBody.addEventListener("change", async (e) => {
-  if (!e.target.classList.contains("acc-enabled")) return;
   const id = e.target.dataset.id;
-  await api(`/api/admin/accounts/${id}`, {
-    method: "PUT",
-    body: JSON.stringify({ enabled: e.target.checked }),
-  });
+  if (!id) return;
+  if (e.target.classList.contains("acc-enabled")) {
+    await api(`/api/admin/accounts/${id}`, {
+      method: "PUT",
+      body: JSON.stringify({ enabled: e.target.checked }),
+    });
+  } else if (e.target.classList.contains("acc-login-type")) {
+    try {
+      await api(`/api/admin/accounts/${id}`, {
+        method: "PUT",
+        body: JSON.stringify({ login_type: e.target.value }),
+      });
+      toast(`Способ входа: ${loginTypeName(e.target.value)}. Обновляю баланс…`);
+    } catch (err) {
+      toast(err.message || "Не удалось сменить способ входа", "error");
+    }
+    await loadAccounts();
+  }
+});
+
+/* Радиокнопки способа входа: показываем только те, что принимает
+ * выбранная БК, и подстраиваем подпись поля реквизита. */
+function syncLoginTypeChoice(bookmaker, preferred) {
+  const allowed = bkCatalog.loginTypes[bookmaker] || ["phone", "login"];
+  const options = els.accountLoginType.querySelectorAll("input[name='login-type']");
+  let chosen = allowed.includes(preferred) ? preferred : allowed[0];
+  for (const input of options) {
+    const ok = allowed.includes(input.value);
+    input.closest(".admin-choice__option").hidden = !ok;
+    input.disabled = !ok;
+    input.checked = input.value === chosen;
+  }
+  els.accountLoginType.hidden = allowed.length < 2;
+  els.accountLoginLabel.textContent = loginFieldLabel(chosen);
+  els.accountLogin.placeholder = loginFieldPlaceholder(chosen);
+}
+
+function chosenLoginType() {
+  const checked = els.accountLoginType
+    .querySelector("input[name='login-type']:checked");
+  return checked ? checked.value : null;
+}
+
+els.accountBookmaker.addEventListener("change", () => {
+  syncLoginTypeChoice(els.accountBookmaker.value, chosenLoginType());
+});
+
+els.accountLoginType.addEventListener("change", () => {
+  const type = chosenLoginType();
+  els.accountLoginLabel.textContent = loginFieldLabel(type);
+  els.accountLogin.placeholder = loginFieldPlaceholder(type);
 });
 
 els.addAccountBtn.addEventListener("click", async () => {
-  const { bookmakers } = await api("/api/admin/bookmakers");
+  const { bookmakers } = await loadBookmakers();
   els.accountBookmaker.innerHTML = bookmakers
     .map((b) => `<option value="${b}">${b}</option>`).join("");
   els.accountLabel.value = "";
   els.accountLogin.value = "";
   els.accountPassword.value = "";
   els.accountCookies.value = "";
+  syncLoginTypeChoice(els.accountBookmaker.value, null);
   els.accountError.hidden = true;
   els.accountModal.hidden = false;
 });
@@ -238,6 +331,7 @@ els.accountForm.addEventListener("submit", async (e) => {
       body: JSON.stringify({
         bookmaker: els.accountBookmaker.value,
         label: els.accountLabel.value,
+        login_type: chosenLoginType(),
         login: els.accountLogin.value,
         password: els.accountPassword.value,
         cookies: els.accountCookies.value,
@@ -693,6 +787,9 @@ async function loadBetLog() {
 }
 
 async function loadAll() {
+  // Справочник БК — раньше аккаунтов: в их таблице стоит выбор способа
+  // входа, а какие способы БК принимает, знает только справочник.
+  await loadBookmakers();
   await Promise.all([loadAccounts(), loadSettings(), loadParsers(),
                      loadAccess(), loadVisitors(), loadBetLog()]);
 }
