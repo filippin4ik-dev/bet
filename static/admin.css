@@ -233,6 +233,13 @@ main#admin-view { max-width: 1080px; margin: 0 auto; }
 .tag.banned { color: var(--live); border-color: color-mix(in srgb, var(--live) 45%, transparent); }
 .row-blocked { opacity: 0.6; }
 
+/* Ширину таблице отдаёт колонка устройства: ей разрешено переноситься,
+   и тогда три кнопки действий влезают в строку без горизонтального
+   скролла (переносить сами кнопки — вдвое выше строки). */
+.admin-table td.vis-device { white-space: normal; }
+.admin-table td.vis-actions { text-align: right; }
+.vis-actions button { margin-left: 4px; margin-right: 0; }
+
 .banned-ips { margin-top: 12px; color: var(--muted); font-size: 0.84rem; }
 .ip-chip {
   display: inline-flex;
@@ -264,6 +271,9 @@ main#admin-view { max-width: 1080px; margin: 0 auto; }
 @media (max-width: 860px) {
   .admin-table { min-width: 0; }
   .admin-table th, .admin-table td { white-space: normal; }
+  /* в карточке ячейка — flex-строка «подпись … значение»; устройству с
+     пометками этой строки мало, и последняя пометка уезжала за край */
+  .admin-table td.vis-device { flex-wrap: wrap; justify-content: flex-end; }
 }
 
 @media (max-width: 720px) {
