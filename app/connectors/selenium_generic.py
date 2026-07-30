@@ -45,8 +45,18 @@ app/connectors/base.py) и выбирается оператором в адми
   мобильный российский IP того же региона, что и исходный вход (через
   `BETBOOM_PROXY`, аналогично Fonbet), иначе даже валидный токен не
   примется.
-- **Winline** (2026-07-30) — сценарий входа ПРОЙДЕН ЦЕЛИКОМ до проверки
-  реквизитов, ОБОИМИ способами. Модалка открывается кнопкой «Войти» в
+- **Winline** (2026-07-30) — ЕДИНСТВЕННАЯ БК, У КОТОРОЙ ВСЁ ПРОВЕРЕНО
+  ЖИВЫМ АККАУНТОМ: вход по логину проходит до конца и баланс читается
+  (проверено полным путём админки — аккаунт в базе, `refresh_balance()`,
+  баланс в базе). Селектор баланса ищется ПО ПОДПИСИ рядом со значением,
+  и это не педантизм: в шапке два одинаковых
+  `<div class="user-account__value">` — первый «В игре» (на тестовом
+  счёте там было 84 619 при НУЛЕВОМ балансе), второй собственно баланс.
+  Селектор по классу взял бы первый, и лимит ставки считался бы от денег,
+  которых на счету нет. Знака ₽ Winline не рисует вовсе — баланс приходит
+  голой цифрой. СМС-кода при входе с датацентрового адреса не было.
+  Сценарий входа пройден до проверки
+  реквизитов ОБОИМИ способами. Модалка открывается кнопкой «Войти» в
   хедере; внутри две вкладки — `<span class="ww-tabs__item">Телефон</span>`
   и `…>Логин</span>`. Вкладка «Телефон» рисует
   `input[name='auth-phone-base']` (рядом ОТКЛЮЧЁННЫЙ
@@ -59,9 +69,8 @@ app/connectors/base.py) и выбирается оператором в адми
   `_wait_submit_enabled`). Отправка заведомо неверных реквизитов даёт
   «Неверный телефон или пароль» и «Неверный логин или пароль»
   соответственно — то есть запрос доходит до проверки на стороне БК.
-  Капчи на форме нет. НЕ проверено: сам успешный вход (тестового
-  аккаунта с известным паролем не было), возможный СМС/пуш-код после
-  него (см. `_maybe_handle_otp`) и селектор баланса.
+  Капчи на форме нет. НЕ проверено: вход по ТЕЛЕФОНУ до конца (тестовый
+  аккаунт был с логином) и постановка ставки.
 - **Melbet** — движок 1xBet, вход тоже двумя способами (телефон и
   «ID/номер счёта»). Селекторы НЕ ПРОВЕРЕНЫ и проверены быть не могут из
   этой песочницы: melbet.ru отдаёт «отключите VPN» адресам дата-центров,
@@ -76,20 +85,23 @@ app/connectors/base.py) и выбирается оператором в адми
   аккаунта в этой сессии); селекторы ниже — типовые заготовки, как и
   было изначально.
 
-Ни для одной БК не было ни одного успешного end-to-end чтения баланса
-(get_balance()) живым логином — Fonbet блокируется на уровне сети,
-BetBoom — капчей, Melbet не пускает на сайт вовсе, для Winline/Liga
-Stavok/bc.game не было тестовых паролей (у Winline пройдено всё вплоть
-до ответа «Неверный телефон или пароль», но не сам вход). Поэтому
-элемент баланса (`SELECTORS[...]["balance"]`) ниже
-ПО-ПРЕЖНЕМУ не подтверждён ни для одной БК — прежде чем включать реальный
-(не dry-run) режим:
+Кроме Winline, ни у одной БК успешного end-to-end чтения баланса живым
+логином не было: Fonbet блокируется на уровне сети, BetBoom — капчей,
+Melbet не пускает на сайт вовсе, для Liga Stavok/bc.game не было
+тестовых аккаунтов. Поэтому элемент баланса
+(`SELECTORS[...]["balance"]`) у всех остальных БК — НЕПОДТВЕРЖДЁННАЯ
+заготовка; прежде чем включать реальный (не dry-run) режим:
 
 1. Откройте личный кабинет БК руками (или через это же окружение с
    прокси/капчей, если применимо), через DevTools найдите актуальный
    селектор элемента с балансом ПОСЛЕ входа.
 2. Впишите его в SELECTORS ниже (или переопределите через переменную
    окружения `<BOOKMAKER>_BALANCE_SELECTOR` — см. `_selector()`).
+   Если значение баланса неотличимо по классу от соседних чисел в шапке
+   (как оказалось у Winline), задайте вместо этого пару
+   `balance_label` + `balance_value` — поиск по подписи рядом со
+   значением (`<BOOKMAKER>_BALANCE_LABEL` /
+   `<BOOKMAKER>_BALANCE_VALUE_SELECTOR`).
 3. Проверьте вход и чтение баланса на тестовом аккаунте с BALANCE-ONLY
    операцией (без ставок), прежде чем доверять авто-лимитам.
 
@@ -185,7 +197,18 @@ SELECTORS: dict[str, dict[str, str]] = {
         "username_login": "input[name='auth-username']",
         "password": "input[name='auth-password-base']",
         "submit": "button.ww-login__btn[type='submit']",
-        "balance": "[class*='balance'], [class*='Balance']",
+        # Баланс ищется ПО ПОДПИСИ рядом со значением, а не по классу.
+        # Снято с шапки после реального входа 2026-07-30:
+        #   <div class="user-account__block">
+        #     <div class="user-account__label">Баланс:</div>
+        #     <div class="user-account__value">0</div></div>
+        # Таких user-account__value в шапке ДВА: первый — «В игре»
+        # (сумма в незавершённых ставках), второй — баланс. Селектор по
+        # классу взял бы первый, и бот считал бы лимит ставки от денег,
+        # которых на счету нет. Знака ₽ Winline не рисует вовсе — отсюда
+        # и разбор голого числа (см. _parse_money).
+        "balance_label": "Баланс",
+        "balance_value": ".user-account__value",
     },
     # Melbet работает на движке 1xBet, и вход у неё — те же две вкладки:
     # по номеру телефона и по «ID/логину» (у 1xBet это номер клубной
@@ -297,6 +320,29 @@ def resolve_login_type(bookmaker: str, value: str | None) -> str:
 
 _BALANCE_RE = re.compile(r"([\d\s]{1,9}[.,]?\d{0,2})\s*(?:₽|руб)", re.I)
 
+# Число внутри текста баланса. Знака валюты НЕ требует: Winline рисует
+# баланс голой цифрой («0», «1 234,56») без ₽ вообще.
+_MONEY_RE = re.compile(r"\d[\d \u00a0]*(?:[.,]\d+)?")
+
+
+def _parse_money(text: str, bookmaker: str) -> float:
+    """«1 234,56 ₽» → 1234.56.
+
+    Отдельной функцией, потому что прежний разбор на живом балансе падал
+    с `ValueError: could not convert string to float: '\\n'`: запасная
+    регулярка ловила пробельную строку, и Python валился с сообщением, по
+    которому невозможно понять, что случилось на самом деле."""
+    m = _MONEY_RE.search(text or "")
+    if not m:
+        raise RuntimeError(
+            f"В тексте баланса {bookmaker} нет числа: {text!r}. Похоже, "
+            f"селектор указывает не на тот элемент — проверьте "
+            f"{env_prefix(bookmaker)}_BALANCE_VALUE_SELECTOR/"
+            f"{env_prefix(bookmaker)}_BALANCE_SELECTOR.")
+    clean = m.group(0).replace("\u00a0", "").replace(" ", "").replace(",", ".")
+    return float(clean)
+
+
 # Общий признак виджета капчи (reCAPTCHA/hCaptcha/собственный виджет БК) —
 # если это видно рядом с формой логина, автоматический вход дальше не
 # пойдёт: решать капчу за пользователя мы не пытаемся (см. BetBoom выше).
@@ -401,6 +447,43 @@ def _looks_blocked(driver) -> str:
     hits = [m for m in _BLOCK_PAGE_MARKERS if m in haystack]
     return ", ".join(hits)
 
+
+# Значение баланса рядом с его подписью. Ищем именно так, потому что по
+# классу его не отличить от соседей: у Winline «В игре» и «Баланс» — это
+# два одинаковых <div class="user-account__value"> подряд, и первый
+# попавшийся оказывается суммой в незавершённых ставках. Разница не
+# косметическая — от баланса считается лимит ставки.
+#
+# Подпись ищется по СОБСТВЕННОМУ тексту элемента (без текста потомков),
+# иначе подошёл бы любой контейнер, внутри которого встречается слово
+# «Баланс». От найденной подписи поднимаемся вверх на несколько уровней и
+# берём первое значение — так работает и «подпись рядом со значением», и
+# «подпись с значением в одной обёртке».
+_BALANCE_BY_LABEL_JS = """
+    const valueSel = arguments[0], want = arguments[1].toLowerCase();
+    const norm = s => (s || '').replace(/\\s+/g, ' ').trim();
+    const seen = el => {
+        const r = el.getBoundingClientRect();
+        return r.width > 0 && r.height > 0;
+    };
+    for (const el of document.querySelectorAll('*')) {
+        if (!seen(el)) continue;
+        const own = norm(Array.from(el.childNodes)
+            .filter(n => n.nodeType === 3)
+            .map(n => n.textContent).join(' '));
+        if (!own.toLowerCase().startsWith(want)) continue;
+        let node = el;
+        for (let up = 0; up < 4 && node.parentElement; up++) {
+            node = node.parentElement;
+            for (const v of node.querySelectorAll(valueSel)) {
+                if (v === el || !seen(v)) continue;
+                const text = norm(v.textContent);
+                if (text) return text;
+            }
+        }
+    }
+    return null;
+"""
 
 # Проверка «виден ли на странице элемент с таким текстом» — без клика,
 # используется, чтобы понять, вернул ли сайт форму логина (значит, cookie
@@ -887,16 +970,54 @@ class SeleniumGenericConnector(BookmakerConnector):
                      "донастройте selenium_generic.py", self.bookmaker, exc)
 
     def get_balance(self) -> float:
-        import time
         self._login()
         driver = self._ensure_driver()
+        label = _text_setting(self.bookmaker, "balance_label")
+        value_sel = _selector(self.bookmaker, "balance_value")
+        if label and value_sel:
+            return self._balance_by_label(driver, label, value_sel)
+        return self._balance_by_selector(driver)
+
+    def _balance_by_label(self, driver, label: str, value_sel: str) -> float:
+        """Баланс по подписи рядом с ним («Баланс: 0»).
+
+        Запасных вариантов у этого пути СОЗНАТЕЛЬНО нет. Он настраивается
+        только там, где значение баланса неотличимо по классу от соседних
+        чисел (Winline: «В игре» и «Баланс» — два одинаковых див подряд),
+        и любой откат на «первый подходящий элемент» или на поиск денег по
+        всей странице означал бы вернуть чужое число: сумму в игре, кэф
+        или «5000 ₽» с рекламного баннера. Лучше честная ошибка и
+        неизвестный баланс — при нём лимит ставки просто не показывается
+        (см. accounts_manager.max_stake_for_bookmaker)."""
+        deadline = time.monotonic() + 20
+        text = None
+        while time.monotonic() < deadline:
+            time.sleep(1.0)
+            try:
+                text = driver.execute_script(_BALANCE_BY_LABEL_JS,
+                                             value_sel, label)
+            except Exception:  # noqa: BLE001
+                text = None
+            if text:
+                break
+        if not text:
+            raise RuntimeError(
+                f"Не нашёл баланс {self.bookmaker}: на странице нет подписи "
+                f"«{label}» со значением рядом (селектор значения "
+                f"{value_sel!r}). Либо вход не прошёл, либо сайт изменил "
+                f"шапку — поправьте {env_prefix(self.bookmaker)}_"
+                f"BALANCE_LABEL и {env_prefix(self.bookmaker)}_"
+                f"BALANCE_VALUE_SELECTOR.")
+        return _parse_money(text, self.bookmaker)
+
+    def _balance_by_selector(self, driver) -> float:
+        from selenium.webdriver.common.by import By
         balance_sel = _selector(self.bookmaker, "balance")
         deadline = time.monotonic() + 20
         text = ""
         while time.monotonic() < deadline:
             time.sleep(1.0)
             try:
-                from selenium.webdriver.common.by import By
                 els = driver.find_elements(By.CSS_SELECTOR, balance_sel)
                 for el in els:
                     if el.text.strip():
@@ -907,10 +1028,11 @@ class SeleniumGenericConnector(BookmakerConnector):
             except Exception:  # noqa: BLE001
                 continue
         if not text:
-            # запасной вариант: ищем денежный паттерн по всему тексту страницы
+            # запасной вариант: ищем денежный паттерн по всему тексту
+            # страницы. Он требует ₽/руб именно поэтому — без знака
+            # валюты сюда попал бы любой кэф со страницы.
             try:
-                body_text = driver.find_element(
-                    "tag name", "body").text
+                body_text = driver.find_element(By.TAG_NAME, "body").text
             except Exception:  # noqa: BLE001
                 body_text = ""
             m = _BALANCE_RE.search(body_text)
@@ -920,14 +1042,7 @@ class SeleniumGenericConnector(BookmakerConnector):
                     f"проверьте/обновите селектор 'balance' (вход, "
                     f"возможно, тоже не прошёл: сайт мог показать капчу).")
             text = m.group(0)
-        m = _BALANCE_RE.search(text) or re.search(r"[\d\s]+[.,]?\d*", text)
-        if not m:
-            raise RuntimeError(
-                f"Не удалось распознать число в тексте баланса "
-                f"{self.bookmaker}: {text!r}")
-        num = m.group(1) if m.lastindex else m.group(0)
-        num = num.replace(" ", "").replace("\xa0", "").replace(",", ".")
-        return float(num)
+        return _parse_money(text, self.bookmaker)
 
     def inspect_login_form(self) -> dict:
         """Что РЕАЛЬНО лежит в форме входа этой БК: вкладки, поля, кнопки.

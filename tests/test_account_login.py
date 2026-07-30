@@ -22,8 +22,8 @@ from app.connectors import (LOGIN_BY_LOGIN, LOGIN_BY_PHONE,  # noqa: E402
                             default_login_type, env_prefix, get_connector,
                             login_types, national_phone, normalize_login_type)
 from app.connectors.selenium_generic import (  # noqa: E402
-    SELECTORS, _fill_username, _looks_blocked, _selector, _tab_text,
-    _username_selector)
+    SELECTORS, _fill_username, _looks_blocked, _parse_money, _selector,
+    _tab_text, _username_selector)
 
 
 class FakeInput:
@@ -248,6 +248,47 @@ def test_block_page_is_not_mistaken_for_broken_selectors():
     print("OK: test_block_page_is_not_mistaken_for_broken_selectors")
 
 
+def test_balance_number_is_read_without_a_currency_sign():
+    """Winline рисует баланс голой цифрой, без ₽ (снято с живого счёта
+    2026-07-30: `<div class="user-account__value">0</div>`), и разделяет
+    тысячи неразрывным пробелом."""
+    assert _parse_money("0", "Winline") == 0.0
+    assert _parse_money("1 234,56", "Winline") == 1234.56
+    assert _parse_money("1\u00a0234.56", "Winline") == 1234.56
+    assert _parse_money("12 345,67 ₽", "BetBoom") == 12345.67
+    assert _parse_money("Баланс: 750 руб", "BetBoom") == 750.0
+    print("OK: test_balance_number_is_read_without_a_currency_sign")
+
+
+def test_balance_without_a_number_says_what_is_wrong():
+    """На этом прежний разбор падал живьём: пустой элемент баланса давал
+    `ValueError: could not convert string to float: '\\n'` — сообщение, по
+    которому невозможно понять, что случилось."""
+    for junk in ("\n", "", "   ", "—", None):
+        try:
+            _parse_money(junk, "Winline")
+        except RuntimeError as exc:
+            assert "WINLINE_BALANCE" in str(exc)
+        else:
+            raise AssertionError(f"{junk!r} не число, нужна понятная ошибка")
+    print("OK: test_balance_without_a_number_says_what_is_wrong")
+
+
+def test_winline_balance_is_found_by_label_not_by_class():
+    """Защита от подмены баланса суммой в игре. В шапке Winline два
+    одинаковых `.user-account__value`: первый — «В игре» (на живом счёте
+    было 84 619 при нулевом балансе), второй — сам баланс. Поиск по
+    классу взял бы первый, и лимит ставки считался бы от денег, которых
+    на счету нет, — поэтому у Winline настроен поиск по подписи, а
+    неоднозначного `balance` быть не должно."""
+    winline = SELECTORS["Winline"]
+    assert winline["balance_label"] == "Баланс"
+    assert winline["balance_value"] == ".user-account__value"
+    assert "balance" not in winline, \
+        "запасной селектор по классу вернул бы «В игре» вместо баланса"
+    print("OK: test_winline_balance_is_found_by_label_not_by_class")
+
+
 if __name__ == "__main__":
     test_unknown_login_type_falls_back_instead_of_crashing()
     test_phone_is_typed_without_country_code()
@@ -259,4 +300,7 @@ if __name__ == "__main__":
     test_selectors_are_overridable_without_touching_code()
     test_filled_field_gets_the_right_string()
     test_block_page_is_not_mistaken_for_broken_selectors()
+    test_balance_number_is_read_without_a_currency_sign()
+    test_balance_without_a_number_says_what_is_wrong()
+    test_winline_balance_is_found_by_label_not_by_class()
     print("Все тесты прошли.")
