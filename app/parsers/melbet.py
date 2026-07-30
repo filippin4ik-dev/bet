@@ -209,6 +209,12 @@ class MelbetParser(BaseParser):
                     chunk = fut.result()
                 except Exception:  # noqa: BLE001 — вид спорта не критичен
                     continue
+                if len(chunk) >= count:
+                    # Фид отдал ровно столько, сколько попросили, — значит
+                    # линия вида спорта на этом обрезана.
+                    log.info("Melbet: вид спорта %s упёрся в лимит %d "
+                             "событий — часть линии не видна, поднимите "
+                             "MELBET_SPORT_COUNT", futures[fut], count)
                 for g in chunk:
                     gid = _game_id(g)
                     if gid:
@@ -475,7 +481,12 @@ def _picks(game: dict) -> list[tuple[int, int, float | None, float]]:
     сгруппированные GE/AE, где группа стоит на самой группе, а не на
     исходе. Собираем всё в один плоский список."""
     out: list[tuple[int, int, float | None, float]] = []
-    _walk(game, out, None, 0)
+    # Идём только по полям с рынками, а не по событию целиком: у самого
+    # события тоже может оказаться поле «G», и тогда исходы без своей
+    # группы унаследовали бы номер, к рынкам отношения не имеющий.
+    for key in _MARKET_KEYS:
+        if key in game:
+            _walk(game[key], out, None, 0)
     return out
 
 
