@@ -87,14 +87,16 @@ import logging
 import time
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from urllib.parse import urlsplit
 
 import requests
 
 from ..config import (MELBET_API_HOST, MELBET_CHAMP_WORKERS, MELBET_CHAMPS,
-                      MELBET_FEED_TIMEOUT, MELBET_FULL_MARKETS,
-                      MELBET_FULL_MARKETS_MAX, MELBET_FULL_MARKETS_WORKERS,
-                      MELBET_GROUPS, MELBET_HOSTS, MELBET_LIVE_COUNT,
-                      MELBET_MIN_REFRESH, MELBET_SITE_HOST,
+                      MELBET_EVENT_URL, MELBET_FEED_TIMEOUT,
+                      MELBET_FULL_MARKETS, MELBET_FULL_MARKETS_MAX,
+                      MELBET_FULL_MARKETS_WORKERS, MELBET_GROUPS,
+                      MELBET_HOSTS, MELBET_LIVE_COUNT, MELBET_MIN_REFRESH,
+                      MELBET_SITE_HOST, MELBET_SITE_HOST_SET,
                       MELBET_SPORT_COUNT, MELBET_SPORT_WORKERS,
                       MELBET_SUBGAMES)
 from ..models import KIND_LIVE, KIND_PREMATCH, MarketOdds
@@ -626,7 +628,8 @@ class MelbetParser(BaseParser):
         base = dict(bookmaker=self.name, sport=sport, team1=team1,
                     team2=team2, kind=KIND_LIVE if live else KIND_PREMATCH,
                     start_time=format_start(start_ts) if start_ts else None,
-                    start_ts=start_ts, url=_event_url(game, live))
+                    start_ts=start_ts,
+                    url=_event_url(game, live, self._base))
 
         out: list[MarketOdds] = []
         out.extend(self._winner(ev, layout, base))
@@ -909,32 +912,89 @@ def _site_game_id(game: dict) -> int | None:
     return None
 
 
-def _event_url(game: dict, live: bool) -> str:
+# Путь к странице события. У площадок движка он разный, и подставить
+# «универсальный» нельзя: melbet.ru открывает матч внутренним маршрутом
+# приложения, международные зеркала (.com/.mobi/ru.melbet.com) — SEO-
+# адресом «/ru/line/<спорт>/<чемпионат>-<слаг>/<событие>-<команды>».
+# Здесь стоит формат melbet.ru — на него и настроен MELBET_SITE_HOST по
+# умолчанию; сменить, ничего не трогая в коде, можно через MELBET_EVENT_URL
+# (подобрать поможет «python -m app.diagnose_melbet --links»).
+EVENT_URL_DEFAULT = ("/ru/sport/event-details/"
+                     "{champ}-{game}-{country}-{sport}-0-{live}-0-{teams}")
+EVENT_URL_SEO = ("/ru/{section}/{sport_slug}/{champ}-{champ_slug}/"
+                 "{game}-{teams}")
+_bad_template_logged = False
+
+
+def event_url_parts(game: dict, live: bool) -> dict:
+    """Из чего собирается адрес события — плейсхолдеры шаблона.
+
+    Номера идут из фида той же площадки, что и сайт: id чемпионатов,
+    стран и событий у melbet.ru и международных зеркал СВОИ, между собой
+    они не совпадают."""
+    return {
+        "champ": game.get("LI") or 0,
+        "country": game.get("COI") or 0,
+        "sport": game.get("SI") or 0,
+        "game": _site_game_id(game) or 0,
+        "game_feed": _game_id(game) or 0,
+        "live": 1 if live else 0,
+        "section": "live" if live else "line",
+        "sport_slug": slugify(game.get("SE") or game.get("SN"), "sport"),
+        "champ_slug": slugify(game.get("LE") or game.get("L"), "champ"),
+        "teams": "-".join(
+            slugify(game.get(key + "E") or _team(game, key), key.lower())
+            for key in ("O1", "O2")),
+    }
+
+
+def site_host(base: str | None) -> str:
+    """Куда вести ссылки — на площадку, ОТКУДА пришли данные.
+
+    Номера событий, чемпионатов и стран у melbet.ru и международных
+    зеркал разные: сайт просто не знает номеров чужой площадки, и ссылка
+    с ними не откроется ни в каком формате. А базу фида парсер выбирает
+    перебором — например, уходит на .com, когда melbet.ru не пускает адрес
+    сервера. Поэтому по умолчанию хост ссылки следует за базой фида;
+    заданный руками MELBET_SITE_HOST всегда важнее."""
+    if MELBET_SITE_HOST_SET:
+        return MELBET_SITE_HOST
+    if not base:
+        return MELBET_SITE_HOST
+    parts = urlsplit(base)
+    return f"{parts.scheme}://{parts.netloc}" if parts.netloc \
+        else MELBET_SITE_HOST
+
+
+def _event_template(host: str, allow_override: bool = True) -> str:
+    """Формат пути: у melbet.ru свой, у международных зеркал — SEO-адрес."""
+    if allow_override and MELBET_EVENT_URL:
+        return MELBET_EVENT_URL
+    return EVENT_URL_DEFAULT if host.endswith(".ru") else EVENT_URL_SEO
+
+
+def _event_url(game: dict, live: bool, base: str | None = None) -> str:
     """Страница матча на сайте.
 
-    Формат — «/ru/{line|live}/<спорт>/<id чемпионата>-<чемпионат>/<CI>-
-    <команды>»; такие адреса отдаёт сам сайт и индексируют поисковики.
-    Числовая форма «/ru/line/<id спорта>/<id чемпионата>/<I>», которая
-    стояла тут раньше, сайтом не обслуживается — отсюда 404.
-
-    Английские названия (SE/LE/O1E/O2E) — то, из чего БК строит слаги;
-    если их нет, транслитерируем русские. Без номера события ссылка ведёт
-    на чемпионат, а без него — на линию: пусть лучше откроется раздел,
-    чем несуществующая страница."""
-    section = "live" if live else "line"
-    root = f"{MELBET_SITE_HOST}/ru/{section}"
-    sport = slugify(game.get("SE") or game.get("SN"), "sport")
-    champ_id = game.get("LI")
-    if not isinstance(champ_id, int) or not champ_id:
-        return root
-    champ = f"{champ_id}-{slugify(game.get('LE') or game.get('L'), 'champ')}"
-    gid = _site_game_id(game)
-    if not gid:
-        return f"{root}/{sport}/{champ}"
-    teams = "-".join(
-        slugify(game.get(key + "E") or _team(game, key), key.lower())
-        for key in ("O1", "O2"))
-    return f"{root}/{sport}/{champ}/{gid}-{teams}"
+    Без номера события ссылка ведёт в раздел линии: открыть раздел лучше,
+    чем выдуманный адрес, на котором пользователь получит 404."""
+    global _bad_template_logged
+    host = site_host(base)
+    parts = event_url_parts(game, live)
+    if not parts["game"]:
+        return f"{host}/ru/{parts['section']}"
+    template = _event_template(host)
+    try:
+        path = template.format(**parts)
+    except (KeyError, IndexError, ValueError):
+        if not _bad_template_logged:
+            _bad_template_logged = True
+            log.warning("Melbet: в MELBET_EVENT_URL есть плейсхолдер, "
+                        "которого нет в данных события (%s) — беру формат "
+                        "по умолчанию. Доступны: %s", template,
+                        ", ".join(sorted(parts)))
+        path = _event_template(host, allow_override=False).format(**parts)
+    return host + path
 
 
 def _is_geo_stub(resp) -> bool:
