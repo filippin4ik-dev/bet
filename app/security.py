@@ -77,8 +77,47 @@ def decrypt_str(token: str) -> str:
 
 
 def verify_admin_password(username: str, password: str) -> bool:
-    return (hmac.compare_digest(username, config.ADMIN_USERNAME)
-            and hmac.compare_digest(password, config.ADMIN_PASSWORD))
+    # Сравниваем БАЙТЫ: compare_digest на строках с не-ASCII (а пароль
+    # вполне может быть русским) падает с TypeError, и вместо «неверный
+    # пароль» пользователь получал бы ошибку сервера.
+    return (hmac.compare_digest(username.encode("utf-8"),
+                                config.ADMIN_USERNAME.encode("utf-8"))
+            and hmac.compare_digest(password.encode("utf-8"),
+                                    config.ADMIN_PASSWORD.encode("utf-8")))
+
+
+# ---------------------------------------------------------------------------
+# Пароль доступа к сайту (задаётся в админке, хранится в базе)
+# ---------------------------------------------------------------------------
+
+_PBKDF2_ROUNDS = 200_000
+
+
+def hash_password(plain: str) -> str:
+    """Хэш пароля для хранения в базе: PBKDF2-HMAC-SHA256 со случайной солью.
+
+    Пароль доступа к сайту оператор задаёт в админке, поэтому в открытом
+    виде он не хранится нигде — в базе лежит только хэш, а проверка идёт
+    через compare_digest (см. verify_password_hash)."""
+    salt = secrets.token_bytes(16)
+    dk = hashlib.pbkdf2_hmac("sha256", plain.encode("utf-8"), salt,
+                             _PBKDF2_ROUNDS)
+    return "pbkdf2_sha256${}${}${}".format(
+        _PBKDF2_ROUNDS, base64.urlsafe_b64encode(salt).decode("ascii"),
+        base64.urlsafe_b64encode(dk).decode("ascii"))
+
+
+def verify_password_hash(stored: str, plain: str) -> bool:
+    try:
+        algo, rounds, salt_b64, dk_b64 = stored.split("$")
+        if algo != "pbkdf2_sha256":
+            return False
+        salt = base64.urlsafe_b64decode(salt_b64.encode("ascii"))
+        expected = base64.urlsafe_b64decode(dk_b64.encode("ascii"))
+    except (ValueError, TypeError):
+        return False
+    dk = hashlib.pbkdf2_hmac("sha256", plain.encode("utf-8"), salt, int(rounds))
+    return hmac.compare_digest(dk, expected)
 
 
 def _sign(payload: str) -> str:
@@ -87,9 +126,9 @@ def _sign(payload: str) -> str:
     return base64.urlsafe_b64encode(sig).decode("ascii").rstrip("=")
 
 
-def create_session_token(username: str) -> str:
+def create_session_token(username: str, ttl: float | None = None) -> str:
     body = json.dumps(
-        {"u": username, "exp": time.time() + config.ADMIN_SESSION_TTL},
+        {"u": username, "exp": time.time() + (ttl or config.ADMIN_SESSION_TTL)},
         separators=(",", ":"))
     body_b64 = base64.urlsafe_b64encode(body.encode("utf-8")).decode("ascii")
     return f"{body_b64}.{_sign(body_b64)}"
@@ -100,7 +139,11 @@ def verify_session_token(token: str | None) -> str | None:
     if not token or "." not in token:
         return None
     body_b64, sig = token.rsplit(".", 1)
-    if not hmac.compare_digest(sig, _sign(body_b64)):
+    # cookie приходит от клиента, там может быть что угодно, включая
+    # не-ASCII: на строках compare_digest в таком случае бросает TypeError,
+    # и битая cookie валила бы запрос с ошибкой сервера вместо «войдите».
+    if not hmac.compare_digest(sig.encode("utf-8", "replace"),
+                               _sign(body_b64).encode("ascii")):
         return None
     try:
         body = json.loads(base64.urlsafe_b64decode(body_b64.encode("ascii")))

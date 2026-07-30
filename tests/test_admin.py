@@ -240,6 +240,100 @@ def test_settings_report_scanner_state():
     print("OK: test_settings_report_scanner_state")
 
 
+def test_parser_endpoints_toggle_and_restart():
+    """Админка управляет каждой БК отдельно: список с состоянием, вкл/выкл
+    (переживает перезапуск) и перезапуск одной БК."""
+    from fastapi import HTTPException
+
+    from app import admin_api, bk_control
+    data = admin_api.list_parsers(username="admin")
+    names = [p["name"] for p in data["parsers"]]
+    assert "Winline" in names and "Fonbet" in names
+    assert all(p["enabled"] for p in data["parsers"]), \
+        "по умолчанию включены все БК"
+    assert data["scan_interval"] == config.SCAN_INTERVAL
+
+    try:
+        res = admin_api.update_parser(
+            "Winline", admin_api.ParserBody(enabled=False), username="admin")
+        assert res["enabled"] is False
+        assert bk_control.is_enabled("Winline") is False
+        assert db.get_bool_setting("bk_enabled:Winline", True) is False
+        state = next(p for p in admin_api.list_parsers(username="admin")["parsers"]
+                     if p["name"] == "Winline")
+        assert state["enabled"] is False
+    finally:
+        admin_api.update_parser("Winline", admin_api.ParserBody(enabled=True),
+                                username="admin")
+    assert bk_control.is_enabled("Winline") is True
+
+    assert admin_api.restart_parser("Fonbet", username="admin")["ok"] is True
+    for name in ("НетТакойБК",):
+        for call in (lambda: admin_api.update_parser(
+                        name, admin_api.ParserBody(enabled=False),
+                        username="admin"),
+                     lambda: admin_api.restart_parser(name, username="admin")):
+            try:
+                call()
+            except HTTPException as exc:
+                assert exc.status_code == 404
+            else:
+                raise AssertionError("неизвестная БК должна давать 404")
+    print("OK: test_parser_endpoints_toggle_and_restart")
+
+
+def test_scanner_restart_endpoint():
+    from fastapi import HTTPException
+
+    from app import admin_api
+    from app.runtime import live_scanner, scanner
+    assert admin_api.restart_scanner(
+        admin_api.ScannerRestartBody(mode="all"), username="admin")["ok"]
+    assert scanner._restart_all is True
+    assert live_scanner._restart_all is True
+    scanner._restart_all = False
+    live_scanner._restart_all = False
+    try:
+        admin_api.restart_scanner(admin_api.ScannerRestartBody(mode="боком"),
+                                  username="admin")
+    except HTTPException as exc:
+        assert exc.status_code == 400
+    else:
+        raise AssertionError("непонятный режим должен отвергаться")
+    print("OK: test_scanner_restart_endpoint")
+
+
+def test_restart_argv_repeats_original_command():
+    """Перезапуск сервера должен повторять исходную команду целиком.
+
+    Проверено на живом сервере: склейка sys.executable + sys.argv ломает
+    запуск через `python -m uvicorn` — интерпретатор получает путь к
+    uvicorn/__main__.py, кладёт его каталог в sys.path, и `import logging`
+    внутри uvicorn находит uvicorn/logging.py вместо стандартного модуля.
+    Процесс падает на циклическом импорте, и сайт не поднимается."""
+    import sys
+
+    from app import admin_api
+    orig = getattr(sys, "orig_argv", None)
+    try:
+        sys.orig_argv = [sys.executable, "-m", "uvicorn", "app.main:app",
+                         "--port", "8000"]
+        assert admin_api.restart_argv() == sys.orig_argv
+        # интерпретатор без ключей: команда тоже воспроизводится как есть
+        sys.orig_argv = [sys.executable, "run.py"]
+        assert admin_api.restart_argv() == [sys.executable, "run.py"]
+        # очень старый Python без orig_argv — хотя бы не падаем
+        del sys.orig_argv
+        assert admin_api.restart_argv()[0] == sys.executable
+    finally:
+        if orig is None:
+            if hasattr(sys, "orig_argv"):
+                del sys.orig_argv
+        else:
+            sys.orig_argv = orig
+    print("OK: test_restart_argv_repeats_original_command")
+
+
 def test_otp_relay_roundtrip():
     """Коннектор (фоновый поток) ждёт код, админка вводит его — код
     должен дойти обратно до заблокированного потока."""

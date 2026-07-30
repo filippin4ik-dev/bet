@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="color-scheme" content="dark light">
+  <title>Вход — Сканер вилок</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='26'>⚡</text></svg>">
+  <script src="/static/theme.js"></script>
+</head>
+<body class="gate-body">
+  <main class="gate">
+    <div class="gate-card">
+      <div class="gate-logo">⚡</div>
+      <h1>Сканер <span class="accent">вилок</span></h1>
+      <p class="gate-hint">Сайт закрыт. Введите пароль доступа.</p>
+
+      <form id="gate-form" autocomplete="on">
+        <label class="gate-field">
+          <span>Пароль</span>
+          <input type="password" id="gate-password" autocomplete="current-password"
+                 autofocus required>
+        </label>
+        <button type="submit" id="gate-submit">Войти</button>
+        <div class="gate-error" id="gate-error" hidden></div>
+      </form>
+
+      <p class="gate-note">
+        Пароль задаётся в админке (раздел «Доступ к сайту») или переменной
+        окружения <code>SITE_PASSWORD</code>. Подходит и пароль администратора.
+        Свои адреса можно внести в белый список — с них вход без пароля.
+      </p>
+    </div>
+  </main>
+  <script src="/static/login.js"></script>
+</body>
+</html>

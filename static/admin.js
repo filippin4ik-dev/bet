@@ -26,10 +26,34 @@ const els = {
   settingLiveEnabled: document.getElementById("setting-live-enabled"),
   saveScannerBtn: document.getElementById("save-scanner-btn"),
   scannerState: document.getElementById("scanner-state"),
+  restartPrematchBtn: document.getElementById("restart-prematch-btn"),
+  restartLiveBtn: document.getElementById("restart-live-btn"),
+  restartAppBtn: document.getElementById("restart-app-btn"),
+  parserGrid: document.getElementById("parser-grid"),
+  parsersNote: document.getElementById("parsers-note"),
+  accessState: document.getElementById("access-state"),
+  accessPassword: document.getElementById("access-password"),
+  accessWhitelist: document.getElementById("access-whitelist"),
+  accessIpOnly: document.getElementById("access-ip-only"),
+  saveAccessBtn: document.getElementById("save-access-btn"),
+  clearAccessBtn: document.getElementById("clear-access-btn"),
+  addMyIpBtn: document.getElementById("add-my-ip-btn"),
+  accessError: document.getElementById("access-error"),
   limitFraction: document.getElementById("limit-fraction"),
   limitMax: document.getElementById("limit-max"),
   betlogBody: document.getElementById("betlog-body"),
+  toastHost: document.getElementById("toast-host"),
 };
+
+/* Короткие сообщения об успехе/ошибке: alert() останавливал бы опрос
+ * состояния сканера и требовал клика на каждое действие. */
+function toast(message, kind = "") {
+  const el = document.createElement("div");
+  el.className = `toast ${kind}`.trim();
+  el.textContent = message;
+  els.toastHost.appendChild(el);
+  setTimeout(() => el.remove(), 3600);
+}
 
 async function api(path, opts) {
   const resp = await fetch(path, {
@@ -110,7 +134,9 @@ function fmtDate(s) {
 
 async function loadAccounts() {
   const { accounts } = await api("/api/admin/accounts");
-  els.accountsBody.innerHTML = "";
+  els.accountsBody.innerHTML = accounts.length ? "" :
+    '<tr><td colspan="9" class="muted">Аккаунтов нет. Они нужны только для '
+    + 'лимитов ставки и авто-ставок — вилки считаются и без них.</td></tr>';
   for (const a of accounts) {
     const tr = document.createElement("tr");
     const status = a.last_error
@@ -148,7 +174,7 @@ els.accountsBody.addEventListener("click", async (e) => {
     e.target.textContent = "...";
     try {
       await api(`/api/admin/accounts/${id}/refresh_balance`, { method: "POST" });
-    } catch (err) { alert(err.message); }
+    } catch (err) { toast(err.message, "error"); }
     await loadAccounts();
   } else if (e.target.classList.contains("acc-delete")) {
     if (!confirm("Удалить аккаунт?")) return;
@@ -168,7 +194,7 @@ els.accountsBody.addEventListener("click", async (e) => {
         body: JSON.stringify({ cookies: raw }),
       });
     } catch (err) {
-      alert(err.message || "Не удалось сохранить cookie");
+      toast(err.message || "Не удалось сохранить cookie", "error");
     }
     await loadAccounts();
   }
@@ -259,19 +285,258 @@ els.saveScannerBtn.addEventListener("click", async () => {
 });
 
 els.saveSettingsBtn.addEventListener("click", async () => {
-  await api("/api/admin/settings", {
-    method: "POST",
-    body: JSON.stringify({
-      autobet_enabled: els.settingEnabled.checked,
-      autobet_dry_run: els.settingDryRun.checked,
-    }),
-  });
-  alert("Сохранено");
+  try {
+    await api("/api/admin/settings", {
+      method: "POST",
+      body: JSON.stringify({
+        autobet_enabled: els.settingEnabled.checked,
+        autobet_dry_run: els.settingDryRun.checked,
+      }),
+    });
+    toast("Настройки авто-ставок сохранены");
+  } catch (err) {
+    toast(err.message || "Не удалось сохранить", "error");
+  }
+});
+
+/* ---------- парсеры БК: включение, выключение, перезапуск ---------- */
+
+function fmtAge(sec) {
+  if (sec == null) return "";
+  if (sec < 90) return "только что";
+  return `${Math.round(sec / 60)} мин назад`;
+}
+
+function parserModeRow(label, info, offText) {
+  if (offText) return `<div class="parser-row"><span class="mode">${label}</span>
+      <span class="state">${offText}</span></div>`;
+  if (!info) return `<div class="parser-row"><span class="mode">${label}</span>
+      <span class="state">ждём первый обход</span></div>`;
+  const state = info.busy ? '<span class="state busy">обновляется…</span>'
+    : `<span class="state">${fmtAge(info.age_sec)}</span>`;
+  return `<div class="parser-row">
+      <span class="mode">${label}</span>
+      <span class="count">${info.count.toLocaleString("ru-RU")}</span>
+      <span>котировок</span>${state}
+    </div>`;
+}
+
+/* Карточки БК живут между обновлениями: состояние подтягивается раз в
+ * несколько секунд, и если каждый раз перерисовывать плитку целиком, клик
+ * по галке, пришедшийся на этот момент, теряется вместе со старым узлом. */
+const parserCards = new Map();
+// БК, у которых переключение уже отправлено, но ответа ещё нет: их галку
+// фоновое обновление не трогает, иначе она моргала бы в старое состояние
+const parserPending = new Set();
+
+function newParserCard(name) {
+  const card = document.createElement("div");
+  card.className = "parser-card";
+  card.innerHTML = `
+    <div class="parser-card-head">
+      <span class="parser-name ${bkClass(name)}">${escapeHtml(name)}</span>
+      <label class="switch" title="Включить или выключить эту БК">
+        <input type="checkbox" class="parser-toggle" data-name="${escapeHtml(name)}">
+        <span class="switch-state"></span>
+      </label>
+    </div>
+    <div class="parser-rows"></div>
+    <div class="parser-actions">
+      <button class="soft-btn parser-restart" data-name="${escapeHtml(name)}">↻ Перезапустить</button>
+    </div>`;
+  return card;
+}
+
+function renderParsers(data) {
+  els.parsersNote.textContent =
+    `Прематч обновляет каждую БК раз в ${Math.round(data.scan_interval)} c` +
+    (data.live_enabled ? ", лайв включён" : ", лайв выключен");
+  for (const p of data.parsers) {
+    let card = parserCards.get(p.name);
+    if (!card) {
+      card = newParserCard(p.name);
+      parserCards.set(p.name, card);
+      els.parserGrid.appendChild(card);
+    }
+    card.classList.toggle("off", !p.enabled);
+    if (!parserPending.has(p.name)) {
+      card.querySelector(".parser-toggle").checked = p.enabled;
+      card.querySelector(".switch-state").textContent = p.enabled ? "вкл" : "выкл";
+    }
+    card.querySelector(".parser-rows").innerHTML =
+      parserModeRow("Прематч", p.prematch, p.enabled ? "" : "БК выключена")
+      + parserModeRow("Лайв", p.live,
+        !p.supports_live ? "нет лайва у этой БК"
+          : !p.enabled ? "БК выключена"
+            : !data.live_enabled ? "лайв-сканер выключен" : "")
+      + (p.min_refresh ? `<div class="parser-row"><span class="mode">Обход</span>
+          <span>не чаще раза в ${Math.round(p.min_refresh)} c</span></div>` : "");
+  }
+  // БК могла уйти из набора (перезапуск сканера после смены настроек)
+  const alive = new Set(data.parsers.map((p) => p.name));
+  for (const [name, card] of parserCards) {
+    if (!alive.has(name)) {
+      card.remove();
+      parserCards.delete(name);
+    }
+  }
+}
+
+async function loadParsers() {
+  renderParsers(await api("/api/admin/parsers"));
+}
+
+const BK_CLASS = {
+  "Fonbet": "bk-fonbet", "BetBoom": "bk-betboom", "Winline": "bk-winline",
+  "Liga Stavok": "bk-liga", "Лига Ставок": "bk-liga", "bc.game": "bk-bcgame",
+  "LeonBet": "bk-leon", "Betcity": "bk-betcity",
+};
+const bkClass = (bk) => BK_CLASS[bk] || "bk-other";
+
+els.parserGrid.addEventListener("change", async (e) => {
+  const box = e.target.closest(".parser-toggle");
+  if (!box) return;
+  const name = box.dataset.name;
+  parserPending.add(name);
+  try {
+    await api(`/api/admin/parsers/${encodeURIComponent(name)}`, {
+      method: "POST",
+      body: JSON.stringify({ enabled: box.checked }),
+    });
+    toast(`${name}: ${box.checked ? "включена" : "выключена"}`);
+  } catch (err) {
+    box.checked = !box.checked;
+    toast(err.message || "Не удалось изменить", "error");
+  } finally {
+    parserPending.delete(name);
+  }
+  await loadParsers();
+});
+
+els.parserGrid.addEventListener("click", async (e) => {
+  const btn = e.target.closest(".parser-restart");
+  if (!btn) return;
+  const name = btn.dataset.name;
+  btn.disabled = true;
+  try {
+    await api(`/api/admin/parsers/${encodeURIComponent(name)}/restart`,
+              { method: "POST" });
+    toast(`${name}: перезапуск — котировки соберутся заново`);
+  } catch (err) {
+    toast(err.message || "Не удалось перезапустить", "error");
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+async function restartScanner(mode, label) {
+  try {
+    await api("/api/admin/scanner/restart", {
+      method: "POST",
+      body: JSON.stringify({ mode }),
+    });
+    toast(`${label}: перезапуск запущен (БК докачивают текущие обходы)`);
+  } catch (err) {
+    toast(err.message || "Не удалось перезапустить", "error");
+  }
+}
+
+els.restartPrematchBtn.addEventListener("click",
+  () => restartScanner("prematch", "Прематч"));
+els.restartLiveBtn.addEventListener("click",
+  () => restartScanner("live", "Лайв"));
+
+els.restartAppBtn.addEventListener("click", async () => {
+  if (!confirm("Перезапустить сервер? Сайт будет недоступен несколько секунд.")) return;
+  els.restartAppBtn.disabled = true;
+  try {
+    const res = await api("/api/admin/restart_app", { method: "POST" });
+    toast(res.detail || "Сервер перезапускается…", "warn");
+    setTimeout(() => location.reload(), 6000);
+  } catch (err) {
+    toast(err.message || "Не удалось перезапустить сервер", "error");
+    els.restartAppBtn.disabled = false;
+  }
+});
+
+/* ---------- доступ к сайту: пароль и белый список IP ---------- */
+
+let accessInfo = null;
+
+function renderAccess(s) {
+  accessInfo = s;
+  els.accessWhitelist.value = (s.whitelist || []).join("\n");
+  els.accessIpOnly.checked = !!s.ip_only;
+  const parts = [];
+  if (!s.gate_enabled) {
+    parts.push("Сайт открыт всем, кто знает адрес сервера");
+    els.accessState.className = "panel-note warn";
+  } else {
+    parts.push(s.password_set
+      ? (s.password_source === "db" ? "Пароль задан в админке"
+        : "Пароль из переменной SITE_PASSWORD")
+      : "Пароль не задан");
+    if (s.whitelist.length) {
+      parts.push(s.ip_only
+        ? `только ${s.whitelist.length} адрес(ов) из списка`
+        : `${s.whitelist.length} адрес(ов) входят без пароля`);
+    }
+    els.accessState.className = "panel-note ok";
+  }
+  if (s.current_ip) parts.push(`ваш адрес ${s.current_ip}`);
+  els.accessState.textContent = parts.join(" · ");
+}
+
+async function loadAccess() {
+  renderAccess(await api("/api/admin/access"));
+}
+
+async function saveAccess(body, okText) {
+  els.accessError.hidden = true;
+  els.saveAccessBtn.disabled = true;
+  try {
+    renderAccess(await api("/api/admin/access", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }));
+    els.accessPassword.value = "";
+    toast(okText);
+  } catch (err) {
+    els.accessError.textContent = err.message || "Не удалось сохранить";
+    els.accessError.hidden = false;
+  } finally {
+    els.saveAccessBtn.disabled = false;
+  }
+}
+
+els.saveAccessBtn.addEventListener("click", () => saveAccess({
+  password: els.accessPassword.value || null,
+  whitelist: els.accessWhitelist.value,
+  ip_only: els.accessIpOnly.checked,
+}, "Настройки доступа сохранены"));
+
+els.clearAccessBtn.addEventListener("click", () => {
+  if (!confirm("Снять пароль? Сайт станет доступен без пароля всем, кроме "
+    + "случая, когда включён строгий режим белого списка.")) return;
+  saveAccess({ clear_password: true, ip_only: els.accessIpOnly.checked },
+             "Пароль снят");
+});
+
+els.addMyIpBtn.addEventListener("click", () => {
+  const ip = accessInfo && accessInfo.current_ip;
+  if (!ip) return toast("Адрес не определён", "error");
+  const lines = els.accessWhitelist.value.split(/\s+/).filter(Boolean);
+  if (lines.some((l) => l === ip || l === `${ip}/32` || l === `${ip}/128`)) {
+    return toast("Ваш адрес уже в списке");
+  }
+  lines.push(ip);
+  els.accessWhitelist.value = lines.join("\n");
 });
 
 async function loadBetLog() {
   const { log } = await api("/api/admin/bet_log?limit=100");
-  els.betlogBody.innerHTML = "";
+  els.betlogBody.innerHTML = log.length ? "" :
+    '<tr><td colspan="7" class="muted">Ставок пока не было.</td></tr>';
   for (const entry of log) {
     const tr = document.createElement("tr");
     const legsText = entry.legs
@@ -290,7 +555,8 @@ async function loadBetLog() {
 }
 
 async function loadAll() {
-  await Promise.all([loadAccounts(), loadSettings(), loadBetLog()]);
+  await Promise.all([loadAccounts(), loadSettings(), loadParsers(),
+                     loadAccess(), loadBetLog()]);
 }
 
 /* ---------- ретрансляция СМС/OTP-кода при входе ---------- */
@@ -318,7 +584,7 @@ async function pollOtp() {
             body: JSON.stringify({ code }),
           });
         } catch (err) {
-          alert(`Не удалось передать код: ${err.message}`);
+          toast(`Не удалось передать код: ${err.message}`, "error");
         }
       }
       otpPrompted.delete(p.account_id);
@@ -329,12 +595,15 @@ async function pollOtp() {
 }
 setInterval(pollOtp, 4000);
 
-// Состояние сканера меняется само (лайв останавливается не мгновенно —
+// Состояние сканера и БК меняется само (лайв останавливается не мгновенно —
 // БК сначала докачивают начатые обходы), поэтому подтягиваем его в фоне.
+// Плитки парсеров при этом показывают живую свежесть котировок.
 setInterval(async () => {
   if (!sessionActive) return;
+  if (document.hidden) return;   // вкладка в фоне — незачем дёргать сервер
   try {
     renderScannerState(await api("/api/admin/settings"));
+    await loadParsers();
   } catch (_) { /* не залогинены — покажем при следующем входе */ }
 }, 5000);
 
