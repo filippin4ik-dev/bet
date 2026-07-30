@@ -131,6 +131,31 @@ def init_db() -> None:
             )
         """)
 
+        # Посетители сайта: одно устройство (cookie) — одна строка. Нужна
+        # и для списка «кто на сайте» в админке, и как список банов, поэтому
+        # переживает перезапуск. Наполняется пачками из app/visitors.py.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS site_visitors (
+                device_id    TEXT PRIMARY KEY,
+                ip           TEXT NOT NULL DEFAULT '',
+                ips          TEXT NOT NULL DEFAULT '[]',
+                user_agent   TEXT NOT NULL DEFAULT '',
+                fingerprint  TEXT NOT NULL DEFAULT '',
+                browser      TEXT NOT NULL DEFAULT '',
+                os           TEXT NOT NULL DEFAULT '',
+                kind         TEXT NOT NULL DEFAULT '',
+                first_seen   REAL NOT NULL,
+                last_seen    REAL NOT NULL,
+                hits         INTEGER NOT NULL DEFAULT 0,
+                authed       INTEGER NOT NULL DEFAULT 0,
+                admin        INTEGER NOT NULL DEFAULT 0,
+                last_path    TEXT NOT NULL DEFAULT '',
+                blocked      INTEGER NOT NULL DEFAULT 0,
+                blocked_at   REAL,
+                block_reason TEXT NOT NULL DEFAULT ''
+            )
+        """)
+
 
 def get_setting(key: str) -> str | None:
     with _lock, _connect() as conn:
@@ -157,6 +182,74 @@ def get_bool_setting(key: str, default: bool) -> bool:
 
 def set_bool_setting(key: str, value: bool) -> None:
     set_setting(key, "1" if value else "0")
+
+
+# ---------------------------------------------------------------------------
+# Посетители сайта (устройства) — см. app/visitors.py
+# ---------------------------------------------------------------------------
+
+_VISITOR_FIELDS = (
+    "device_id", "ip", "ips", "user_agent", "fingerprint", "browser", "os",
+    "kind", "first_seen", "last_seen", "hits", "authed", "admin", "last_path",
+    "blocked", "blocked_at", "block_reason")
+
+
+def save_visitors(entries: list[dict]) -> None:
+    """Пишет (или обновляет) устройства пачкой."""
+    if not entries:
+        return
+    rows = [
+        (e["device_id"], e["ip"], json.dumps(e["ips"]), e["user_agent"],
+         e["fingerprint"], e["browser"], e["os"], e["kind"], e["first_seen"],
+         e["last_seen"], e["hits"], 1 if e["authed"] else 0,
+         1 if e["admin"] else 0, e["last_path"], 1 if e["blocked"] else 0,
+         e["blocked_at"], e["block_reason"])
+        for e in entries
+    ]
+    placeholders = ",".join("?" * len(_VISITOR_FIELDS))
+    updates = ", ".join(f"{f}=excluded.{f}" for f in _VISITOR_FIELDS[1:])
+    with _lock, _connect() as conn:
+        conn.executemany(
+            f"INSERT INTO site_visitors ({', '.join(_VISITOR_FIELDS)}) "
+            f"VALUES ({placeholders}) "
+            f"ON CONFLICT(device_id) DO UPDATE SET {updates}",
+            rows)
+
+
+def list_visitors() -> list[dict]:
+    with _lock, _connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM site_visitors ORDER BY last_seen DESC").fetchall()
+    result = []
+    for r in rows:
+        d = dict(r)
+        try:
+            d["ips"] = json.loads(d["ips"])
+        except ValueError:
+            d["ips"] = []
+        d["authed"] = bool(d["authed"])
+        d["admin"] = bool(d["admin"])
+        d["blocked"] = bool(d["blocked"])
+        result.append(d)
+    return result
+
+
+def delete_visitor(device_id: str) -> None:
+    with _lock, _connect() as conn:
+        conn.execute("DELETE FROM site_visitors WHERE device_id=?",
+                     (device_id,))
+
+
+def prune_visitors(keep: int) -> None:
+    """Оставляет только последние keep НЕзабаненных устройств.
+
+    Забаненные не трогаем: таблица заодно хранит сами баны, и вымывание
+    старых строк означало бы тихий разбан."""
+    with _lock, _connect() as conn:
+        conn.execute(
+            "DELETE FROM site_visitors WHERE blocked=0 AND device_id NOT IN ("
+            "  SELECT device_id FROM site_visitors WHERE blocked=0"
+            "  ORDER BY last_seen DESC LIMIT ?)", (keep,))
 
 
 def save_arbs(arbs: list[Arb]) -> None:

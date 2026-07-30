@@ -34,6 +34,10 @@ const els = {
   accessState: document.getElementById("access-state"),
   accessPassword: document.getElementById("access-password"),
   accessWhitelist: document.getElementById("access-whitelist"),
+  accessBlacklist: document.getElementById("access-blacklist"),
+  visitorsNote: document.getElementById("visitors-note"),
+  visitorsBody: document.getElementById("visitors-body"),
+  bannedIps: document.getElementById("banned-ips"),
   accessIpOnly: document.getElementById("access-ip-only"),
   saveAccessBtn: document.getElementById("save-access-btn"),
   clearAccessBtn: document.getElementById("clear-access-btn"),
@@ -466,6 +470,7 @@ let accessInfo = null;
 function renderAccess(s) {
   accessInfo = s;
   els.accessWhitelist.value = (s.whitelist || []).join("\n");
+  els.accessBlacklist.value = (s.ip_blacklist || []).join("\n");
   els.accessIpOnly.checked = !!s.ip_only;
   const parts = [];
   if (!s.gate_enabled) {
@@ -512,6 +517,7 @@ async function saveAccess(body, okText) {
 els.saveAccessBtn.addEventListener("click", () => saveAccess({
   password: els.accessPassword.value || null,
   whitelist: els.accessWhitelist.value,
+  ip_blacklist: els.accessBlacklist.value,
   ip_only: els.accessIpOnly.checked,
 }, "Настройки доступа сохранены"));
 
@@ -531,6 +537,136 @@ els.addMyIpBtn.addEventListener("click", () => {
   }
   lines.push(ip);
   els.accessWhitelist.value = lines.join("\n");
+});
+
+/* ---------- кто на сайте: устройства, адреса, бан ---------- */
+
+let visitorsInfo = null;
+
+function fmtSince(sec) {
+  if (sec == null) return "—";
+  if (sec < 60) return "только что";
+  if (sec < 3600) return `${Math.round(sec / 60)} мин назад`;
+  if (sec < 86400) return `${Math.round(sec / 3600)} ч назад`;
+  return `${Math.round(sec / 86400)} сут назад`;
+}
+
+function visitorTags(v, data) {
+  const tags = [];
+  if (v.device_id === data.my_device) tags.push('<span class="tag me">это вы</span>');
+  if (v.admin) tags.push('<span class="tag admin">админка</span>');
+  if (v.authed) tags.push('<span class="tag" title="Вошёл по паролю доступа">по паролю</span>');
+  if (v.blocked) {
+    tags.push(v.block_reason === "twin"
+      ? '<span class="tag banned" title="Вернулось тем же браузером с того же адреса, но без cookie">забанен (вернулся)</span>'
+      : '<span class="tag banned">забанен</span>');
+  }
+  if (v.kind === "бот") tags.push('<span class="tag">робот</span>');
+  return tags.join(" ");
+}
+
+function renderVisitors(data) {
+  visitorsInfo = data;
+  const list = data.visitors || [];
+  const online = list.filter((v) => v.online).length;
+  els.visitorsNote.textContent = !data.tracking
+    ? "Учёт посетителей выключен (VISITORS_ENABLED=0)"
+    : `${online} сейчас на сайте · всего устройств: ${list.length}`;
+  els.visitorsNote.className = `panel-note ${online ? "ok" : ""}`.trim();
+
+  els.visitorsBody.innerHTML = list.length ? list.map((v) => {
+    const ips = (v.ips || []).join(", ");
+    const banned = (data.ip_blacklist || []).some(
+      (e) => e === `${v.ip}/32` || e === `${v.ip}/128` || e === v.ip);
+    const actions = v.blocked
+      ? `<button class="vis-unblock" data-device="${escapeHtml(v.device_id)}">Разбанить</button>`
+      : `<button class="vis-block" data-device="${escapeHtml(v.device_id)}">Забанить</button>
+         <button class="vis-block-ip" data-device="${escapeHtml(v.device_id)}">Забанить с IP</button>`;
+    return `<tr class="${v.blocked ? "row-blocked" : ""}">
+      <td data-label="Устройство">
+        <span class="dev-dot ${v.online ? "online" : ""}"></span>
+        <b>${escapeHtml(v.browser)}</b>${v.os ? " · " + escapeHtml(v.os) : ""}
+        <span class="tag">${escapeHtml(v.kind)}</span>
+        ${visitorTags(v, data)}
+      </td>
+      <td data-label="Адрес" title="${escapeHtml(ips)}">
+        ${escapeHtml(v.ip || "—")}${banned ? ' <span class="tag banned">IP забанен</span>' : ""}
+      </td>
+      <td data-label="Активность">${v.online
+        ? '<span class="ok-text">сейчас на сайте</span>'
+        : escapeHtml(fmtSince(v.age_sec))}</td>
+      <td data-label="Запросов">${v.hits.toLocaleString("ru-RU")}</td>
+      <td data-label="Первый визит">${escapeHtml(fmtSince(v.seen_sec))}</td>
+      <td>${actions}
+        <button class="vis-forget" data-device="${escapeHtml(v.device_id)}"
+                title="Убрать из списка; при следующем заходе появится заново">Забыть</button>
+      </td>
+    </tr>`;
+  }).join("") : '<tr><td colspan="6" class="muted">Пока никто не заходил.</td></tr>';
+
+  const bannedIps = data.ip_blacklist || [];
+  els.bannedIps.hidden = !bannedIps.length;
+  els.bannedIps.innerHTML = bannedIps.length
+    ? "Забаненные адреса: " + bannedIps.map((e) =>
+      `<span class="ip-chip">${escapeHtml(e)}
+        <button class="ip-unban" data-ip="${escapeHtml(e)}" title="Разбанить">×</button>
+      </span>`).join(" ")
+    : "";
+}
+
+async function loadVisitors() {
+  renderVisitors(await api("/api/admin/visitors"));
+}
+
+els.visitorsBody.addEventListener("click", async (e) => {
+  const btn = e.target.closest("button[data-device]");
+  if (!btn) return;
+  const device = btn.dataset.device;
+  const cls = btn.className;
+  try {
+    if (cls === "vis-forget") {
+      if (!confirm("Убрать устройство из списка? Бан с него снимется.")) return;
+      await api(`/api/admin/visitors/${encodeURIComponent(device)}`,
+                { method: "DELETE" });
+      toast("Устройство забыто");
+    } else if (cls === "vis-unblock") {
+      await api(`/api/admin/visitors/${encodeURIComponent(device)}/block`, {
+        method: "POST",
+        body: JSON.stringify({ blocked: false }),
+      });
+      toast("Устройство разблокировано (адрес, если банили, остался в списке)");
+    } else {
+      const withIp = cls === "vis-block-ip";
+      if (!confirm(withIp
+        ? "Забанить устройство и его текущий адрес?"
+        : "Закрыть сайт для этого устройства?")) return;
+      await api(`/api/admin/visitors/${encodeURIComponent(device)}/block`, {
+        method: "POST",
+        body: JSON.stringify({ blocked: true, with_ip: withIp }),
+      });
+      toast("Устройство забанено");
+    }
+  } catch (err) {
+    toast(err.message || "Не удалось изменить", "error");
+  }
+  await Promise.all([loadVisitors(), loadAccess()]);
+});
+
+els.bannedIps.addEventListener("click", async (e) => {
+  const btn = e.target.closest(".ip-unban");
+  if (!btn) return;
+  const rest = (visitorsInfo.ip_blacklist || [])
+    .filter((entry) => entry !== btn.dataset.ip);
+  try {
+    await api("/api/admin/access", {
+      method: "POST",
+      body: JSON.stringify({ ip_blacklist: rest.join("\n") }),
+    });
+    toast(`Адрес ${btn.dataset.ip} разбанен`);
+  } catch (err) {
+    toast(err.message || "Не удалось разбанить", "error");
+  }
+  await Promise.all([loadVisitors(), loadAccess()]);
 });
 
 async function loadBetLog() {
@@ -556,7 +692,7 @@ async function loadBetLog() {
 
 async function loadAll() {
   await Promise.all([loadAccounts(), loadSettings(), loadParsers(),
-                     loadAccess(), loadBetLog()]);
+                     loadAccess(), loadVisitors(), loadBetLog()]);
 }
 
 /* ---------- ретрансляция СМС/OTP-кода при входе ---------- */
@@ -604,6 +740,7 @@ setInterval(async () => {
   try {
     renderScannerState(await api("/api/admin/settings"));
     await loadParsers();
+    await loadVisitors();
   } catch (_) { /* не залогинены — покажем при следующем входе */ }
 }, 5000);
 

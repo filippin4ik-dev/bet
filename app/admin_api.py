@@ -14,7 +14,7 @@ import time
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel
 
-from . import access, accounts_manager, bk_control, config, db, otp
+from . import access, accounts_manager, bk_control, config, db, otp, visitors
 from .runtime import live_scanner, scanner
 from .security import create_session_token, verify_admin_password, \
     verify_session_token
@@ -326,6 +326,8 @@ class AccessBody(BaseModel):
     clear_password: bool = False
     # список IP/подсетей: текст, как его ввёл оператор
     whitelist: str | None = None
+    # забаненные адреса/подсети (текст, как его ввёл оператор)
+    ip_blacklist: str | None = None
     # пускать ТОЛЬКО адреса из списка (пароль не спрашивать)
     ip_only: bool | None = None
 
@@ -358,6 +360,19 @@ def update_access(body: AccessBody, request: Request,
                 detail=f"Ваш адрес {my_ip or '—'} не входит в список — со "
                        "строгим режимом вы потеряете доступ к сайту. "
                        "Сначала добавьте его в список.")
+    if body.ip_blacklist is not None:
+        try:
+            banned = access.parse_whitelist(body.ip_blacklist)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        # Свой адрес в бане — это выход из сайта в один клик, причём
+        # обратно уже не зайти обычным способом.
+        if access.ip_in_whitelist(my_ip, banned):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Ваш адрес {my_ip or '—'} попал в чёрный список — "
+                       "вы закроете доступ самому себе.")
+        access.set_ip_blacklist(body.ip_blacklist)
     if body.whitelist is not None:
         access.set_whitelist(body.whitelist)
     if body.ip_only is not None:
@@ -374,6 +389,75 @@ def update_access(body: AccessBody, request: Request,
              "задан" if access.password_set() else "не задан",
              len(access.whitelist()), "вкл" if access.ip_only() else "выкл")
     return access.state(request)
+
+
+# ---------------------------------------------------------------------------
+# Кто на сайте: устройства посетителей и бан
+# ---------------------------------------------------------------------------
+
+@router.get("/visitors")
+def list_visitors(request: Request, username: str = Depends(require_admin)):
+    """Устройства, заходившие на сайт: браузер, ОС, адреса, свежесть.
+
+    my_device/my_ip нужны фронтенду, чтобы пометить в списке самого
+    оператора — иначе легко забанить собственный телефон."""
+    return {
+        "visitors": visitors.snapshot(),
+        "online_window_sec": config.VISITOR_ONLINE_WINDOW,
+        "ip_blacklist": access.ip_blacklist(),
+        "my_device": visitors.device_id_of(request),
+        "my_ip": access.client_ip(request),
+        "tracking": bool(config.VISITORS_ENABLED),
+    }
+
+
+class VisitorBlockBody(BaseModel):
+    blocked: bool = True
+    # заодно забанить адрес, с которого устройство приходило в последний
+    # раз (у телефона он плавает, поэтому это дополнение к бану устройства,
+    # а не замена ему)
+    with_ip: bool = False
+
+
+@router.post("/visitors/{device_id}/block")
+def block_visitor(device_id: str, body: VisitorBlockBody, request: Request,
+                  username: str = Depends(require_admin)):
+    """Банит или разбанивает устройство (и, по желанию, его адрес)."""
+    my_ip = access.client_ip(request)
+    if body.blocked and device_id == visitors.device_id_of(request):
+        raise HTTPException(
+            status_code=400,
+            detail="Это устройство, с которого вы сейчас открыли админку — "
+                   "банить его незачем.")
+    entry = visitors.set_blocked(device_id, body.blocked)
+    if entry is None:
+        raise HTTPException(status_code=404, detail="Устройство не найдено")
+    banned_ip = None
+    if body.with_ip and entry["ip"]:
+        if entry["ip"] == my_ip:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Адрес {my_ip} — ваш собственный: забанив его, вы "
+                       "закроете доступ себе. Устройство при этом "
+                       "заблокировано.")
+        current = access.ip_blacklist()
+        if not access.ip_in_whitelist(entry["ip"], current):
+            access.set_ip_blacklist("\n".join(current + [entry["ip"]]))
+        banned_ip = entry["ip"]
+    log.info("Устройство %s %s из админки (%s)%s", device_id,
+             "забанено" if body.blocked else "разбанено", username,
+             f", адрес {banned_ip} в чёрном списке" if banned_ip else "")
+    return {"ok": True, "device_id": device_id, "blocked": body.blocked,
+            "banned_ip": banned_ip, "ip_blacklist": access.ip_blacklist()}
+
+
+@router.delete("/visitors/{device_id}")
+def forget_visitor(device_id: str, username: str = Depends(require_admin)):
+    """Убирает устройство из списка. Бан при этом снимается: устройство
+    появится заново при следующем заходе."""
+    if not visitors.forget(device_id):
+        raise HTTPException(status_code=404, detail="Устройство не найдено")
+    return {"ok": True}
 
 
 # ---------------------------------------------------------------------------

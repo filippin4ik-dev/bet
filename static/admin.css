@@ -203,7 +203,68 @@ main#admin-view { max-width: 1080px; margin: 0 auto; }
 .admin-table .err-text { color: var(--danger); font-size: 0.79rem; }
 .admin-table .ok-text { color: var(--accent); }
 
+/* ---- кто на сайте ---- */
+
+.dev-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--border);
+  margin-right: 7px;
+  vertical-align: middle;
+}
+.dev-dot.online {
+  background: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+}
+.tag {
+  display: inline-block;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 1px 8px;
+  margin-left: 5px;
+  font-size: 0.72rem;
+  color: var(--muted);
+  vertical-align: middle;
+}
+.tag.me { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
+.tag.admin { color: var(--hot); border-color: color-mix(in srgb, var(--hot) 45%, transparent); }
+.tag.banned { color: var(--live); border-color: color-mix(in srgb, var(--live) 45%, transparent); }
+.row-blocked { opacity: 0.6; }
+
+.banned-ips { margin-top: 12px; color: var(--muted); font-size: 0.84rem; }
+.ip-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 2px 4px 2px 10px;
+  margin: 3px 4px 0 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--text-dim);
+}
+.ip-chip button {
+  margin: 0;
+  padding: 0 6px;
+  border: 0;
+  background: transparent;
+  color: var(--live);
+  font-size: 0.95rem;
+  line-height: 1;
+}
+
 .modal-actions { display: flex; gap: 8px; justify-content: flex-end; }
+
+/* Ниже 860px таблицы разворачиваются в карточки (см. style.css), и
+   min-width от «настольной» таблицы гнал бы карточки в горизонтальный
+   скролл — порог тот же, что у самого правила. */
+@media (max-width: 860px) {
+  .admin-table { min-width: 0; }
+  .admin-table th, .admin-table td { white-space: normal; }
+}
 
 @media (max-width: 720px) {
   .admin-panel { padding: 16px 14px; }

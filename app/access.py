@@ -9,7 +9,11 @@
   переменной окружения SITE_PASSWORD;
 - белый список IP/подсетей пускает свои адреса (дом, офис, VPN) БЕЗ пароля;
 - строгий режим (ip_only) пускает ТОЛЬКО адреса из списка и не показывает
-  форму пароля вообще — для случая «сайт вижу только я со своего адреса».
+  форму пароля вообще — для случая «сайт вижу только я со своего адреса»;
+- чёрный список (ip_banned) не пускает конкретные адреса ВСЕГДА, даже когда
+  сайт в остальном открыт: выгнать одного посетителя нужно уметь, не
+  закрывая сайт от всех остальных (список наполняется кнопкой «Забанить IP»
+  в разделе админки «Кто на сайте», см. app/visitors.py).
 
 Если пароль не задан И список пуст, сайт остаётся открытым (при старте в
 лог уходит предупреждение) — иначе первый же запуск запирал бы оператора
@@ -37,6 +41,7 @@ COOKIE_NAME = "site_session"
 _KEY_PASSWORD = "site_password_hash"
 _KEY_WHITELIST = "site_ip_whitelist"
 _KEY_IP_ONLY = "site_ip_only"
+_KEY_BLACKLIST = "site_ip_blacklist"
 
 # IP → [время неудачных попыток]. Защита от перебора пароля: словарь живёт
 # в памяти процесса, после перезапуска счётчики обнуляются (этого хватает —
@@ -159,6 +164,32 @@ def set_whitelist(text: str) -> list[str]:
     return entries
 
 
+def ip_blacklist() -> list[str]:
+    """Забаненные адреса и подсети (кнопка «Забанить IP» в разделе
+    «Кто на сайте», см. app/visitors.py)."""
+    def load() -> list[str]:
+        raw = db.get_setting(_KEY_BLACKLIST)
+        if raw is None:
+            raw = config.SITE_IP_BLACKLIST
+        try:
+            return parse_whitelist(raw)
+        except ValueError as exc:
+            log.warning("Чёрный список IP игнорируется: %s", exc)
+            return []
+    return _cached(_KEY_BLACKLIST, load)
+
+
+def set_ip_blacklist(text: str) -> list[str]:
+    entries = parse_whitelist(text)
+    db.set_setting(_KEY_BLACKLIST, "\n".join(entries))
+    invalidate_cache()
+    return entries
+
+
+def ip_banned(ip: str) -> bool:
+    return ip_in_whitelist(ip, ip_blacklist())
+
+
 def ip_only() -> bool:
     """Строгий режим: пускать только адреса из белого списка."""
     return bool(_cached(
@@ -224,19 +255,31 @@ def session_cookie(username: str = "site") -> str:
 
 def valid_session(request: Request) -> bool:
     """Есть ли у запроса действующая сессия сайта ИЛИ админки."""
-    from .admin_api import COOKIE_NAME as ADMIN_COOKIE
     return bool(verify_session_token(request.cookies.get(COOKIE_NAME))
-                or verify_session_token(request.cookies.get(ADMIN_COOKIE)))
+                or admin_session(request))
+
+
+def admin_session(request: Request) -> bool:
+    """Есть ли действующая сессия АДМИНКИ.
+
+    Она обходит любые баны (и по устройству, и по адресу): иначе оператор,
+    забанивший сам себя с чужого адреса, остался бы снаружи без ssh."""
+    from .admin_api import COOKIE_NAME as ADMIN_COOKIE
+    return bool(verify_session_token(request.cookies.get(ADMIN_COOKIE)))
 
 
 def check_request(request: Request) -> tuple[bool, str]:
     """Пускать ли запрос. Возвращает (можно, причина отказа).
 
-    Причина: "" — пускаем, "ip" — строгий режим и адрес не в списке,
-    "password" — нужен пароль."""
+    Причина: "" — пускаем, "banned" — адрес в чёрном списке, "ip" —
+    строгий режим и адрес не в списке, "password" — нужен пароль."""
+    ip = client_ip(request)
+    # Бан адреса действует, даже когда сайт в остальном открыт: выгнать
+    # конкретного посетителя нужно уметь, не закрывая сайт паролем.
+    if ip_banned(ip) and not admin_session(request):
+        return False, "banned"
     if not gate_enabled():
         return True, ""
-    ip = client_ip(request)
     entries = whitelist()
     if ip_in_whitelist(ip, entries):
         return True, ""
@@ -287,6 +330,7 @@ def state(request: Request | None = None) -> dict:
         "password_set": password_set(),
         "password_source": password_source(),
         "whitelist": entries,
+        "ip_blacklist": ip_blacklist(),
         "ip_only": bool(entries and ip_only()),
         "current_ip": client_ip(request) if request is not None else "",
         "session_ttl_days": round(config.SITE_SESSION_TTL / 86400, 1),
