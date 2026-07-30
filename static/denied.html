@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="color-scheme" content="dark light">
+  <title>Доступ закрыт — Сканер вилок</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="/static/theme.js"></script>
+</head>
+<body class="gate-body">
+  <main class="gate">
+    <div class="gate-card">
+      <div class="gate-logo denied">⛔</div>
+      <h1>Доступ закрыт</h1>
+      <p class="gate-hint">
+        Сайт открыт только с разрешённых адресов (строгий режим белого
+        списка). Ваш адрес в список не входит.
+      </p>
+      <p class="gate-note">
+        Если это ваш сервер — зайдите с разрешённого адреса и добавьте новый
+        в админке, раздел «Доступ к сайту». Строгий режим также снимается
+        переменной окружения <code>SITE_IP_ONLY=0</code> с последующим
+        перезапуском.
+      </p>
+    </div>
+  </main>
+</body>
+</html>

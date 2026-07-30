@@ -6,12 +6,14 @@ import asyncio
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
+from urllib.parse import quote
 
-from fastapi import Body, Depends, FastAPI, HTTPException, Query
-from fastapi.responses import FileResponse
+from fastapi import Body, Depends, FastAPI, HTTPException, Query, Request
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import accounts_manager, autobet, config, db
+from . import access, accounts_manager, autobet, config, db
+from .access_api import router as access_router
 from .admin_api import require_admin
 from .admin_api import router as admin_router
 from .config import LIVE_ENABLED, SOUND_ALERT_PROFIT
@@ -33,10 +35,20 @@ async def lifespan(app: FastAPI):
     # Сохранённый в админке переключатель лайва важнее переменной окружения:
     # оператор выключил лайв — после перезапуска он остаётся выключенным.
     config.LIVE_ENABLED = db.get_bool_setting("live_enabled", LIVE_ENABLED)
-    logging.getLogger("main").info(
-        "Лайв-сканер %s (переключается в админке)",
-        "включён" if config.LIVE_ENABLED else
-        "выключен — все ресурсы прематчу")
+    log = logging.getLogger("main")
+    log.info("Лайв-сканер %s (переключается в админке)",
+             "включён" if config.LIVE_ENABLED else
+             "выключен — все ресурсы прематчу")
+    if access.gate_enabled():
+        log.info("Доступ к сайту закрыт: пароль %s, адресов в белом списке "
+                 "%d%s", "задан" if access.password_set() else "не задан",
+                 len(access.whitelist()),
+                 ", строгий режим (только свои IP)" if access.ip_only() else "")
+    else:
+        log.warning(
+            "Сайт открыт всем, кто знает адрес сервера: вилки, линия всех БК "
+            "и страница входа в админку. Задайте пароль доступа в админке "
+            "(раздел «Доступ к сайту») или переменной SITE_PASSWORD.")
     # Лайв-сканер запускается всегда: он сам простаивает, пока выключен, и
     # поднимает воркеры, как только его включили из админки.
     tasks = [asyncio.create_task(scanner.run()),
@@ -52,6 +64,47 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Сканер вилок (двухисходные рынки)", lifespan=lifespan)
 app.include_router(admin_router)
+app.include_router(access_router)
+
+# Что доступно БЕЗ пароля: сама страница входа, её стили/скрипт и ручки
+# входа. Остальная статика (app.js, admin.js) закрыта вместе с сайтом.
+GATE_FREE_PATHS = {"/login", "/favicon.ico", "/static/style.css",
+                   "/static/login.js", "/static/theme.js"}
+GATE_FREE_PREFIXES = ("/api/access/",)
+
+
+def _gate_free(path: str) -> bool:
+    return path in GATE_FREE_PATHS or path.startswith(GATE_FREE_PREFIXES)
+
+
+@app.middleware("http")
+async def access_gate(request: Request, call_next):
+    """Закрывает весь сайт паролем и/или белым списком IP (app/access.py).
+
+    Пока пароль не задан и список пуст, шлюз пропускает всё — иначе первый
+    же запуск запер бы оператора снаружи."""
+    if _gate_free(request.url.path):
+        return await call_next(request)
+    allowed, reason = access.check_request(request)
+    if allowed:
+        return await call_next(request)
+    ip = access.client_ip(request)
+    api = request.url.path.startswith("/api/")
+    if reason == "ip":
+        detail = (f"Доступ только с разрешённых адресов. Ваш адрес: "
+                  f"{ip or 'неизвестен'}.")
+        if api:
+            return JSONResponse({"detail": detail}, status_code=403)
+        return FileResponse(STATIC_DIR / "denied.html", status_code=403,
+                            headers={"Cache-Control": "no-cache"})
+    if api:
+        return JSONResponse(
+            {"detail": "Требуется вход: сайт закрыт паролем."},
+            status_code=401)
+    nxt = request.url.path
+    if request.url.query:
+        nxt += "?" + request.url.query
+    return RedirectResponse(f"/login?next={quote(nxt, safe='')}")
 
 
 def _with_limits(arbs: list[dict], bk_field1: str, bk_field2: str,
@@ -111,14 +164,12 @@ def get_odds():
 
 def _matches_payload(sc: Scanner) -> dict:
     snap = sc.snapshot()
-    matches = sc.matches_snapshot()
-    matches.sort(key=lambda m: (m["start_ts"] or float("inf"),
-                                m["sport"], m["match"]))
     return {
         "scanning": snap["scanning"],
         "last_scan": snap["last_scan"],
         "bookmakers": snap["bookmakers"],
-        "matches": matches,
+        # уже по времени начала — сканер отдаёт список отсортированным
+        "matches": sc.matches_snapshot(),
     }
 
 
@@ -242,6 +293,19 @@ def index():
 @app.get("/admin")
 def admin_page():
     return FileResponse(STATIC_DIR / "admin.html",
+                        headers={"Cache-Control": "no-cache"})
+
+
+@app.get("/login")
+def login_page(request: Request):
+    """Страница ввода пароля доступа. Уже впущенных — сразу на сайт."""
+    allowed, reason = access.check_request(request)
+    if allowed:
+        return RedirectResponse("/")
+    if reason == "ip":
+        return FileResponse(STATIC_DIR / "denied.html", status_code=403,
+                            headers={"Cache-Control": "no-cache"})
+    return FileResponse(STATIC_DIR / "login.html",
                         headers={"Cache-Control": "no-cache"})
 
 

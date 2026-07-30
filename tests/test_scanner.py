@@ -17,7 +17,7 @@ _tmpdir = tempfile.mkdtemp()
 os.environ["DB_PATH"] = str(Path(_tmpdir) / "scanner-test.sqlite3")
 os.environ["SECRET_KEY"] = "test-secret-key-not-for-prod"
 
-from app import config, db  # noqa: E402
+from app import bk_control, config, db  # noqa: E402
 from app.models import KIND_LIVE, KIND_PREMATCH, MarketOdds  # noqa: E402
 from app.parsers.base import BaseParser  # noqa: E402
 from app.scanner import Scanner  # noqa: E402
@@ -223,8 +223,10 @@ def test_live_scanner_starts_and_stops_at_runtime():
 
     async def scenario():
         config.LIVE_ENABLED = True
+        # ждём не только обхода БК, но и пересчёта вилок: считает его
+        # отдельный поток, и котировки попадают в снимок чуть позже обхода
         for _ in range(40):
-            if p.calls and sc.is_running():
+            if sc.is_running() and sc.snapshot()["quotes_checked"]:
                 break
             await asyncio.sleep(0.1)
         assert p.calls >= 1, "включённый лайв должен опрашивать БК"
@@ -267,6 +269,258 @@ def test_live_switch_persisted_in_db():
     assert db.get_bool_setting(key, True) is False
     db.set_bool_setting(key, True)
     assert db.get_bool_setting(key, False) is True
+
+
+def test_disabled_bookmaker_stops_and_forgets_odds():
+    """Выключенная в админке БК перестаёт опрашиваться и убирает свои
+    котировки: держать в вилках кэфы, которые никто не обновляет, нельзя.
+    Выключение должно применяться СРАЗУ, а не после паузы до следующего
+    обхода (в прематче это полчаса)."""
+    keep = _Fake("Останется")
+    drop = _Fake("Выключим")
+    sc = Scanner(mode=KIND_PREMATCH, parsers=[keep, drop])
+    sc.interval = 60  # длинная пауза: проверяем, что её прерывают
+
+    async def scenario():
+        for _ in range(50):
+            snap = sc.snapshot()["bookmakers"]
+            if snap.get("Выключим", {}).get("count"):
+                break
+            await asyncio.sleep(0.1)
+        assert drop.calls >= 1
+        calls_before = drop.calls
+
+        bk_control.set_enabled("Выключим", False)
+        for _ in range(40):
+            snap = sc.snapshot()["bookmakers"]
+            if snap.get("Выключим", {}).get("off"):
+                break
+            await asyncio.sleep(0.1)
+        snap = sc.snapshot()["bookmakers"]
+        assert snap["Выключим"]["off"] is True
+        assert snap["Выключим"]["count"] == 0, "котировки выключенной БК — забыть"
+        assert snap["Останется"]["count"] == 1, "соседнюю БК это не трогает"
+
+        await asyncio.sleep(0.6)
+        assert drop.calls == calls_before, "выключенную БК больше не опрашиваем"
+
+        bk_control.set_enabled("Выключим", True)
+        for _ in range(40):
+            if drop.calls > calls_before:
+                break
+            await asyncio.sleep(0.1)
+        assert drop.calls > calls_before, "включённая обратно БК снова обходится"
+
+    try:
+        asyncio.run(_run_for(sc, 0, on_tick=scenario))
+    finally:
+        bk_control.set_enabled("Выключим", True)
+
+
+def test_disabling_bk_applies_without_waiting_for_current_fetch():
+    """Кнопка в админке действует сразу, даже посреди обхода БК.
+
+    Обход длится десятки секунд (у Betcity под минуту), и если ждать, пока
+    воркер сам заметит выключение, кэфы выключенной БК всё это время висят
+    в вилках и в шапке как живые — оператор не понимает, сработала кнопка
+    или нет."""
+    sc = Scanner(mode=KIND_PREMATCH, parsers=[_Fake("БК")])
+    sc._store_odds("БК", _odds("БК"))
+    assert sc.snapshot()["bookmakers"]["БК"]["count"] == 1
+
+    sc.apply_bk_state("БК", False)
+    snap = sc.snapshot()["bookmakers"]["БК"]
+    assert snap["off"] is True and snap["count"] == 0
+    # обход, начатый до выключения, не возвращает котировки на круг обратно
+    sc._store_odds("БК", _odds("БК"))
+    assert sc.snapshot()["bookmakers"]["БК"]["count"] == 0
+
+    sc.apply_bk_state("БК", True)
+    sc._store_odds("БК", _odds("БК"))
+    snap = sc.snapshot()["bookmakers"]["БК"]
+    assert snap["off"] is False and snap["count"] == 1
+    # чужую БК не выключаем: в этом режиме её нет
+    sc.apply_bk_state("Другая", False)
+    assert "Другая" not in sc.snapshot()["bookmakers"]
+
+
+def test_restart_of_one_bookmaker_refetches_it():
+    """Перезапуск одной БК из админки: её котировки сбрасываются, и обход
+    начинается заново, не дожидаясь конца долгой паузы."""
+    p = _Fake("Зависла")
+    sc = Scanner(mode=KIND_PREMATCH, parsers=[p])
+    sc.interval = 60
+
+    async def scenario():
+        for _ in range(50):
+            if p.calls:
+                break
+            await asyncio.sleep(0.1)
+        calls_before = p.calls
+        assert sc.request_restart("Зависла") is True
+        for _ in range(40):
+            if p.calls > calls_before:
+                break
+            await asyncio.sleep(0.1)
+        assert p.calls > calls_before, "перезапуск должен вызвать новый обход"
+
+    asyncio.run(_run_for(sc, 0, on_tick=scenario))
+
+
+def test_restart_of_unknown_bookmaker_is_reported():
+    sc = Scanner(mode=KIND_PREMATCH, parsers=[_Fake("БК")])
+    assert sc.request_restart("НетТакой") is False
+    assert sc.parser_names() == ["БК"]
+
+
+def test_scanner_restart_recreates_workers():
+    """Перезапуск всего сканера: воркеры гасятся и поднимаются заново, а
+    обходы продолжаются (это замена перезапуска сервера)."""
+    p = _Fake("БК")
+    sc = Scanner(mode=KIND_PREMATCH, parsers=[p])
+    sc.interval = 0.2
+
+    async def scenario():
+        for _ in range(40):
+            if p.calls:
+                break
+            await asyncio.sleep(0.1)
+        sc.request_restart()
+        for _ in range(40):
+            if not sc.is_running():
+                break
+            await asyncio.sleep(0.1)
+        calls_at_stop = p.calls
+        for _ in range(40):
+            if sc.is_running() and p.calls > calls_at_stop:
+                break
+            await asyncio.sleep(0.1)
+        assert sc.is_running() is True, "после перезапуска сканер снова работает"
+        assert p.calls > calls_at_stop, "обходы продолжаются"
+
+    asyncio.run(_run_for(sc, 0, on_tick=scenario))
+
+
+def test_bk_toggle_persisted_in_db():
+    """Выключенная БК остаётся выключенной после перезапуска сервера."""
+    name = "ТестоваяБК"
+    assert bk_control.is_enabled(name) is True   # по умолчанию все включены
+    bk_control.set_enabled(name, False)
+    assert bk_control.is_enabled(name) is False
+    assert db.get_bool_setting(f"bk_enabled:{name}", True) is False
+    # с пустым кэшем (как после перезапуска процесса) флаг читается из базы
+    bk_control._cache.clear()
+    assert bk_control.is_enabled(name) is False
+    bk_control.set_enabled(name, True)
+    assert bk_control.is_enabled(name) is True
+
+
+def test_matches_snapshot_reuses_grouping_until_odds_change():
+    """Список матчей не пересобирается на каждый запрос.
+
+    Разбор линии по событиям стоит секунды на живой линии (сотни тысяч
+    котировок, фаззи-слияние имён), а интерфейс дёргает /api/matches раз в
+    несколько секунд: раньше каждый опрос считал всё заново и отбирал
+    процессор у самих обходов БК."""
+    sc = Scanner(mode=KIND_PREMATCH, parsers=[_Fake("БК1")])
+    sc._groups_ttl = 0     # окно «отдавать чуть устаревшее» проверяется ниже
+    calls = []
+    orig = Scanner._event_groups
+
+    def counted(all_odds, name_map=None):
+        calls.append(len(all_odds))
+        return orig(all_odds, name_map)
+
+    sc._event_groups = counted
+    sc._store_odds("БК1", _odds("БК1"))
+    assert len(sc.matches_snapshot()) == 1
+    assert len(calls) == 1
+    # тот же запрос ещё дважды — разбор берётся из кэша
+    sc.matches_snapshot()
+    sc.match_detail("нет такого события")
+    assert len(calls) == 1, calls
+    # свежие котировки обесценивают кэш
+    sc._store_odds("БК2", _odds("БК2"))
+    m = sc.matches_snapshot()
+    assert len(calls) == 2, calls
+    assert len(m) == 1 and m[0]["bookmakers"] == ["БК1", "БК2"]
+    # список отдаётся копией: сортировка вызывающего не портит кэш
+    m.reverse()
+    assert sc.matches_snapshot()[0]["bookmakers"] == ["БК1", "БК2"]
+
+
+def test_grouping_survives_new_odds_for_a_short_while():
+    """Разбор линии не пересчитывается чаще, чем считается.
+
+    Котировки БК приходят чаще, чем успевает разбор по событиям, поэтому
+    готовый разбор отдаётся ещё MATCHES_CACHE_TTL секунд — иначе кэш
+    промахивался бы на каждом опросе интерфейса. Устаревший разбор держит
+    ссылки на прежние котировки, поэтому его выбрасывает поток пересчёта."""
+    sc = Scanner(mode=KIND_PREMATCH, parsers=[_Fake("БК")])
+    sc._groups_ttl = 30
+    sc._store_odds("БК1", _odds("БК1"))
+    first = sc.matches_snapshot()
+    assert first[0]["bookmakers"] == ["БК1"]
+    sc._store_odds("БК2", _odds("БК2"))
+    # окно ещё не истекло — отдаём прежний разбор, не считая заново
+    again = sc.matches_snapshot()
+    assert again[0]["bookmakers"] == ["БК1"]
+    assert again[0] is first[0], "и сам список матчей собран один раз"
+    sc._drop_stale_groups()           # моложе окна — уборка его не тронет
+    assert sc._groups_rev >= 0
+    sc._groups_ttl = 0                # окно истекло
+    assert sc.matches_snapshot()[0]["bookmakers"] == ["БК1", "БК2"]
+    # выключение БК видно сразу, окна не ждём
+    sc._groups_ttl = 30
+    sc._forget_bk("БК2")
+    assert sc.matches_snapshot()[0]["bookmakers"] == ["БК1"]
+    # а уборка выбрасывает разбор, который больше не отдаётся
+    sc._store_odds("БК2", _odds("БК2"))
+    sc._groups_ttl = 0
+    sc._drop_stale_groups()
+    assert sc._groups == {} and sc._matches == []
+
+
+def test_matches_snapshot_sorted_by_start_time():
+    """Матчи приходят в порядке начала — как их показывает интерфейс."""
+    sc = Scanner(mode=KIND_PREMATCH, parsers=[_Fake("БК")])
+    now = time.time()
+    late = MarketOdds(bookmaker="БК", sport="Футбол", team1="Динамо",
+                      team2="Локомотив", market="Победитель",
+                      market_key="winner", outcome1="П1", outcome2="П2",
+                      k1=2.0, k2=2.0, start_ts=now + 7200,
+                      start_time="01.01 22:00")
+    early = MarketOdds(bookmaker="БК", sport="Футбол", team1="Спартак",
+                       team2="Зенит", market="Победитель",
+                       market_key="winner", outcome1="П1", outcome2="П2",
+                       k1=2.0, k2=2.0, start_ts=now + 600,
+                       start_time="01.01 20:00")
+    sc._store_odds("БК", [late, early])
+    assert [m["match"] for m in sc.matches_snapshot()] == [
+        "Спартак — Зенит", "Динамо — Локомотив"]
+
+
+def test_name_canon_map_shared_between_arbs_and_matches():
+    """Карту имён считаем один раз на всех, а не в каждом запросе."""
+    sc = Scanner(mode=KIND_PREMATCH, parsers=[_Fake("БК")])
+    built = []
+    import app.scanner as scanner_mod
+    orig = scanner_mod.build_name_canon_map
+
+    def counted(odds):
+        built.append(len(odds))
+        return orig(odds)
+
+    scanner_mod.build_name_canon_map = counted
+    try:
+        sc._store_odds("БК1", _odds("БК1"))
+        sc._recalc()                 # пересчёт вилок построил карту
+        assert len(built) == 1, built
+        sc.matches_snapshot()        # матчи берут ту же карту
+        sc.match_detail("нет")
+        assert len(built) == 1, built
+    finally:
+        scanner_mod.build_name_canon_map = orig
 
 
 def test_new_arbs_saved_to_history_once():

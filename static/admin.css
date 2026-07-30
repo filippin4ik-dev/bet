@@ -1,101 +1,212 @@
+/* Админка: карточки-разделы, переключатели, плитки парсеров.
+ * Базовые токены и общие элементы — в static/style.css. */
+
+main#admin-view { max-width: 1080px; margin: 0 auto; }
+
+.admin-nav {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin: 16px 0 4px;
+  position: sticky;
+  top: 62px;
+  z-index: 20;
+  background: color-mix(in srgb, var(--bg) 88%, transparent);
+  backdrop-filter: blur(8px);
+  padding: 6px 0;
+}
+.admin-nav a {
+  color: var(--text-dim);
+  text-decoration: none;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 5px 13px;
+  font-size: 0.83rem;
+  white-space: nowrap;
+}
+.admin-nav a:hover { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
+
 .admin-panel {
   background: var(--panel);
   border: 1px solid var(--border);
-  border-radius: 12px;
-  padding: 20px 24px;
-  margin: 20px 0;
-  max-width: 900px;
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-sm);
+  padding: 20px 22px;
+  margin: 16px 0;
+  scroll-margin-top: 120px;
 }
-.admin-panel h2 { margin-bottom: 12px; font-size: 1.1rem; }
-.admin-hint { color: var(--muted); font-size: 0.85rem; margin-bottom: 12px; line-height: 1.5; }
-.admin-warning { color: var(--hot); }
-.admin-error { color: #ef4444; margin-top: 8px; font-size: 0.85rem; }
+.admin-panel h2 { font-size: 1.05rem; margin-bottom: 10px; }
 
-.admin-form {
+.panel-head {
   display: flex;
-  flex-direction: column;
+  align-items: center;
   gap: 12px;
-  max-width: 360px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
 }
+.panel-head h2 { margin: 0; }
+.panel-head .primary-btn { margin-left: auto; }
+.panel-note { color: var(--muted); font-size: 0.84rem; }
+.panel-note.ok { color: var(--accent); }
+.panel-note.warn { color: var(--hot); }
+
+.admin-hint { color: var(--muted); font-size: 0.85rem; margin-bottom: 12px; line-height: 1.6; }
+.admin-warning { color: var(--hot); }
+.admin-error { color: var(--danger); margin-top: 8px; font-size: 0.86rem; }
+
+.admin-details { margin-bottom: 12px; }
+.admin-details summary {
+  cursor: pointer;
+  color: var(--text-dim);
+  font-size: 0.86rem;
+  padding: 6px 0;
+}
+.admin-details summary:hover { color: var(--text); }
+
+/* ---- формы ---- */
+
+.admin-form { display: flex; flex-direction: column; gap: 12px; max-width: 420px; }
 .admin-form label {
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  font-size: 0.85rem;
+  gap: 5px;
+  font-size: 0.83rem;
   color: var(--muted);
 }
-.admin-form input, .admin-form select, .admin-form textarea {
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 8px 10px;
-  color: var(--text);
-  font-size: 0.95rem;
-  font-family: inherit;
-  resize: vertical;
-}
-.admin-form button, #add-account-btn, #logout-btn, #save-settings-btn,
-#save-scanner-btn {
-  background: var(--accent);
-  color: #06210f;
-  border: none;
-  border-radius: 8px;
-  padding: 8px 16px;
-  font-weight: 600;
-  cursor: pointer;
-}
-#logout-btn { background: transparent; color: var(--muted); border: 1px solid var(--border); cursor: pointer; }
-/* пока настройка применяется, кнопка заблокирована — это должно быть видно */
-#save-scanner-btn:disabled { opacity: 0.5; cursor: default; }
+/* Галку из ширины на всю строку исключаем: растянутый чекбокс уезжал в
+   середину поля, а подпись рядом с ним ломалась на два слова в строку. */
+.admin-form input:not([type="checkbox"]),
+.admin-form select, .admin-form textarea { width: 100%; }
+.admin-form textarea { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 
 .admin-form-row {
   display: flex;
   flex-wrap: wrap;
-  gap: 16px;
+  gap: 12px 16px;
   align-items: center;
-  color: var(--muted);
+  color: var(--text-dim);
   font-size: 0.9rem;
 }
-.admin-form-row label { display: flex; align-items: center; gap: 6px; }
+.restart-row { margin-top: 12px; }
 
+.switch { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; }
+/* внутри .admin-form подписи стоят столбиком, но у переключателя галка
+   должна быть РЯДОМ с текстом, а не над ним */
+.admin-form .switch { flex-direction: row; }
+.switch span { color: var(--text-dim); font-size: 0.9rem; }
+
+.primary-btn, .soft-btn, .danger-btn {
+  border-radius: var(--radius-sm);
+  padding: 8px 15px;
+  font: inherit;
+  font-size: 0.88rem;
+  font-weight: 650;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.primary-btn { background: var(--accent); color: var(--accent-ink); border: 0; }
+.primary-btn:hover { filter: brightness(1.08); }
+.soft-btn {
+  background: var(--panel-2);
+  color: var(--text-dim);
+  border: 1px solid var(--border);
+}
+.soft-btn:hover { color: var(--text); border-color: var(--muted); }
+.danger-btn {
+  background: var(--live-soft);
+  color: var(--live);
+  border: 1px solid color-mix(in srgb, var(--live) 45%, transparent);
+}
+.danger-btn:hover { background: color-mix(in srgb, var(--live) 25%, transparent); }
+.primary-btn:disabled, .soft-btn:disabled, .danger-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+  filter: none;
+}
+
+/* ---- плитки парсеров ---- */
+
+.parser-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(255px, 1fr));
+  gap: 12px;
+}
+.parser-card {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 13px 14px;
+}
+.parser-card.off { opacity: 0.62; }
+.parser-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.parser-name { font-weight: 700; font-size: 0.98rem; }
+.parser-card-head .switch { margin-left: auto; }
+.parser-rows { display: flex; flex-direction: column; gap: 3px; margin-bottom: 10px; }
+.parser-row {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+.parser-row .mode { min-width: 66px; }
+.parser-row .count { color: var(--text); font-variant-numeric: tabular-nums; font-weight: 650; }
+.parser-row .state { margin-left: auto; }
+.parser-row .state.busy { color: var(--hot); }
+.parser-row .state.stale { color: var(--live); }
+.parser-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.parser-actions button { padding: 5px 11px; font-size: 0.82rem; }
+
+/* ---- таблицы админки ---- */
+
+.table-scroll { overflow-x: auto; }
 .admin-table {
   width: 100%;
   border-collapse: collapse;
-  margin-bottom: 14px;
-  font-size: 0.88rem;
+  font-size: 0.86rem;
+  min-width: 640px;
 }
 .admin-table th, .admin-table td {
-  padding: 8px 10px;
-  border-bottom: 1px solid var(--border);
+  padding: 9px 10px;
+  border-bottom: 1px solid var(--border-soft);
   text-align: left;
+  white-space: nowrap;
 }
-.admin-table th { color: var(--muted); font-weight: 600; }
-.admin-table button {
+.admin-table thead th {
+  position: static;
   background: transparent;
-  border: 1px solid var(--border);
-  color: var(--text);
-  border-radius: 6px;
-  padding: 4px 8px;
+  color: var(--muted);
+  font-weight: 650;
+  text-transform: none;
+  letter-spacing: 0;
   font-size: 0.8rem;
+}
+.admin-table tbody tr:hover { background: var(--panel-2); }
+.admin-table button {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  border-radius: var(--radius-xs);
+  padding: 4px 9px;
+  font: inherit;
+  font-size: 0.79rem;
   cursor: pointer;
   margin-right: 4px;
 }
-.admin-table .err-text { color: #ef4444; font-size: 0.78rem; }
+.admin-table button:hover { color: var(--text); border-color: var(--muted); }
+.admin-table .err-text { color: var(--danger); font-size: 0.79rem; }
 .admin-table .ok-text { color: var(--accent); }
 
-.modal-backdrop {
-  position: fixed; inset: 0;
-  background: rgba(0,0,0,0.6);
-  display: flex; align-items: center; justify-content: center;
-  z-index: 50;
-}
-.modal {
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  padding: 24px;
-}
 .modal-actions { display: flex; gap: 8px; justify-content: flex-end; }
-.modal-actions button[type="button"] {
-  background: transparent; border: 1px solid var(--border); color: var(--text);
+
+@media (max-width: 720px) {
+  .admin-panel { padding: 16px 14px; }
+  .admin-nav { top: 56px; }
+  .parser-grid { grid-template-columns: 1fr; }
 }
