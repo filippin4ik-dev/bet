@@ -24,6 +24,9 @@
    (кэф ≈ кэф — это «справедливая» линия) знак линии показывает, кто
    фаворит. Кто фаворит, известно из исхода 1X2 того же матча.
 3. Индивидуальный тотал фаворита выше, чем у аутсайдера.
+4. «Обе забьют» идёт следом за результативностью матча: в низовом матче
+   обе команды забивают реже чем в половине случаев, в результативном —
+   чаще. Сколько голов ждёт БК, видно из её же тотала (см. _decide_bts).
 
 Каждое событие снимка отдаёт по такому правилу один голос «за» гипотезу
 или «против». Решение принимается по всей линии сразу (тысячи событий),
@@ -62,12 +65,14 @@ T_HCAP1, T_HCAP2 = 7, 8
 T_OVER, T_UNDER = 9, 10
 T_IT1_OVER, T_IT1_UNDER = 11, 12
 T_IT2_OVER, T_IT2_UNDER = 13, 14
+T_BTS_YES, T_BTS_NO = 180, 181
 
 WINNER = "winner"
 HCAP = "hcap"
 TOTAL = "total"
 ITOTAL1 = "itotal1"
 ITOTAL2 = "itotal2"
+BTS = "bothscore"
 # Отдельный «вопрос» калибровки, а не семейство рынков: чей индивидуальный
 # тотал лежит в кодах 11/12 — первой команды или второй. Ошибиться тут
 # можно независимо от того, верно ли размечены «больше»/«меньше», поэтому
@@ -83,6 +88,7 @@ FAMILY_CODES: dict[str, tuple[int, ...]] = {
     TOTAL: (T_OVER, T_UNDER),
     ITOTAL1: (T_IT1_OVER, T_IT1_UNDER),
     ITOTAL2: (T_IT2_OVER, T_IT2_UNDER),
+    BTS: (T_BTS_YES, T_BTS_NO),
 }
 FAMILY_OF: dict[int, str] = {
     code: family for family, codes in FAMILY_CODES.items() for code in codes
@@ -100,6 +106,26 @@ SURE_SHARE = 0.6
 # Насколько кэфы на победу должны различаться, чтобы считать команду
 # фаворитом (на равных соперниках знак форы неинформативен).
 FAV_GAP = 1.1
+
+# --- пороги для «обе забьют» (см. _decide_bts) ---
+# Матч с такой ожидаемой результативностью и ниже — низовой: обе команды
+# забивают меньше чем в половине случаев. Столько же и выше — наоборот.
+# Между порогами шансы близки к равным, и голос ничего не доказывает.
+# Пороги не привязаны к футболу: где бы ни крутилась результативность
+# (хоккей, гандбол), «обе забьют» переваливает за половину примерно на
+# 2.5–3 гола суммарно.
+BTS_LOW_TOTAL = 2.25
+BTS_HIGH_TOTAL = 3.25
+# Кэфы сторон, различающиеся меньше чем на столько, считаем равными:
+# какая сторона дороже — в пределах округления, сигнала нет.
+BTS_MIN_GAP = 0.05
+# В разгромном матче обе забивают реже, чем следует из общего тотала (все
+# голы кладёт фаворит), — такие матчи в голосовании не участвуют.
+BTS_HEAVY_FAV = 1.25
+# Голосов нужно с ОБЕИХ сторон: рынок обязан вести себя как «обе забьют»
+# и на низовых матчах, и на результативных. Односторонней уверенности
+# мало — так же выглядел бы, например, «обе забьют в 1-м тайме».
+BTS_MIN_BUCKET = 8
 
 
 @dataclass
@@ -140,6 +166,19 @@ class RawEvent:
         codes = FAMILY_CODES[family]
         groups = {g for g, t, _p, _c in self.picks if t in codes}
         return groups.pop() if len(groups) == 1 else None
+
+    def flat(self, family: str, group: int | None) -> tuple[float | None,
+                                                            float | None]:
+        """Кэфы рынка БЕЗ линии («обе забьют»): первая сторона, вторая.
+
+        Обычно у такого исхода поля P нет вовсе, но часть зеркал кладёт в
+        него ноль — принимаем оба варианта, иначе рынок пропал бы."""
+        sides = self.lines(family, group)
+        out = []
+        for code in FAMILY_CODES[family][:2]:
+            per_line = sides.get(code) or {}
+            out.append(per_line.get(None) or per_line.get(0.0))
+        return out[0], out[1]
 
     def winner_odds(self, group: int | None) -> tuple[float, float] | None:
         """Кэфы на победу первой и второй команды (для проверки фаворита)."""
@@ -235,6 +274,7 @@ def detect(events: list[RawEvent],
             layout.inverted.add(family)
         elif share > 1 - SURE_SHARE:
             layout.skipped.add(family)
+    _decide_bts(events, layout)
     return layout
 
 
@@ -247,13 +287,44 @@ def _pick_groups(events: list[RawEvent]):
     """Для каждого семейства — группа, покрывающая больше всего событий.
 
     Считаем по компактному снимку и только по рынкам всего матча: у
-    подигр («1-й тайм») свои группы, и они бы смешались с основными."""
+    подигр («1-й тайм») свои группы, и они бы смешались с основными.
+
+    Семейства, которого в снимке нет вовсе, это правило лишило бы группы,
+    а значит и линии. Так бывает у индивидуальных тоталов и «обе забьют»:
+    компактный фид отдаёт только самые ходовые рынки, а остальные лежат в
+    полной росписи. Для таких семейств считаем по росписи — выбор станет
+    менее надёжным (групп там кратно больше), но его всё равно проверит
+    голосование, а без него рынка не было бы совсем."""
+    base_counts, base_lines = _count_groups(events, full=False)
+    full_counts, full_lines = _count_groups(events, full=True)
+
+    groups: dict[str, int | None] = {}
+    stats: dict[str, list[tuple[int, int, float]]] = {}
+    for family in FAMILY_CODES:
+        per_group, lines = base_counts.get(family), base_lines
+        if not per_group:
+            per_group, lines = full_counts.get(family), full_lines
+        rows = []
+        for g, n in (per_group or {}).items():
+            ln = lines.get((family, g)) or [0.0]
+            rows.append((g, n, float(median(ln))))
+        # Больше событий — важнее; при равном покрытии берём группу с
+        # большей линией: тотал матча всегда выше тотала тайма.
+        rows.sort(key=lambda r: (r[1], r[2]), reverse=True)
+        if rows:
+            stats[family] = rows
+        groups[family] = rows[0][0] if rows else None
+    return groups, stats
+
+
+def _count_groups(events: list[RawEvent], full: bool):
+    """Сколько событий стоит за каждой парой «семейство + группа»."""
     counts: dict[str, dict[int, int]] = {}
     lines: dict[tuple[str, int], list[float]] = {}
     for ev in events:
         if ev.scope:
             continue
-        picks = ev.base_picks if ev.base_picks is not None else ev.picks
+        picks = ev.picks if full or ev.base_picks is None else ev.base_picks
         seen: set[tuple[str, int]] = set()
         for g, t, p, _c in picks:
             family = FAMILY_OF.get(t)
@@ -265,22 +336,7 @@ def _pick_groups(events: list[RawEvent]):
         for family, g in seen:
             per_group = counts.setdefault(family, {})
             per_group[g] = per_group.get(g, 0) + 1
-
-    groups: dict[str, int | None] = {}
-    stats: dict[str, list[tuple[int, int, float]]] = {}
-    for family, per_group in counts.items():
-        rows = []
-        for g, n in per_group.items():
-            ln = lines.get((family, g)) or [0.0]
-            rows.append((g, n, float(median(ln))))
-        # Больше событий — важнее; при равном покрытии берём группу с
-        # большей линией: тотал матча всегда выше тотала тайма.
-        rows.sort(key=lambda r: (r[1], r[2]), reverse=True)
-        stats[family] = rows
-        groups[family] = rows[0][0] if rows else None
-    for family in FAMILY_CODES:
-        groups.setdefault(family, None)
-    return groups, stats
+    return counts, lines
 
 
 # ---------------------------------------------------------------------------
@@ -389,6 +445,93 @@ def _vote_itotal_sides(ev: RawEvent, groups: dict[str, int | None],
         return
     home_is_favourite = k1 < k2
     tally[0 if (m1 > m2) == home_is_favourite else 1] += 1
+
+
+def _decide_bts(events: list[RawEvent], layout: Layout) -> None:
+    """«Обе забьют»: у рынка нет ни линии, ни лестницы — где «да»?
+
+    Монотонностью тут ничего не проверишь: две котировки без линии, и обе
+    около двойки. Зато рынок жёстко связан с результативностью матча —
+    чем больше голов ждёт БК, тем чаще забивают обе команды. Сколько
+    голов она ждёт, говорит её собственный тотал: линия, на которой кэфы
+    «больше» и «меньше» ближе всего друг к другу.
+
+    Голосуем по двум корзинам отдельно — низовые матчи и результативные,
+    — и принимаем разметку, только если ОБЕ пришли к одному выводу. Одной
+    корзины мало: рынок «обе забьют в 1-м тайме» на низовых матчах ведёт
+    себя точно так же и отличается только на результативных, где обе всё
+    равно забивают редко. Разошлись корзины — семейство не отдаём.
+
+    Опора здесь чужая (тотал), поэтому если сам тотал не подтвердился,
+    проверять «обе забьют» нечем и рынок пропускается."""
+    if layout.groups.get(BTS) is None:
+        return
+    if not layout.usable(TOTAL) or layout.groups.get(TOTAL) is None:
+        layout.skipped.add(BTS)
+        return
+    low, high = [0, 0], [0, 0]
+    for ev in events:
+        if ev.scope:
+            continue
+        _vote_bts(ev, layout.groups, low, high)
+    layout.votes[BTS] = (low[0] + high[0], low[1] + high[1])
+    verdicts = {_bucket_verdict(low), _bucket_verdict(high)}
+    if verdicts == {"straight"}:
+        return
+    if verdicts == {"inverted"}:
+        layout.inverted.add(BTS)
+        return
+    layout.skipped.add(BTS)
+
+
+def _vote_bts(ev: RawEvent, groups: dict[str, int | None], low: list[int],
+              high: list[int]) -> None:
+    k_yes, k_no = ev.flat(BTS, groups.get(BTS))
+    if not k_yes or not k_no or k_yes <= 1 or k_no <= 1:
+        return
+    if abs(k_yes - k_no) < BTS_MIN_GAP:
+        return
+    odds = ev.winner_odds(groups.get(WINNER))
+    if odds and min(odds) < BTS_HEAVY_FAV:
+        return
+    central = _central_total(ev, groups[TOTAL])
+    if central is None:
+        return
+    if central <= BTS_LOW_TOTAL:
+        low[0 if k_yes > k_no else 1] += 1
+    elif central >= BTS_HIGH_TOTAL:
+        high[0 if k_yes < k_no else 1] += 1
+
+
+def _bucket_verdict(tally: list[int]) -> str:
+    total = tally[0] + tally[1]
+    if total < BTS_MIN_BUCKET:
+        return "unknown"
+    share = tally[1] / total
+    if share >= SURE_SHARE:
+        return "inverted"
+    if share <= 1 - SURE_SHARE:
+        return "straight"
+    return "unknown"
+
+
+def _central_total(ev: RawEvent, group: int) -> float | None:
+    """Линия тотала с самыми близкими кэфами сторон — столько голов БК и
+    ждёт от матча. Какая сторона «больше», а какая «меньше», тут неважно:
+    разница по модулю от их порядка не зависит."""
+    sides = ev.lines(TOTAL, group)
+    over, under = sides.get(T_OVER) or {}, sides.get(T_UNDER) or {}
+    best: tuple[float, float] | None = None
+    for line, ka in over.items():
+        if line is None or ka <= 1:
+            continue
+        kb = under.get(line)
+        if not kb or kb <= 1:
+            continue
+        gap = abs(ka - kb)
+        if best is None or gap < best[0]:
+            best = (gap, line)
+    return best[1] if best else None
 
 
 def _median_line(ev: RawEvent, family: str, group: int) -> float | None:

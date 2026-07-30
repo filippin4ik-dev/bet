@@ -9,17 +9,26 @@
 import time
 
 from app.parsers.melbet import MelbetParser, _picks, _subgame_events
-from app.parsers.melbet_layout import (HCAP, ITOTAL1, ITOTAL2, ITOTAL_SIDES,
-                                       TOTAL, RawEvent, detect)
+from app.parsers.melbet_layout import (BTS, HCAP, ITOTAL_SIDES, TOTAL,
+                                       RawEvent, detect)
 
 NOW = time.time()
 FUTURE = NOW + 7200
 
 G_WINNER, G_TOTAL, G_HCAP, G_IT1, G_IT2 = 1, 17, 2, 15, 62
 G_HALF_TOTAL = 63          # «чужая» группа тоталов (тайм) — не должна мешать
+G_BTS = 19
 
 # Лестница тотала: линия → (больше, меньше). Кэф «больше» растёт с линией.
 TOTAL_LADDER = {2.0: (1.60, 2.30), 2.5: (1.90, 1.90), 3.0: (2.35, 1.60)}
+# Те же лестницы, сдвинутые в низовой и в результативный матч: «центр»
+# лестницы (там, где кэфы сторон равны) — это и есть ожидаемые голы.
+LOW_TOTALS = {1.5: (1.60, 2.30), 2.0: (1.90, 1.90), 2.5: (2.35, 1.60)}
+HIGH_TOTALS = {3.0: (1.60, 2.30), 3.5: (1.90, 1.90), 4.0: (2.35, 1.60)}
+# «Обе забьют» (Да/Нет) — рынок без линии. В низовом матче «да» дороже,
+# в результативном — дешевле; на этом и держится калибровка.
+BTS_LOW = (2.30, 1.60)
+BTS_HIGH = (1.55, 2.40)
 # Фора первой команды: линия → (Ф1, Ф2). Равные кэфы на −1.0 — там БК
 # считает шансы равными, значит фаворит первая команда.
 HCAP_LADDER = {-1.5: (2.10, 1.70), -1.0: (1.90, 1.90), -0.5: (1.60, 2.30)}
@@ -53,7 +62,7 @@ def _game(gid=1, *, team1="Спартак", team2="Зенит", sport="Футб�
           league="РПЛ", start=None, totals=TOTAL_LADDER,
           hcaps=HCAP_LADDER, it1=IT1_LADDER, it2=IT2_LADDER,
           winner=WINNER_ODDS, total_codes=(9, 10), total_group=G_TOTAL,
-          extra=()):
+          bts=None, bts_line=None, extra=()):
     k1, kx, k2 = winner
     outcomes = [_outcome(G_WINNER, 1, None, k1),
                 _outcome(G_WINNER, 2, None, kx),
@@ -67,16 +76,33 @@ def _game(gid=1, *, team1="Спартак", team2="Зенит", sport="Футб�
         outcomes += _ladder_outcomes(G_IT1, (11, 12), it1)
     if it2:
         outcomes += _ladder_outcomes(G_IT2, (13, 14), it2)
+    if bts:
+        outcomes += [_outcome(G_BTS, 180, bts_line, bts[0]),
+                     _outcome(G_BTS, 181, bts_line, bts[1])]
     outcomes += list(extra)
     return {"I": gid, "O1": team1, "O2": team2, "SN": sport, "L": league,
             "SI": 1, "LI": 10, "S": int(start or FUTURE), "E": outcomes}
 
 
-def _line(count=15, **kwargs):
+def _line(count=15, tag="", **kwargs):
     """Линия из нескольких одинаковых по разметке событий: калибровка
     смотрит на всю линию сразу, одного матча ей мало."""
-    return [_game(gid=i + 1, team1=f"Хозяева {i}", team2=f"Гости {i}",
-                  **kwargs) for i in range(count)]
+    return [_game(gid=i + 1, team1=f"Хозяева {tag}{i}",
+                  team2=f"Гости {tag}{i}", **kwargs) for i in range(count)]
+
+
+def _bts_line(low=BTS_LOW, high=BTS_HIGH, count=10, **kwargs):
+    """Линия из низовых и результативных матчей: «обе забьют» проверяется
+    по обеим половинам сразу, поэтому в снимке нужны и те и другие."""
+    return (_line(count=count, tag="н", totals=LOW_TOTALS, bts=low, **kwargs)
+            + _line(count=count, tag="в", totals=HIGH_TOTALS, bts=high,
+                    **kwargs))
+
+
+def _bothscore(odds, tag):
+    """Рынок «обе забьют» одного из событий линии _bts_line."""
+    return next(o for o in odds if o.market_key == "bothscore"
+                and o.team1 == f"Хозяева {tag}0")
 
 
 def _run(games, live=False):
@@ -222,6 +248,79 @@ def test_group_with_wider_coverage_wins():
     layout, odds = _run(games)
     assert layout.groups[TOTAL] == G_TOTAL
     assert "total:0.5" not in _keys(odds)
+
+
+# ---------- «обе забьют»: рынок без линии ----------
+
+def test_both_score_sides_are_learned_from_scoring_level():
+    """У «обе забьют» нет ни линии, ни лестницы — где «да», видно только
+    по результативности матчей: в низовых «да» дороже, в результативных
+    дешевле."""
+    layout, odds = _run(_bts_line())
+    assert BTS not in layout.skipped and BTS not in layout.inverted
+
+    low = _bothscore(odds, "н")
+    assert (low.k1, low.k2) == BTS_LOW
+    assert (low.outcome1, low.outcome2) == ("Да", "Нет")
+    assert low.market == "Обе забьют"
+    assert _bothscore(odds, "в").k1 == BTS_HIGH[0]
+
+
+def test_both_score_without_line_field_accepts_zero_line():
+    """Часть зеркал кладёт в рынок без линии P=0 вместо пустого поля."""
+    _layout, odds = _run(_bts_line(bts_line=0))
+    assert (_bothscore(odds, "н").k1, _bothscore(odds, "н").k2) == BTS_LOW
+
+
+def test_swapped_both_score_codes_are_detected():
+    """Коды «да» и «нет» стоят наоборот: обе половины линии говорят об
+    этом одинаково, значит стороны надо переставить."""
+    layout, odds = _run(_bts_line(low=BTS_LOW[::-1], high=BTS_HIGH[::-1]))
+    assert BTS in layout.inverted
+    assert (_bothscore(odds, "н").k1, _bothscore(odds, "н").k2) == BTS_LOW
+
+
+def test_both_score_is_skipped_when_halves_disagree():
+    """«Да» дороже и в низовых, и в результативных матчах — так ведёт себя
+    не «обе забьют» матча, а какой-то другой рынок (например той же пары
+    кодов, но за 1-й тайм). Разошлись половины — рынок не отдаём."""
+    layout, odds = _run(_bts_line(low=BTS_LOW, high=BTS_LOW))
+    assert BTS in layout.skipped
+    assert not [o for o in odds if o.market_key.startswith("bothscore")]
+
+
+def test_both_score_is_skipped_without_low_scoring_half():
+    """Только результативные матчи: рынок вёл бы себя так же, даже будь
+    коды перепутаны. Одной половины линии для вывода мало."""
+    layout, odds = _run(_line(count=20, totals=HIGH_TOTALS, bts=BTS_HIGH))
+    assert BTS in layout.skipped
+    assert not [o for o in odds if o.market_key.startswith("bothscore")]
+
+
+def test_both_score_is_skipped_when_totals_are_unusable():
+    """Опора у «обе забьют» — тотал той же БК. Не подтвердился он —
+    проверять рынок нечем."""
+    swapped = {line: (under, over) for line, (over, under) in
+               LOW_TOTALS.items()}
+    layout, _odds = _run(_bts_line() + _line(count=20, tag="x",
+                                             totals=swapped, bts=BTS_LOW))
+    assert TOTAL in layout.skipped and BTS in layout.skipped
+
+
+def test_both_score_from_full_markets_only():
+    """«Обе забьют» нет в компактном снимке — он приходит только с полной
+    росписью. Группу для такого рынка берём из росписи, иначе он не попал
+    бы в линию вовсе."""
+    events = []
+    for game in _bts_line():
+        bts = [o for o in game["E"] if o["G"] == G_BTS]
+        base = {**game, "E": [o for o in game["E"] if o["G"] != G_BTS]}
+        ev = RawEvent(game=game, picks=_picks(game))
+        ev.base_picks = _picks(base)      # в снимке линии рынка ещё нет
+        assert bts and len(ev.picks) > len(ev.base_picks)
+        events.append(ev)
+    layout = detect(events)
+    assert layout.groups[BTS] == G_BTS and BTS not in layout.skipped
 
 
 # ---------- защита от мусора ----------

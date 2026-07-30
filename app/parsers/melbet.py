@@ -36,15 +36,19 @@ VPS, с которого работают Winline и Fonbet; проверить,
 - тоталы — вся лестница линий, пара «больше/меньше» на каждую линию;
 - форы — вся лестница; линии сторон обязаны быть противоположными;
 - индивидуальные тоталы обеих команд — вся лестница;
+- «обе забьют» (Да/Нет) — рынок без линии, поэтому его сторона
+  определяется через результативность матча (см. melbet_layout._decide_bts);
 - те же рынки у подигр (тайм, период, сет): подигра приходит со своим
   названием, из него берётся scope, поэтому «тотал 1-го тайма» Melbet
   сшивается с таким же рынком других БК, а не с тоталом всего матча.
 
-Что НЕ берём: двойной шанс, «обе забьют», чет/нечет, точный счёт и
-прочую экзотику. Их коды исхода проверить теми же структурными
-признаками нельзя (у рынка нет ни лестницы, ни линии), а ошибка в
-стороне «да/нет» — это ложная вилка с чужим «нет». Появится словарь
-имён рынков — добавим.
+Что НЕ берём: чет/нечет, двойной шанс, точный счёт и прочую экзотику.
+Чет/нечет проверить нечем в принципе: у честной линии «чёт» и «нечет»
+почти равновероятны при любом тотале, и никакой структурный признак не
+скажет, который из двух кодов какой, — а перепутать их значит сложить
+свой «чёт» с чужим «нечет» и показать вилку на пустом месте. Остальное
+либо не двухисходное, либо не сопоставляется с другими БК. Появится
+словарь имён рынков — добавим.
 """
 import logging
 import time
@@ -62,8 +66,9 @@ from ..models import KIND_LIVE, KIND_PREMATCH, MarketOdds
 from .base import BaseParser
 from .html_utils import (fmt_hcap, fmt_total, format_start, market_scope,
                          neg_hcap, sane_1x2_margin, sane_pair_margin)
-from .melbet_layout import (HCAP, ITOTAL1, ITOTAL2, T_DRAW, T_W1, T_W2, TOTAL,
-                            WINNER, FAMILY_CODES, Layout, RawEvent, detect)
+from .melbet_layout import (BTS, HCAP, ITOTAL1, ITOTAL2, T_DRAW, T_W1, T_W2,
+                            TOTAL, WINNER, FAMILY_CODES, Layout, RawEvent,
+                            detect)
 
 log = logging.getLogger("parsers.melbet")
 
@@ -351,6 +356,7 @@ class MelbetParser(BaseParser):
         out.extend(self._handicaps(ev, layout, base))
         for family in (ITOTAL1, ITOTAL2):
             out.extend(self._ind_totals(ev, layout, base, family))
+        out.extend(self._both_score(ev, layout, base))
         return out
 
     def _group(self, ev: RawEvent, family: str,
@@ -466,6 +472,22 @@ class MelbetParser(BaseParser):
                 outcome1=f"ИТБ {pt}", outcome2=f"ИТМ {pt}",
                 k1=k_over, k2=k_under, **base))
         return out
+
+    def _both_score(self, ev: RawEvent, layout: Layout,
+                    base: dict) -> list[MarketOdds]:
+        group = self._group(ev, BTS, layout)
+        if group is None:
+            return []
+        yes, no = ev.flat(BTS, group)
+        if layout.is_inverted(BTS):
+            yes, no = no, yes
+        if not yes or not no or not sane_pair_margin(yes, no):
+            return []
+        scope = ev.scope
+        return [MarketOdds(
+            market="Обе забьют",
+            market_key=f"bothscore:{scope}" if scope else "bothscore",
+            outcome1="Да", outcome2="Нет", k1=yes, k2=no, **base)]
 
 
 # ---------------------------------------------------------------------------
