@@ -192,7 +192,10 @@ class WinlineFeed:
         # Справочники
         self.sports: dict[int, dict] = {}     # id -> {name, strings[9]}
         self.tiplines: dict[int, dict] = {}   # id -> {src, countV, text, R}
-        self.champs: dict[int, tuple] = {}    # id -> (sport_id, name)
+        # id -> (sport_id, name, country_id); страна нужна только для адреса
+        # страницы события — в маршруте сайта под неё отведён свой сегмент
+        self.champs: dict[int, tuple] = {}
+        self.countries: dict[int, str] = {}   # id -> название страны
         # Прематч
         self.pre_events: dict[int, dict] = {}
         self.pre_lines: dict[int, dict] = {}
@@ -248,16 +251,36 @@ class WinlineFeed:
                 merged.update(lines)
             merged.update(self.pre_lines)
             return (dict(self.sports), dict(self.tiplines),
-                    dict(self.champs),
+                    self._champs_named(),
                     [dict(e) for e in self.pre_events.values()],
                     [dict(ln) for ln in merged.values()])
 
     def live_snapshot(self) -> tuple[dict, dict, dict, list, list]:
         with self._lock:
             return (dict(self.sports), dict(self.tiplines),
-                    dict(self.champs),
+                    self._champs_named(),
                     [dict(e) for e in self.live_events.values()],
                     [dict(ln) for ln in self.live_lines.values()])
+
+    def _champs_named(self) -> dict[int, tuple]:
+        """id -> (sport_id, название, страна). Вызывать под локом.
+
+        Наружу отдаём НАЗВАНИЕ страны, а не её id: он нужен только внутри
+        фида. Неизвестная страна — пустая строка (в лайв-кадре справочника
+        стран нет, там id берётся из прематча)."""
+        return {cid: (sport_id, name, self.countries.get(country_id, ""))
+                for cid, (sport_id, name, country_id) in self.champs.items()}
+
+    def _merge_champs(self, new_champs: dict[int, tuple]) -> None:
+        """Обновляет справочник чемпионатов, не теряя известную страну.
+
+        Вызывать под локом. Лайв-кадр страну не присылает, и без этого он
+        затирал бы ту, что пришла с прематчем по тому же чемпионату."""
+        for cid, (sport_id, name, country_id) in new_champs.items():
+            if not country_id:
+                known = self.champs.get(cid)
+                country_id = known[2] if known else 0
+            self.champs[cid] = (sport_id, name, country_id)
 
     # ---------- цикл подключения ----------
 
@@ -418,6 +441,7 @@ class WinlineFeed:
         cur_champ = -1
         cur_event: int | None = None
         new_champs: dict[int, tuple] = {}
+        new_countries: dict[int, str] = {}
         upd_events: list[dict] = []
         del_events: list[int] = []
         upd_lines: list[dict] = []
@@ -426,15 +450,18 @@ class WinlineFeed:
         while r.i < end:
             st = r.u8()
             if st == P_COUNTRY:
-                r.u32(); r.u32(); r.utf(); r.u32()
+                country_id = r.u32()
+                r.u32()
+                new_countries[country_id] = r.utf()
+                r.u32()
                 r.u8(); r.u16(); r.u16(); r.u8()
             elif st == P_CHAMP:
                 cid = r.u32()
                 sport_id = r.u32()
-                r.u32()                    # страна
+                country_id = r.u32()
                 name = r.utf()
                 r.i32(); r.u32(); r.u32(); r.u8(); r.u32(); r.u32()
-                new_champs[cid] = (sport_id, name)
+                new_champs[cid] = (sport_id, name, country_id)
                 cur_champ = cid
             elif st in (P_EVENT, P_EVENT_UPD):
                 ev = {"id": r.u32()}
@@ -469,7 +496,8 @@ class WinlineFeed:
                 raise ValueError(f"неизвестный шаг прематча {st} @{r.i}")
 
         with self._lock:
-            self.champs.update(new_champs)
+            self._merge_champs(new_champs)
+            self.countries.update(new_countries)
             for ev in upd_events:
                 self.pre_events[ev["id"]] = ev
             for eid, ts in time_upd:
@@ -592,10 +620,13 @@ class WinlineFeed:
             if st == L_CHAMP:
                 cid = r.u32()
                 sport_id = r.u32()
+                # страны в лайв-кадре нет: поля на её месте дают чушь
+                # (у товарищеских матчей российских клубов получалась
+                # Хорватия). 0 — «неизвестна», см. _merge_champs
                 r.i32(); r.u32(); r.u8()
                 name = r.utf()
                 r.u8(); r.u32(); r.u32()
-                new_champs[cid] = (sport_id, name)
+                new_champs[cid] = (sport_id, name, 0)
             elif st == L_EVENT:
                 eid = r.i32()
                 r.u32(); r.u32(); r.u8(); r.u8()
@@ -655,7 +686,7 @@ class WinlineFeed:
                 raise ValueError(f"неизвестный шаг лайва {st} @{r.i}")
 
         with self._lock:
-            self.champs.update(new_champs)
+            self._merge_champs(new_champs)
             for ev in upd_events:
                 self.live_events[ev["id"]] = ev
             for upd in partial:

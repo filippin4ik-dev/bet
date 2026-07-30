@@ -355,6 +355,35 @@ def display_market(key: str, fallback: str) -> str:
     return fallback
 
 
+# Транслитерация для слагов в адресах страниц событий. Точную схему БК
+# повторить нельзя (у каждой своя), но роутеры смотрят на числовые id, а
+# слаг им нужен лишь как заполнитель сегмента — см. _event_url парсеров.
+_TRANSLIT = {
+    "а": "a", "б": "b", "в": "v", "г": "g", "д": "d", "е": "e", "ё": "e",
+    "ж": "zh", "з": "z", "и": "i", "й": "i", "к": "k", "л": "l", "м": "m",
+    "н": "n", "о": "o", "п": "p", "р": "r", "с": "s", "т": "t", "у": "u",
+    "ф": "f", "х": "h", "ц": "c", "ч": "ch", "ш": "sh", "щ": "sch",
+    "ъ": "", "ы": "y", "ь": "", "э": "e", "ю": "yu", "я": "ya",
+}
+
+
+def slugify(text: str | None, fallback: str = "event") -> str:
+    """Кусок адреса из названия: «Лига Европы УЕФА» → «liga-evropy-uefa».
+
+    Пустое или бессмысленное название превращается в fallback: сегмент
+    адреса не может быть пустым, иначе путь схлопнется и роутер БК не
+    узнает маршрут."""
+    out = []
+    for ch in (text or "").strip().lower():
+        if ch in _TRANSLIT:
+            out.append(_TRANSLIT[ch])
+        elif ch.isascii() and ch.isalnum():
+            out.append(ch)
+        else:
+            out.append("-")
+    return re.sub(r"-+", "-", "".join(out)).strip("-") or fallback
+
+
 def format_start(ts: float) -> str:
     """Форматирует unix-время начала матча в «ДД.ММ ЧЧ:ММ» (пояс БК)."""
     tz = timezone(timedelta(hours=BK_TZ_OFFSET))
