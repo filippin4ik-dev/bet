@@ -126,6 +126,25 @@ def _sign(payload: str) -> str:
     return base64.urlsafe_b64encode(sig).decode("ascii").rstrip("=")
 
 
+def sign_value(value: str) -> str:
+    """Подписанное значение для cookie, у которой нет срока жизни.
+
+    Так помечается устройство посетителя (app/visitors.py): подпись не
+    прячет идентификатор, а лишь не даёт насочинять чужих — иначе один
+    заход мог бы наплодить в списке сколько угодно «устройств»."""
+    return f"{value}.{_sign(value)}"
+
+
+def unsign_value(token: str | None) -> str | None:
+    if not token or "." not in token:
+        return None
+    value, sig = token.rsplit(".", 1)
+    if not hmac.compare_digest(sig.encode("utf-8", "replace"),
+                               _sign(value).encode("ascii")):
+        return None
+    return value
+
+
 def create_session_token(username: str, ttl: float | None = None) -> str:
     body = json.dumps(
         {"u": username, "exp": time.time() + (ttl or config.ADMIN_SESSION_TTL)},
