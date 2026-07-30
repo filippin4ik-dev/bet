@@ -8,7 +8,10 @@
 """
 import time
 
-from app.parsers.melbet import MelbetParser, _picks, _subgame_events
+import requests
+
+from app.parsers.melbet import (MelbetParser, _count, _picks, _subgame_event,
+                                _subgames)
 from app.parsers.melbet_layout import (BTS, HCAP, ITOTAL_SIDES, TOTAL,
                                        RawEvent, detect)
 
@@ -361,35 +364,68 @@ def test_two_way_market_without_draw():
     assert (o.k1, o.k2, o.k3) == (1.80, 2.05, None)
 
 
-# ---------- подигры (таймы, периоды, сеты) ----------
+# ---------- подигры (таймы, периоды, предметные рынки) ----------
 
-def _subgames(parent_game, name, outcomes):
+def _parsed_subgame(parent_game, sub, outcomes):
+    """Подигра как отдельное событие: сначала её берут из росписи матча,
+    потом её рынки приезжают отдельным запросом по её же id."""
     parent = RawEvent(game=parent_game, picks=_picks(parent_game))
-    return _subgame_events(parent, {"SG": [{"SN": name, "E": outcomes}]})
+    picked = _subgames({"SG": [{"I": 555, **sub}]})
+    if not picked:
+        return None
+    return _subgame_event(parent, {**picked[0], "E": outcomes})
 
 
 def test_subgame_markets_get_period_scope():
+    """Период подигры лежит в PN, а не в N: там числовой идентификатор."""
     game = _game()
-    subs = _subgames(game, "1-й тайм",
-                     _ladder_outcomes(G_HALF_TOTAL, (9, 10),
-                                      {1.5: (1.85, 1.95)}))
-    assert len(subs) == 1 and subs[0].scope == "half1"
+    outcomes = _ladder_outcomes(G_HALF_TOTAL, (9, 10), {1.5: (1.85, 1.95)})
+    sub = _parsed_subgame(game, {"N": "159625", "PN": "1-й тайм", "TG": ""},
+                          outcomes)
+    assert sub is not None and sub.scope == "half1"
 
     parser = MelbetParser()
     events = [RawEvent(game=g, picks=_picks(g)) for g in _line()]
     for ev in events:
         ev.base_picks = ev.picks
     layout = detect(events)
-    odds = parser._event_odds(subs[0], layout, NOW, False)
+    odds = parser._event_odds(sub, layout, NOW, False)
     key = _keys(odds)["total:half1:1.5"]
     assert (key.k1, key.k2) == (1.85, 1.95)
 
 
+def test_subgame_subject_and_period_make_one_scope():
+    """«Угловые» + «1-й тайм» — это тотал УГЛОВЫХ тайма, и складывать его с
+    тоталом голов нельзя."""
+    outcomes = _ladder_outcomes(G_HALF_TOTAL, (9, 10), {8.5: (1.85, 1.95)})
+    sub = _parsed_subgame(_game(), {"TG": "Угловые", "PN": "1-й тайм"},
+                          outcomes)
+    assert sub is not None and sub.scope == "corners+half1"
+
+
 def test_nameless_subgame_is_skipped():
-    """Без названия непонятно, к какому периоду относятся рынки, — а
-    смешать их с рынками всего матча значит выдумать вилку."""
+    """Без названия непонятно, к чему относятся рынки, — а смешать их с
+    рынками всего матча значит выдумать вилку."""
     outcomes = _ladder_outcomes(G_HALF_TOTAL, (9, 10), {1.5: (1.85, 1.95)})
-    assert _subgames(_game(), "", outcomes) == []
+    assert _parsed_subgame(_game(), {"N": "159625"}, outcomes) is None
+
+
+def test_periods_are_taken_before_statistics(monkeypatch):
+    """Запросов на подигры выделено немного, и уходить они должны на
+    периоды: их подписывают все БК, а «удары в створ» — единицы."""
+    monkeypatch.setattr("app.parsers.melbet.MELBET_SUBGAMES", 2)
+    picked = _subgames({"SG": [
+        {"I": 1, "TG": "Угловые", "PN": ""},
+        {"I": 2, "TG": "Жёлтые карточки", "PN": "1-й тайм"},
+        {"I": 3, "TG": "", "PN": "1-й тайм"},
+        {"I": 4, "TG": "", "PN": "2-й тайм"},
+    ]})
+    assert [sub["I"] for sub in picked] == [3, 4]
+
+
+def test_subgame_limit_is_respected(monkeypatch):
+    monkeypatch.setattr("app.parsers.melbet.MELBET_SUBGAMES", 0)
+    assert _subgames({"SG": [{"I": 1, "TG": "", "PN": "1-й тайм"}]}) == []
 
 
 def test_forced_group_overrides_automatic_choice():
@@ -408,30 +444,56 @@ def test_forced_group_overrides_automatic_choice():
     assert "total:0.5" in keys and "total:2.5" not in keys
 
 
-def test_full_cycle_over_fake_feed():
-    """Полный обход: список видов спорта → линия по каждому виду →
-    роспись каждого события. Сеть подменена, но маршруты и параметры
-    запросов проверяются настоящие."""
-    line = _line(count=15)
+def _fake_feed(line, *, champs=((70, 2),), subgame=True):
+    """Подменённый фид: отвечает так же, как настоящий, и так же придирчив
+    к строке запроса. Возвращает (функция get_json, журнал вызовов)."""
     ladder_extra = _ladder_outcomes(G_TOTAL, (9, 10), {3.5: (2.90, 1.42)})
+    half = _ladder_outcomes(G_HALF_TOTAL, (9, 10), {1.5: (1.85, 1.95)})
     calls = []
 
     def fake_get_json(url, *, params=None, timeout=None, **_kw):
-        calls.append((url, dict(params or {})))
+        params = dict(params or {})
+        calls.append((url, params))
+        # Живой фид отвечает 406 на любую строку запроса, отличную от той,
+        # которую шлёт сайт: и на лишний параметр, и на другой их порядок.
+        assert "lng" not in params, "фид не принимает lng ни с каким значением"
         if url.endswith("/GetSportsShortZip"):
+            assert "mode" not in params and "getEmpty" not in params
             return {"Value": [{"I": 1, "N": "Футбол"}]}
+        if url.endswith("/GetChampsZip"):
+            return {"Value": [{"LI": li, "GC": gc, "L": "РПЛ", "SI": 1}
+                              for li, gc in champs]}
         if url.endswith("/Get1x2_VZip"):
-            assert params["sports"] == 1 and params["lng"] == "ru"
-            return {"Value": line}
+            keys = list(params)
+            assert keys[0] in ("champs", "sports"), "фильтр идёт первым"
+            assert keys[1:] == ["count", "mode"], "порядок как у сайта"
+            assert params["count"] % 5 == 0 and params["count"] <= 50
+            return {"Value": line[:params["count"]]}
+        if url.endswith("/GetChampZip"):
+            return {"Value": {"L": "РПЛ", "SI": 1, "SN": "Футбол",
+                              "G": [{"I": 900 + n} for n in range(3)]}}
         if url.endswith("/GetGameZip"):
-            game = next(g for g in line if g["I"] == params["id"])
-            return {"Value": {**game, "E": game["E"] + ladder_extra,
-                              "SG": [{"SN": "1-й тайм", "E": _ladder_outcomes(
-                                  G_HALF_TOTAL, (9, 10), {1.5: (1.85, 1.95)})}]}}
+            game = next((g for g in line if g["I"] == params["id"]), None)
+            if game is None:
+                return {"Value": {"I": params["id"], "E": half}}
+            full = {**game, "E": game["E"] + ladder_extra}
+            if subgame:
+                full["SG"] = [{"I": 5000 + game["I"], "PN": "1-й тайм",
+                               "TG": ""}]
+            return {"Value": full}
         raise AssertionError(f"неожиданный запрос: {url}")
 
+    return fake_get_json, calls
+
+
+def test_full_cycle_over_fake_feed():
+    """Полный обход: виды спорта → чемпионаты → события чемпионата →
+    роспись события → роспись подигры. Сеть подменена, но маршруты и
+    строки запросов проверяются настоящие."""
+    line = _line(count=15)
+    fake, calls = _fake_feed(line)
     parser = MelbetParser()
-    parser.get_json = fake_get_json
+    parser.get_json = fake
     odds = parser.fetch_odds()
 
     keys = {o.market_key for o in odds}
@@ -439,7 +501,70 @@ def test_full_cycle_over_fake_feed():
     assert "total:half1:1.5" in keys    # рынок подигры со своим scope
     assert "winner1x2" in keys
     assert all(o.bookmaker == "Melbet" for o in odds)
-    assert any(url.endswith("/LineFeed/GetGameZip") for url, _ in calls)
+    methods = {url.rsplit("/", 1)[-1] for url, _ in calls}
+    assert {"GetSportsShortZip", "GetChampsZip", "Get1x2_VZip",
+            "GetGameZip"} <= methods
+    assert all("/LineFeed/" in url for url, _ in calls)
+    # события спрашиваем по чемпионату, а не по виду спорта
+    line_calls = [p for u, p in calls if u.endswith("/Get1x2_VZip")]
+    assert line_calls[0]["champs"] == 70
+
+
+def test_line_is_topped_up_when_champs_requests_fail():
+    """Фид умеет оборвать часть запросов — тогда линия добирается по видам
+    спорта, чтобы обход не остался вообще без событий."""
+    line = _line(count=15)
+    fake, calls = _fake_feed(line, champs=((70, 900),), subgame=False)
+
+    def flaky(url, *, params=None, timeout=None, **kw):
+        if url.endswith("/Get1x2_VZip") and "champs" in dict(params or {}):
+            raise requests.ConnectionError("сброс соединения")
+        return fake(url, params=params, timeout=timeout, **kw)
+
+    parser = MelbetParser()
+    parser.get_json = flaky
+    odds = parser.fetch_odds()
+    assert odds, "линия должна собраться запросами по виду спорта"
+    assert any("sports" in p for u, p in calls if u.endswith("/Get1x2_VZip"))
+
+
+def test_big_champ_tail_comes_from_index():
+    """В чемпионате больше событий, чем отдаёт один запрос: остальные берём
+    из индекса чемпионата, рынки к ним приедут с росписью."""
+    line = _line(count=15)
+    fake, calls = _fake_feed(line, champs=((70, 200),), subgame=False)
+    parser = MelbetParser()
+    parser.get_json = fake
+    parser.fetch_odds()
+    assert any(u.endswith("/GetChampZip") for u, _ in calls)
+    tail_ids = {p["id"] for u, p in calls
+                if u.endswith("/GetGameZip") and p["id"] >= 900}
+    assert tail_ids, "у событий из индекса должна спрашиваться роспись"
+
+
+def test_count_is_clamped_to_feed_limits():
+    """count обязан быть кратен пяти (иначе 406), а больше 50 фид всё равно
+    не отдаёт."""
+    assert _count(500) == 50
+    assert _count(8) == 5
+    assert _count(0) == 5
+    assert _count(47) == 45
+
+
+def test_probe_reports_why_mirror_refused():
+    """Причина отказа зеркала попадает и в лог, и в диагностику: 406 и 404
+    лечатся по-разному."""
+    parser = MelbetParser()
+
+    def refuse(url, *, params=None, timeout=None, **_kw):
+        resp = requests.Response()
+        resp.status_code = 406
+        raise requests.HTTPError("не принято", response=resp)
+
+    parser.get_json = refuse
+    assert parser._resolve_base() is None
+    assert parser.probe_notes and all("406" in note
+                                      for _base, note in parser.probe_notes)
 
 
 def test_ambiguous_subgame_group_is_skipped():
@@ -448,10 +573,10 @@ def test_ambiguous_subgame_group_is_skipped():
     outcomes = (_ladder_outcomes(G_HALF_TOTAL, (9, 10), {1.5: (1.85, 1.95)})
                 + _ladder_outcomes(G_HALF_TOTAL + 1, (9, 10),
                                    {4.5: (1.75, 2.05)}))
-    subs = _subgames(_game(), "1-й тайм", outcomes)
+    sub = _parsed_subgame(_game(), {"PN": "1-й тайм"}, outcomes)
     events = [RawEvent(game=g, picks=_picks(g)) for g in _line()]
     for ev in events:
         ev.base_picks = ev.picks
     layout = detect(events)
-    odds = MelbetParser()._event_odds(subs[0], layout, NOW, False)
+    odds = MelbetParser()._event_odds(sub, layout, NOW, False)
     assert not [o for o in odds if o.market_key.startswith("total:")]

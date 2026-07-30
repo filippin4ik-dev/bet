@@ -344,8 +344,9 @@ def _count_groups(events: list[RawEvent], full: bool):
 # ---------------------------------------------------------------------------
 
 
-def _collect_votes(events: list[RawEvent],
-                   groups: dict[str, int | None]) -> dict[str, tuple[int, int]]:
+def _collect_votes(
+        events: list[RawEvent],
+        groups: dict[str, int | None]) -> dict[str, tuple[int, int]]:
     votes = {
         TOTAL: [0, 0],
         HCAP: [0, 0],

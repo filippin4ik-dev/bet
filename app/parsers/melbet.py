@@ -3,13 +3,40 @@
 Melbet работает на том же движке, что 1xBet/Betwinner/Linebet, и раздаёт
 линию тем же фидом, которым пользуется сам сайт, — без авторизации:
 
-    GET {база}/LineFeed/GetSportsShortZip?lng=ru&country=1&partner=8
+    GET {база}/LineFeed/GetSportsShortZip?virtualSports=true
         — список видов спорта: [{"I": 1, "N": "Футбол"}, ...]
-    GET {база}/LineFeed/Get1x2_VZip?sports=1&count=500&lng=ru&mode=4
-        — линия одного вида спорта: события с ОСНОВНЫМИ рынками
+    GET {база}/LineFeed/GetChampsZip?sport=1
+        — чемпионаты вида спорта: {"LI": 118593, "L": "Лига Европы УЕФА",
+          "GC": 10} (GC — сколько в нём событий)
+    GET {база}/LineFeed/Get1x2_VZip?champs=118593&count=50&mode=4
+        — события чемпионата с рынками
+    GET {база}/LineFeed/GetChampZip?champ=118593&mode=4
+        — чемпионат целиком, БЕЗ рынков: нужен только там, где событий
+          больше 50 и Get1x2_VZip отдаёт не всех
     GET {база}/LineFeed/GetGameZip?id=<событие>&isSubGames=true&...
-        — полная роспись одного события: лестницы тоталов и фор,
-          индивидуальные тоталы, подигры (таймы, периоды, сеты)
+        — полная роспись одного события плюс список его подигр (тайм,
+          «угловые», «жёлтые карточки»); рынки самой подигры лежат за
+          таким же запросом по её собственному id
+
+ФИД ПРИНИМАЕТ ТОЛЬКО ТЕ СТРОКИ ЗАПРОСА, КОТОРЫЕ ШЛЁТ САМ САЙТ. Всё
+остальное — не «лишний параметр проигнорируется», а 406 NotAcceptable на
+весь запрос. Проверено на живом фиде:
+
+- «?sports=1&count=50&mode=4» — 200, а «?count=50&mode=4&sports=1» — 406:
+  ЗНАЧИМ ДАЖЕ ПОРЯДОК параметров, фильтр идёт первым;
+- lng ломает Get1x2_VZip и GetChampsZip при ЛЮБОМ значении, mode и
+  getEmpty — GetSportsShortZip;
+- count обязан быть кратен пяти: count=8 — это 406;
+- зато без mode=4 Get1x2_VZip отвечает 200 и ПУСТЫМ списком.
+
+Поэтому наборы параметров записаны здесь ровно так, как их шлёт сайт, и
+пересортировывать их нельзя. Языка в запросах нет вовсе — фид и без него
+отвечает по-русски.
+
+Линия собирается ПО ЧЕМПИОНАТАМ: одним запросом фид отдаёт максимум 50
+событий, сколько ни проси, поэтому «весь вид спорта» — это лишь верхушка
+(50 матчей из ~2700 по футболу). Чемпионатов около 900, событий в них
+~7500 — это и есть вся линия.
 
 База — это домен сайта плюс префикс: сейчас это «/service-api», на
 зеркалах постарше эндпоинты лежат прямо в корне. Домен и префикс парсер
@@ -39,9 +66,10 @@ app.diagnose_melbet`.
 - индивидуальные тоталы обеих команд — вся лестница;
 - «обе забьют» (Да/Нет) — рынок без линии, поэтому его сторона
   определяется через результативность матча (см. melbet_layout._decide_bts);
-- те же рынки у подигр (тайм, период, сет): подигра приходит со своим
-  названием, из него берётся scope, поэтому «тотал 1-го тайма» Melbet
-  сшивается с таким же рынком других БК, а не с тоталом всего матча.
+- те же рынки у подигр: у подигры есть предмет (TG: «Угловые», «Жёлтые
+  карточки») и период (PN: «1-й тайм»), из них собирается scope, поэтому
+  «тотал угловых 1-го тайма» Melbet сшивается с таким же рынком других
+  БК, а не с тоталом голов всего матча.
 
 Что НЕ берём: чет/нечет, двойной шанс, точный счёт и прочую экзотику.
 Чет/нечет проверить нечем в принципе: у честной линии «чёт» и «нечет»
@@ -53,16 +81,18 @@ app.diagnose_melbet`.
 """
 import logging
 import time
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
 
-from ..config import (MELBET_API_HOST, MELBET_COUNTRY, MELBET_FEED_TIMEOUT,
-                      MELBET_FULL_MARKETS, MELBET_FULL_MARKETS_WORKERS,
-                      MELBET_GROUPS, MELBET_HOSTS, MELBET_LANG,
-                      MELBET_LIVE_COUNT, MELBET_MIN_REFRESH, MELBET_PARTNER,
-                      MELBET_SITE_HOST, MELBET_SPORT_COUNT,
-                      MELBET_SPORT_WORKERS)
+from ..config import (MELBET_API_HOST, MELBET_CHAMP_WORKERS, MELBET_CHAMPS,
+                      MELBET_FEED_TIMEOUT, MELBET_FULL_MARKETS,
+                      MELBET_FULL_MARKETS_MAX, MELBET_FULL_MARKETS_WORKERS,
+                      MELBET_GROUPS, MELBET_HOSTS, MELBET_LIVE_COUNT,
+                      MELBET_MIN_REFRESH, MELBET_SITE_HOST,
+                      MELBET_SPORT_COUNT, MELBET_SPORT_WORKERS,
+                      MELBET_SUBGAMES)
 from ..models import KIND_LIVE, KIND_PREMATCH, MarketOdds
 from .base import BaseParser
 from .html_utils import (fmt_hcap, fmt_total, format_start, market_scope,
@@ -77,15 +107,23 @@ log = logging.getLogger("parsers.melbet")
 API_PREFIXES = ["/service-api", ""]
 # Если ни один домен не ответил — не перебираем весь список каждый цикл
 PROBE_BACKOFF = 300
+# Пауза перед повторной попыткой, когда фид оборвал соединение
+RETRY_PAUSE = 0.5
+# Если по чемпионатам собралось меньше этой доли линии — фид отвечал не
+# всем запросам, и снимок добирается запросами «по виду спорта»
+CHAMPS_ENOUGH = 0.5
 # Куда лезть за исходами внутри ответа. Ключи перечислены явно, обходить
 # ответ целиком нельзя: в нём есть ещё и подигры (SG), и их рынки нельзя
 # смешивать с рынками всего матча.
 _MARKET_KEYS = ("E", "AE", "ME", "GE")
-# Где у подигры лежит её название («1-й тайм», «2-й сет»). Разные версии
-# движка кладут его в разные поля; без названия подигра пропускается —
-# неизвестно, к какому периоду относятся её рынки.
-_SUBGAME_NAME_KEYS = ("SN", "N", "TN", "NA", "GN")
+# Из чего складывается название подигры: предмет счёта (TG: «Угловые») и
+# период (PN: «1-й тайм»). Поле N у подигры — числовой идентификатор, а не
+# имя, поэтому его брать нельзя. Без названия подигра пропускается:
+# неизвестно, к чему относятся её рынки.
+_SUBGAME_NAME_KEYS = ("TG", "PN")
 _MAX_DEPTH = 6
+# Фид отдаёт события пачками не больше этого числа, сколько ни проси.
+_MAX_PER_REQUEST = 50
 
 
 class MelbetParser(BaseParser):
@@ -97,11 +135,14 @@ class MelbetParser(BaseParser):
         self._base: str | None = None
         self._last_probe = 0.0
         self._layout_note = ""
+        # Что ответило каждое зеркало на последнем переборе — для лога и
+        # для app/diagnose_melbet.py.
+        self.probe_notes: list[tuple[str, str]] = []
         # Роспись тянется пулом потоков, а пул соединений requests по
         # умолчанию держит десять: без этого лишние соединения к тому же
         # хосту открывались бы и закрывались на каждый запрос.
         adapter = requests.adapters.HTTPAdapter(
-            pool_maxsize=max(MELBET_FULL_MARKETS_WORKERS,
+            pool_maxsize=max(MELBET_FULL_MARKETS_WORKERS, MELBET_CHAMP_WORKERS,
                              MELBET_SPORT_WORKERS) + 4)
         self.session.mount("https://", adapter)
         self.session.mount("http://", adapter)
@@ -126,30 +167,104 @@ class MelbetParser(BaseParser):
         if now - self._last_probe < PROBE_BACKOFF:
             return None
         self._last_probe = now
+        notes: list[tuple[str, str]] = []
         for base in self._candidates():
-            try:
-                data = self.get_json(f"{base}/LineFeed/GetSportsShortZip",
-                                     params=self._params(), timeout=8)
-            except Exception as exc:  # noqa: BLE001 — пробуем следующий
-                log.debug("Melbet: %s не подошёл (%s)", base, exc)
-                continue
-            if isinstance(data, dict) and data.get("Value"):
+            note = self._probe(base)
+            if note is None:
                 log.info("Melbet: рабочая база фида — %s", base)
                 self._base = base
+                self.probe_notes = notes + [(base, "линия отдана")]
                 return base
+            notes.append((base, note))
+        self.probe_notes = notes
+        # Причину пишем словами: без неё «фид не ответил» одинаково выглядит
+        # и когда сменился домен, и когда сайт не пускает адрес.
         log.warning(
             "Melbet: ни одно зеркало не отдало линию (повтор через %d с). "
-            "Фид доступен только с российского адреса; проверить — "
-            "venv/bin/python -m app.diagnose_melbet, задать домен вручную — "
-            "MELBET_API_HOST.", PROBE_BACKOFF)
+            "Ответы: %s. Фид отвечает не любому адресу; проверить — "
+            "venv/bin/python -m app.diagnose_melbet, задать базу вручную — "
+            "MELBET_API_HOST.", PROBE_BACKOFF,
+            "; ".join(f"{b} → {n}" for b, n in notes))
         return None
 
-    def _params(self, **extra) -> dict:
-        params = {"lng": MELBET_LANG, "country": MELBET_COUNTRY,
-                  "partner": MELBET_PARTNER, "gr": 70, "mode": 4,
-                  "getEmpty": "true"}
-        params.update(extra)
+    def _probe(self, base: str) -> str | None:
+        """Пробный запрос к базе: None — работает, иначе причина отказа."""
+        try:
+            # Попыток больше, чем обычно: неудачная проверка гасит Melbet на
+            # PROBE_BACKOFF секунд, а фид умеет обрывать соединение и на
+            # ровном месте — обидно потерять обход из-за одного обрыва.
+            data = self._get(base, "LineFeed", "GetSportsShortZip",
+                             self._sports_params(), 8, attempts=3)
+        except requests.JSONDecodeError:
+            # Ответ есть, но это не фид: обычно так отвечает сам сайт —
+            # значит эндпоинты лежат под другим префиксом.
+            return "ответ не JSON (это страница сайта, а не фид)"
+        except requests.RequestException as exc:
+            code = getattr(getattr(exc, "response", None), "status_code", None)
+            if code in (403, 406):
+                return (f"HTTP {code} — фид отклонил запрос (адрес не пускают "
+                        f"либо строка запроса не та)")
+            if code == 404:
+                return f"HTTP {code} — нет такого пути (не тот префикс базы)"
+            if code:
+                return f"HTTP {code}"
+            return f"нет ответа ({type(exc).__name__})"
+        except Exception as exc:  # noqa: BLE001 — мало ли что вернут
+            return f"ответ не разобрать ({type(exc).__name__})"
+        if not (isinstance(data, dict) and data.get("Value")):
+            return "ответ без списка видов спорта"
+        return None
+
+    # ------------------------------------------------------------------
+    # Параметры запросов
+    # ------------------------------------------------------------------
+    # Наборы ниже переписаны с запросов самого сайта, и ПОРЯДОК КЛЮЧЕЙ В НИХ
+    # ЗНАЧИМ: requests сохраняет порядок словаря, а фид отвечает 406, если
+    # строка запроса отличается от той, которую шлёт сайт (см. заголовок
+    # модуля). Пересортировать ключи — сломать парсер.
+
+    def _get(self, base: str, feed: str, method: str, params: dict,
+             timeout: float, attempts: int = 2):
+        """Запрос к фиду с повторными попытками.
+
+        Под нагрузкой (а линия — это сотни запросов за обход) фид начинает
+        рвать соединение на подключении, причём выборочно: часть запросов
+        проходит, часть обрывается. Повтор через небольшую паузу вытягивает
+        такие обрывы; отказы с кодом (406, 404) не повторяем — они не про
+        нагрузку, а про сам запрос."""
+        url = f"{base}/{feed}/{method}"
+        for attempt in range(1, attempts + 1):
+            try:
+                return self.get_json(url, params=params, timeout=timeout)
+            except (requests.ConnectionError, requests.Timeout):
+                if attempt == attempts:
+                    raise
+                time.sleep(RETRY_PAUSE * attempt)
+        return None
+
+    def _sports_params(self) -> dict:
+        return {"virtualSports": "true", "groupChamps": "true"}
+
+    def _champs_params(self, sport_id: int) -> dict:
+        return {"sport": sport_id}
+
+    def _games_params(self, key: str, value: int | None, count: int) -> dict:
+        # Фильтр (sports или champs) обязан идти ПЕРВЫМ: с «count&mode&sports»
+        # тот же запрос — это 406. mode=4 тоже обязателен, без него фид
+        # отвечает 200 и пустым списком.
+        params: dict = {}
+        if value is not None:
+            params[key] = value
+        params["count"] = _count(count)
+        params["mode"] = 4
         return params
+
+    def _champ_params(self, champ_id: int) -> dict:
+        return {"champ": champ_id, "mode": 4}
+
+    def _zip_params(self, game_id: int) -> dict:
+        return {"id": game_id, "isSubGames": "true", "GroupEvents": "true",
+                "countevents": 250, "grMode": 4, "marketType": 1, "cfview": 0}
 
     # ------------------------------------------------------------------
     # Сбор линии
@@ -195,32 +310,111 @@ class MelbetParser(BaseParser):
 
     def _line(self, base: str, feed: str, live: bool,
               deadline: float) -> dict[int, dict]:
-        """Компактный снимок линии: по запросу на каждый вид спорта."""
-        sports = self._sports(base, feed)
-        count = MELBET_LIVE_COUNT if live else MELBET_SPORT_COUNT
-        games: dict[int, dict] = {}
-        if not sports:
-            # Списка видов спорта нет — просим всё разом (меньше событий,
-            # но лучше, чем ничего).
-            for g in self._sport_games(base, feed, None, count):
-                games[_game_id(g)] = g
-            return {k: v for k, v in games.items() if k}
+        """Снимок линии с рынками: по запросу на чемпионат (или вид спорта).
 
-        pool = ThreadPoolExecutor(max_workers=MELBET_SPORT_WORKERS)
-        futures = {pool.submit(self._sport_games, base, feed, sid, count): sid
-                   for sid in sports}
+        Лайв собирается по видам спорта: матчей в игре немного, и в 50
+        событий на запрос они укладываются."""
+        sports = self._sports(base, feed)
+        if not sports:
+            log.warning("Melbet: список видов спорта не пришёл — линию "
+                        "запросить не по чему")
+            return {}
+        count = MELBET_LIVE_COUNT if live else MELBET_SPORT_COUNT
+        if not live and MELBET_CHAMPS:
+            champs = self._champs(base, feed, sports, deadline)
+            if champs:
+                games = self._games(base, feed, "champs",
+                                    [li for li, _gc in champs], count,
+                                    deadline)
+                # Часть запросов фид мог оборвать (он это делает под
+                # нагрузкой) — тогда добираем верхушку каждого вида спорта:
+                # это всего десятки запросов, зато линия не окажется пустой.
+                expected = sum(gc for _li, gc in champs)
+                if len(games) < expected * CHAMPS_ENOUGH:
+                    log.warning("Melbet: по чемпионатам собрано %d событий из "
+                                "%d — фид ответил не на все запросы, добираю "
+                                "линию по видам спорта", len(games), expected)
+                    games.update(self._games(base, feed, "sports", sports,
+                                             count, deadline))
+                self._tails(base, feed, champs, count, games, deadline)
+                return games
+            log.info("Melbet: чемпионаты не пришли — беру верхушку линии по "
+                     "видам спорта")
+        return self._games(base, feed, "sports", sports, count, deadline)
+
+    def _sports(self, base: str, feed: str) -> list[int]:
+        try:
+            data = self._get(base, feed, "GetSportsShortZip",
+                             self._sports_params(), 15)
+        except Exception as exc:  # noqa: BLE001
+            log.info("Melbet: список видов спорта недоступен (%s)", exc)
+            return []
+        out = []
+        for sport in data.get("Value") or []:
+            sid = sport.get("I") or sport.get("Id")
+            if isinstance(sid, int) and sid not in out:
+                out.append(sid)
+        return out
+
+    def _champs(self, base: str, feed: str, sports: list[int],
+                deadline: float) -> list[tuple[int, int]]:
+        """Все чемпионаты линии: [(id чемпионата, сколько в нём событий)].
+
+        Число событий (GC) нужно, чтобы знать, где линия чемпионата не
+        влезет в один запрос, — таким событиям потом добираются хвосты."""
+        out: list[tuple[int, int]] = []
+        fails: Counter = Counter()
+        pool = ThreadPoolExecutor(max_workers=MELBET_CHAMP_WORKERS)
+        futures = [pool.submit(self._sport_champs, base, feed, sid)
+                   for sid in sports]
+        try:
+            for fut in as_completed(futures):
+                try:
+                    out.extend(fut.result())
+                except Exception as exc:  # noqa: BLE001 — вид не критичен
+                    fails[_reason(exc)] += 1
+                    continue
+                if time.monotonic() > deadline:
+                    break
+        finally:
+            pool.shutdown(wait=False, cancel_futures=True)
+        _log_fails("списка чемпионатов", fails)
+        if out:
+            log.info("Melbet: чемпионатов %d, событий в них по счётчику фида "
+                     "%d", len(out), sum(gc for _li, gc in out))
+        return out
+
+    def _sport_champs(self, base: str, feed: str,
+                      sport_id: int) -> list[tuple[int, int]]:
+        data = self._get(base, feed, "GetChampsZip",
+                         self._champs_params(sport_id), 20)
+        value = data.get("Value") if isinstance(data, dict) else None
+        out = []
+        for champ in value or []:
+            if not isinstance(champ, dict):
+                continue
+            li, gc = champ.get("LI"), champ.get("GC")
+            if isinstance(li, int) and li and (gc or 0) > 0:
+                out.append((li, int(gc)))
+        return out
+
+    def _games(self, base: str, feed: str, key: str, values: list[int],
+               count: int, deadline: float) -> dict[int, dict]:
+        """События с рынками по списку чемпионатов или видов спорта."""
+        games: dict[int, dict] = {}
+        fails: Counter = Counter()
+        pool = ThreadPoolExecutor(
+            max_workers=MELBET_CHAMP_WORKERS if key == "champs"
+            else MELBET_SPORT_WORKERS)
+        futures = [pool.submit(self._chunk_games, base, feed, key, v, count)
+                   for v in values]
         try:
             for fut in as_completed(futures):
                 try:
                     chunk = fut.result()
-                except Exception:  # noqa: BLE001 — вид спорта не критичен
+                except Exception as exc:  # noqa: BLE001 — пачка не критична
+                    fails[_reason(exc)] += 1
                     continue
-                if len(chunk) >= count:
-                    # Фид отдал ровно столько, сколько попросили, — значит
-                    # линия вида спорта на этом обрезана.
-                    log.info("Melbet: вид спорта %s упёрся в лимит %d "
-                             "событий — часть линии не видна, поднимите "
-                             "MELBET_SPORT_COUNT", futures[fut], count)
                 for g in chunk:
                     gid = _game_id(g)
                     if gid:
@@ -231,34 +425,52 @@ class MelbetParser(BaseParser):
                     break
         finally:
             pool.shutdown(wait=False, cancel_futures=True)
+        _log_fails("линии", fails)
         return games
 
-    def _sports(self, base: str, feed: str) -> list[int]:
-        try:
-            data = self.get_json(f"{base}/{feed}/GetSportsShortZip",
-                                 params=self._params(virtualSports="true",
-                                                     groupChamps="true"),
-                                 timeout=15)
-        except Exception as exc:  # noqa: BLE001
-            log.info("Melbet: список видов спорта недоступен (%s) — "
-                     "беру линию одним запросом", exc)
-            return []
-        out = []
-        for sport in data.get("Value") or []:
-            sid = sport.get("I") or sport.get("Id")
-            if isinstance(sid, int):
-                out.append(sid)
-        return out
-
-    def _sport_games(self, base: str, feed: str, sport_id: int | None,
+    def _chunk_games(self, base: str, feed: str, key: str, value: int | None,
                      count: int) -> list[dict]:
-        params = self._params(count=count)
-        if sport_id is not None:
-            params["sports"] = sport_id
-        data = self.get_json(f"{base}/{feed}/Get1x2_VZip", params=params,
-                             timeout=20)
-        value = data.get("Value") if isinstance(data, dict) else None
-        return [g for g in (value or []) if isinstance(g, dict)]
+        data = self._get(base, feed, "Get1x2_VZip",
+                         self._games_params(key, value, count), 20)
+        value_ = data.get("Value") if isinstance(data, dict) else None
+        return [g for g in (value_ or []) if isinstance(g, dict)]
+
+    def _tails(self, base: str, feed: str, champs: list[tuple[int, int]],
+               count: int, games: dict[int, dict], deadline: float) -> None:
+        """Хвосты чемпионатов, которые не влезли в один запрос.
+
+        Get1x2_VZip отдаёт максимум 50 событий, а бывают чемпионаты и на
+        сотню. Остальные события берём из индекса чемпионата
+        (GetChampZip) — там их полный список, но БЕЗ рынков: рынки к ним
+        приедут с полной росписью. Поэтому без росписи хвосты и не нужны."""
+        big = [(li, gc) for li, gc in champs if gc > _count(count)]
+        if not big or not MELBET_FULL_MARKETS:
+            return
+        added = 0
+        for li, _gc in big:
+            if time.monotonic() > deadline:
+                break
+            try:
+                data = self._get(base, feed, "GetChampZip",
+                                 self._champ_params(li), 20)
+            except Exception:  # noqa: BLE001
+                continue
+            champ = data.get("Value") if isinstance(data, dict) else None
+            if not isinstance(champ, dict):
+                continue
+            # У события внутри индекса нет ни вида спорта, ни названия
+            # чемпионата — они стоят на самом чемпионате.
+            head = {k: champ.get(k) for k in ("SN", "L", "SI", "LI")
+                    if champ.get(k) is not None}
+            for g in champ.get("G") or []:
+                gid = _game_id(g) if isinstance(g, dict) else None
+                if gid and gid not in games:
+                    games[gid] = {**head, **g}
+                    added += 1
+        if added:
+            log.info("Melbet: у %d крупных чемпионатов добрано %d событий из "
+                     "индекса (рынки к ним придут с росписью)", len(big),
+                     added)
 
     # ------------------------------------------------------------------
     # Полная роспись события
@@ -266,15 +478,23 @@ class MelbetParser(BaseParser):
 
     def _enrich(self, base: str, feed: str, events: list[RawEvent],
                 deadline: float) -> list[RawEvent]:
-        """Догружает роспись каждого события: лестницы линий и подигры.
+        """Догружает роспись событий: лестницы линий целиком и подигры.
 
-        Событие, не успевшее до дедлайна или упавшее с ошибкой, остаётся с
-        основными рынками из общего снимка — это не хуже, чем совсем без
-        росписи."""
+        Роспись — это запрос НА КАЖДОЕ событие, а их в линии тысячи, и за
+        отведённое время всех не обойти. Поэтому запросов не больше
+        MELBET_FULL_MARKETS_MAX и начинаем с тех событий, которые начнутся
+        раньше: по ним и ставят, а до дальних дело дойдёт на следующих
+        обходах. Событие, не успевшее до дедлайна или упавшее с ошибкой,
+        остаётся с рынками из снимка линии — это не хуже, чем без росписи."""
+        queue = sorted(events,
+                       key=lambda ev: _start_ts(ev.game) or float("inf"))
+        if MELBET_FULL_MARKETS_MAX > 0:
+            queue = queue[:MELBET_FULL_MARKETS_MAX]
         pool = ThreadPoolExecutor(max_workers=MELBET_FULL_MARKETS_WORKERS)
         futures = {pool.submit(self._game_zip, base, feed, _game_id(ev.game)):
-                   ev for ev in events}
+                   ev for ev in queue}
         extra: list[RawEvent] = []
+        subgames: list[tuple[RawEvent, dict]] = []
         got = 0
         try:
             for fut in as_completed(futures):
@@ -289,26 +509,56 @@ class MelbetParser(BaseParser):
                         ev.game = {**ev.game, **full}
                         ev.picks = picks
                         got += 1
-                    extra.extend(_subgame_events(ev, full))
+                    subgames.extend((ev, sub) for sub in _subgames(full))
                 if time.monotonic() > deadline:
                     log.info("Melbet: дедлайн росписи истёк, %d/%d событий "
-                             "успели обогатиться", got, len(events))
+                             "успели обогатиться", got, len(queue))
                     break
         finally:
             pool.shutdown(wait=False, cancel_futures=True)
-        log.info("Melbet: полная роспись получена по %d/%d событиям "
-                 "(+%d подигр)", got, len(events), len(extra))
+        if subgames:
+            extra = self._subgame_odds(base, feed, subgames, deadline)
+        log.info("Melbet: роспись получена по %d из %d событий (в линии %d), "
+                 "рынков подигр: %d", got, len(queue), len(events), len(extra))
         return events + extra
+
+    def _subgame_odds(self, base: str, feed: str,
+                      subgames: list[tuple[RawEvent, dict]],
+                      deadline: float) -> list[RawEvent]:
+        """Рынки подигр: у каждой подигры свой id и свой запрос росписи.
+
+        Внутри GetGameZip подигры приходят только списком (id, предмет,
+        период) — без котировок. Поэтому берём их отдельно и ровно столько,
+        сколько разрешает MELBET_SUBGAMES: подигр у одного футбольного
+        матча бывает под три десятка (угловые, карточки, удары по каждому
+        тайму), и тянуть их все — это в тридцать раз больше запросов, чем
+        на саму линию."""
+        out: list[RawEvent] = []
+        pool = ThreadPoolExecutor(max_workers=MELBET_FULL_MARKETS_WORKERS)
+        futures = {pool.submit(self._game_zip, base, feed, _game_id(sub)):
+                   (parent, sub) for parent, sub in subgames}
+        try:
+            for fut in as_completed(futures):
+                parent, sub = futures[fut]
+                try:
+                    full = fut.result()
+                except Exception:  # noqa: BLE001
+                    full = None
+                if full:
+                    ev = _subgame_event(parent, {**sub, **full})
+                    if ev is not None:
+                        out.append(ev)
+                if time.monotonic() > deadline:
+                    break
+        finally:
+            pool.shutdown(wait=False, cancel_futures=True)
+        return out
 
     def _game_zip(self, base: str, feed: str, game_id: int | None):
         if not game_id:
             return None
-        data = self.get_json(
-            f"{base}/{feed}/GetGameZip",
-            params=self._params(id=game_id, cfview=0, isSubGames="true",
-                                GroupEvents="true", countevents=250,
-                                grMode=4, marketType=1),
-            timeout=10)
+        data = self._get(base, feed, "GetGameZip", self._zip_params(game_id),
+                         10)
         value = data.get("Value") if isinstance(data, dict) else None
         return value if isinstance(value, dict) else None
 
@@ -536,26 +786,41 @@ def _walk(node, out: list, group: int | None, depth: int) -> None:
             _walk(node[key], out, group, depth + 1)
 
 
-def _subgame_events(parent: RawEvent, full: dict) -> list[RawEvent]:
-    """Подигры события (тайм, период, сет) — как отдельные наборы рынков.
+def _subgames(full: dict) -> list[dict]:
+    """Подигры события, у которых понятно, к чему относятся их рынки.
 
-    Берём только подигры с названием: из него получается scope, без
-    которого рынок тайма склеился бы с рынком всего матча в ложную вилку."""
-    out: list[RawEvent] = []
+    Периоды («1-й тайм») идут раньше предметных подигр («угловые»,
+    «жёлтые карточки»): запросов на подигры выделено немного, и тратить их
+    в первую очередь стоит на периоды — они есть у всех БК, а значит и
+    сопоставляются чаще. Подигра без названия пропускается: её рынок
+    склеился бы с рынком всего матча в ложную вилку."""
+    named = []
     for sub in full.get("SG") or []:
-        if not isinstance(sub, dict):
+        if not isinstance(sub, dict) or not _game_id(sub):
             continue
-        name = next((str(sub[k]) for k in _SUBGAME_NAME_KEYS
-                     if isinstance(sub.get(k), str) and sub[k].strip()), "")
-        scope = market_scope(name)
-        if not scope:
+        if not _subgame_scope(sub):
             continue
-        picks = _picks(sub)
-        if not picks:
-            continue
-        out.append(RawEvent(game={**parent.game, **_without_markets(sub)},
-                            scope=scope, picks=picks, base_picks=[]))
-    return out
+        # предмет счёта пуст — это чистый период
+        named.append((bool(str(sub.get("TG") or "").strip()), sub))
+    named.sort(key=lambda item: item[0])
+    return [sub for _subject, sub in named[:max(MELBET_SUBGAMES, 0)]]
+
+
+def _subgame_scope(sub: dict) -> str:
+    """Область рынков подигры: «Угловые» + «1-й тайм» → corners+half1."""
+    name = " ".join(str(sub.get(k) or "").strip()
+                    for k in _SUBGAME_NAME_KEYS).strip()
+    return market_scope(name)
+
+
+def _subgame_event(parent: RawEvent, sub: dict) -> RawEvent | None:
+    """Подигра как отдельное событие: те же команды, свой набор рынков."""
+    scope = _subgame_scope(sub)
+    picks = _picks(sub)
+    if not scope or not picks:
+        return None
+    return RawEvent(game={**parent.game, **_without_markets(sub)},
+                    scope=scope, picks=picks, base_picks=[])
 
 
 def _without_markets(sub: dict) -> dict:
@@ -606,6 +871,32 @@ def _event_url(game: dict) -> str:
     if sport and champ and gid:
         return f"{MELBET_SITE_HOST}/ru/line/{sport}/{champ}/{gid}"
     return f"{MELBET_SITE_HOST}/ru/line"
+
+
+def _reason(exc: BaseException) -> str:
+    """Короткая причина отказа: «HTTP 406» или «ConnectionError»."""
+    code = getattr(getattr(exc, "response", None), "status_code", None)
+    return f"HTTP {code}" if code else type(exc).__name__
+
+
+def _log_fails(what: str, fails: Counter) -> None:
+    """Сводка отказов. Без неё неполная линия выглядит просто короткой, и не
+    видно, что фид половину запросов оборвал."""
+    if not fails:
+        return
+    log.warning("Melbet: %d запросов %s не прошли (%s)", sum(fails.values()),
+                what, ", ".join(f"{r}×{n}" for r, n in fails.most_common(4)))
+
+
+def _count(value: int) -> int:
+    """Допустимое для фида значение count.
+
+    Проверено на живом фиде: count обязан быть кратен пяти (count=8 — это
+    406 на весь запрос), а больше 50 событий за раз он всё равно не
+    отдаёт, сколько ни проси."""
+    value = min(int(value or 0), _MAX_PER_REQUEST)
+    value -= value % 5
+    return max(value, 5)
 
 
 def _num(value) -> float | None:

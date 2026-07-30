@@ -11,26 +11,34 @@
 самим данным (см. app/parsers/melbet_layout.py). Этот скрипт показывает,
 что именно приехало с сайта и к каким выводам пришла проверка:
 
-- какая база фида ответила (и ответила ли вообще — доступ только с
-  российского адреса);
-- сколько видов спорта и событий в линии;
+- какая база фида ответила, а если ни одна — что именно ответило каждое
+  зеркало (403/406 «адрес не пускают» и 404 «не тот путь» лечатся
+  по-разному);
+- сколько видов спорта, чемпионатов и событий в линии;
 - какие пары «группа + код исхода» встречаются и как часто — по этой
   таблице видно, если БК поменяла нумерацию;
 - как разложились рынки и с каким счётом голосов;
 - пример события с готовыми котировками — их и увидит сканер.
 """
 import logging
+import time
 from collections import Counter
 
 from .config import MELBET_GROUPS
-from .parsers.melbet import MelbetParser, _picks, _subgame_events
+from .parsers.melbet import (MelbetParser, _picks, _subgame_event, _subgames,
+                             _subgame_scope)
 from .parsers.melbet_layout import FAMILY_OF, RawEvent, detect
 
 logging.basicConfig(level=logging.INFO,
                     format="%(levelname)s %(name)s: %(message)s")
 
-# Сколько событий брать на вид спорта: диагностике хватает верхушки
-# линии, а сервер БК не стоит грузить полным обходом ради проверки.
+# Сколько чемпионатов первого вида спорта (это футбол) брать в выборку.
+# Выборка нарочно «узкая и густая», а не по верхушке всех видов спорта:
+# разметка рынков проверяется по повторяющимся закономерностям линии, и на
+# сотне матчей одного вида она подтверждается так же, как на полной линии,
+# а на пёстрой выборке из всех видов — нет.
+SAMPLE_CHAMPS = 80
+# Столько событий берём с вида спорта, если чемпионаты не пришли.
 SAMPLE_PER_SPORT = 50
 # По скольким событиям смотреть полную роспись (по одному запросу на
 # событие — больше и не нужно, чтобы увидеть лестницы и подигры).
@@ -45,10 +53,15 @@ def main() -> None:
     parser = MelbetParser()
     base = parser._resolve_base()
     if not base:
-        print("Фид не ответил ни на одном зеркале.")
-        print("Обычная причина — не российский IP: с адресов дата-центров и "
-              "из-за границы сайт отдаёт 406 или страницу «отключите VPN».")
-        print("Если домен просто сменился, задайте его вручную: "
+        print("Фид не ответил ни на одном зеркале:")
+        for host, note in parser.probe_notes:
+            print(f"  {host} → {note}")
+        print("403/406 — сайт не пустил запрос: обычно это не российский "
+              "адрес (с дата-центров и из-за границы приходит отказ или "
+              "страница «отключите VPN»).")
+        print("404 — путь не тот: домен живой, но эндпоинты лежат по другому "
+              "префиксу.")
+        print("В обоих случаях базу можно задать вручную: "
               "MELBET_API_HOST=https://<домен>/service-api")
         return
     print(f"База фида: {base}")
@@ -56,13 +69,24 @@ def main() -> None:
     sports = parser._sports(base, "LineFeed")
     print(f"Видов спорта: {len(sports)}")
 
+    champs = parser._champs(base, "LineFeed", sports[:1],
+                            time.monotonic() + 30)
+    if champs:
+        print(f"Чемпионатов у первого вида спорта: {len(champs)}, событий в "
+              f"них: {sum(gc for _li, gc in champs)}")
+        sample = [("champs", li) for li, _gc in champs[:SAMPLE_CHAMPS]]
+    else:
+        print("Чемпионаты не пришли — линия будет собираться только по "
+              "видам спорта, то есть верхушкой (до 50 событий на вид).")
+        sample = [("sports", sid) for sid in sports]
+
     games: dict = {}
-    for sport_id in sports or [None]:
+    for key, value in sample:
         try:
-            chunk = parser._sport_games(base, "LineFeed", sport_id,
+            chunk = parser._chunk_games(base, "LineFeed", key, value,
                                         SAMPLE_PER_SPORT)
         except Exception as exc:  # noqa: BLE001
-            print(f"  вид спорта {sport_id}: ошибка {exc}")
+            print(f"  {key}={value}: ошибка {exc}")
             continue
         for game in chunk:
             gid = game.get("I")
@@ -79,7 +103,7 @@ def main() -> None:
 
     print("-" * 64)
     print(f"Полная роспись: беру {SAMPLE_FULL} событий")
-    subgames, parsed_subgames = 0, []
+    subgames, parsed_subgames, names = 0, [], []
     for ev in events[:SAMPLE_FULL]:
         try:
             full = parser._game_zip(base, "LineFeed", ev.game.get("I"))
@@ -93,9 +117,22 @@ def main() -> None:
             ev.game = {**ev.game, **full}
             ev.picks = picks
         subgames += len(full.get("SG") or [])
-        parsed_subgames.extend(_subgame_events(ev, full))
-    print(f"Подигр (таймы/периоды/сеты): {subgames}, из них с понятным "
-          f"периодом: {len(parsed_subgames)}")
+        # Рынки подигры лежат за отдельным запросом — её собственным
+        # GetGameZip; сколько подигр берёт сканер, задаёт MELBET_SUBGAMES.
+        for sub in _subgames(full):
+            try:
+                sub_full = parser._game_zip(base, "LineFeed", sub.get("I"))
+            except Exception as exc:  # noqa: BLE001
+                print(f"  подигра {sub.get('I')}: ошибка {exc}")
+                continue
+            parsed = _subgame_event(ev, {**sub, **(sub_full or {})})
+            if parsed is not None:
+                parsed_subgames.append(parsed)
+                names.append(_subgame_scope(sub))
+    print(f"Подигр в росписи: {subgames}, забрано с рынками: "
+          f"{len(parsed_subgames)}")
+    if names:
+        print("  области рынков подигр:", ", ".join(sorted(set(names))[:12]))
     events += parsed_subgames
 
     _print_codes(events)
@@ -116,7 +153,6 @@ def main() -> None:
 
     print("-" * 64)
     odds = []
-    import time
     now = time.time()
     for ev in events:
         odds.extend(parser._event_odds(ev, layout, now, False))
