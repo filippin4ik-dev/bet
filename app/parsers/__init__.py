@@ -4,7 +4,7 @@
 """
 import logging
 
-from ..config import BCGAME_ENABLED, LIGASTAVOK_ENABLED
+from ..config import BCGAME_ENABLED, LIGASTAVOK_ENABLED, MELBET_ENABLED
 from .base import BaseParser
 from .bcgame import BCGameParser
 from .betboom import BetBoomParser
@@ -12,23 +12,33 @@ from .betcity import BetcityParser
 from .fonbet import FonbetParser
 from .leon import LeonParser
 from .ligastavok import LigaStavokParser
+from .melbet import MelbetParser
 from .winline import WinlineParser
 
 log = logging.getLogger("parsers")
 
 BOOKMAKERS = ["Winline", "BetBoom", "Fonbet", "LeonBet", "Betcity"] + \
+    (["Melbet"] if MELBET_ENABLED else []) + \
     (["bc.game"] if BCGAME_ENABLED else []) + \
     (["Liga Stavok"] if LIGASTAVOK_ENABLED else [])
 
 _ls_notice_shown = False
 _bc_notice_shown = False
+_mb_notice_shown = False
 
 
 def get_parsers() -> list[BaseParser]:
-    global _ls_notice_shown, _bc_notice_shown
+    global _ls_notice_shown, _bc_notice_shown, _mb_notice_shown
     parsers: list[BaseParser] = [WinlineParser(), BetBoomParser(),
                                  FonbetParser(), LeonParser(),
                                  BetcityParser()]
+    if MELBET_ENABLED:
+        parsers.append(MelbetParser())
+    elif not _mb_notice_shown:
+        log.info(
+            "Melbet отключена (MELBET_ENABLED=0): её фид отвечает только "
+            "российским адресам. MELBET_ENABLED=1 — включить обратно.")
+        _mb_notice_shown = True
     if BCGAME_ENABLED:
         parsers.append(BCGameParser())
     elif not _bc_notice_shown:
