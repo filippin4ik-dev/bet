@@ -280,6 +280,21 @@ def default_login_type(bookmaker: str) -> str:
     return login_types(bookmaker)[0]
 
 
+def resolve_login_type(bookmaker: str, value: str | None) -> str:
+    """Способ входа, которым в эту БК можно войти на самом деле.
+
+    От `normalize_login_type` отличается тем, что проверяет не «знаем ли
+    мы такое слово», а принимает ли способ сама БК. Разница не
+    теоретическая: колонка `login_type` появилась у аккаунтов миграцией,
+    и всем записям, заведённым до выбора способа, досталось 'phone' —
+    включая bc.game, куда по телефону не входят вовсе. Без этой проверки
+    такой аккаунт искал бы на форме вкладку телефона, которой там нет, и
+    падал бы с «сайт изменил вёрстку» на ровном месте."""
+    allowed = login_types(bookmaker)
+    value = normalize_login_type(value, allowed[0])
+    return value if value in allowed else allowed[0]
+
+
 _BALANCE_RE = re.compile(r"([\d\s]{1,9}[.,]?\d{0,2})\s*(?:₽|руб)", re.I)
 
 # Общий признак виджета капчи (reCAPTCHA/hCaptcha/собственный виджет БК) —
@@ -376,7 +391,7 @@ _FIND_TEXT_VISIBLE_JS = """
 """
 
 
-def _env_prefix(bookmaker: str) -> str:
+def env_prefix(bookmaker: str) -> str:
     """«Liga Stavok» → LIGA_STAVOK, «bc.game» → BCGAME: приставка всех
     переменных окружения, которыми настраивают вход в эту БК."""
     return bookmaker.upper().replace(" ", "_").replace(".", "") \
@@ -384,7 +399,7 @@ def _env_prefix(bookmaker: str) -> str:
 
 
 def _selector(bookmaker: str, key: str) -> str:
-    env_key = f"{_env_prefix(bookmaker)}_{key.upper()}_SELECTOR"
+    env_key = f"{env_prefix(bookmaker)}_{key.upper()}_SELECTOR"
     return os.getenv(env_key, "") or SELECTORS.get(bookmaker, {}).get(key, "")
 
 
@@ -392,7 +407,7 @@ def _text_setting(bookmaker: str, key: str) -> str:
     """Настройка формы, которая не селектор, а видимый текст (название
     вкладки, надпись на кнопке). Переопределяется переменной окружения
     БЕЗ суффикса _SELECTOR: `WINLINE_TAB_LOGIN=Логин`."""
-    env_key = f"{_env_prefix(bookmaker)}_{key.upper()}"
+    env_key = f"{env_prefix(bookmaker)}_{key.upper()}"
     return os.getenv(env_key, "") or SELECTORS.get(bookmaker, {}).get(key, "")
 
 
@@ -419,7 +434,7 @@ def _proxy_for(bookmaker: str) -> str | None:
     в эту БК (см. предупреждение о Fonbet/ServicePipe в докстринге модуля
     и LIGASTAVOK_PROXY в app/config.py — та же идея, но per-БК и только
     для standalone-браузера аккаунтов, не для общего браузера сканера)."""
-    value = os.getenv(f"{_env_prefix(bookmaker)}_PROXY", "").strip()
+    value = os.getenv(f"{env_prefix(bookmaker)}_PROXY", "").strip()
     return value or None
 
 
@@ -554,8 +569,7 @@ class SeleniumGenericConnector(BookmakerConnector):
                 login_type: str = LOGIN_BY_PHONE):
         super().__init__(bookmaker, login, password, account_id=account_id,
                          cookies=cookies,
-                         login_type=normalize_login_type(
-                             login_type, default_login_type(bookmaker)))
+                         login_type=resolve_login_type(bookmaker, login_type))
         self._driver = None
 
     def _ensure_driver(self):
@@ -610,8 +624,9 @@ class SeleniumGenericConnector(BookmakerConnector):
                 EC.presence_of_element_located((By.CSS_SELECTOR, user_sel)))
         except Exception as exc:  # noqa: BLE001
             raise RuntimeError(
-                f"Не удалось найти поле входа {LOGIN_TYPE_NAMES[self.login_type]} "
-                f"у {self.bookmaker} (селектор {user_sel!r}) — сайт изменил "
+                f"Не удалось найти поле входа "
+                f"{LOGIN_TYPE_NAMES[self.login_type]} у {self.bookmaker} "
+                f"(селектор {user_sel!r}) — сайт изменил "
                 f"вёрстку или эта БК так не пускает. Что реально лежит в "
                 f"форме, покажет `python -m app.diagnose_account --form "
                 f"{self.bookmaker}`: {exc}") from exc
@@ -738,7 +753,7 @@ class SeleniumGenericConnector(BookmakerConnector):
             f"сайт показывает сейчас: "
             f"{', '.join(res.get('options') or []) or '— ни одной —'}. "
             f"Поправьте без правки кода: "
-            f"{_env_prefix(self.bookmaker)}_TAB_"
+            f"{env_prefix(self.bookmaker)}_TAB_"
             f"{'PHONE' if self.login_type == LOGIN_BY_PHONE else 'LOGIN'}"
             f"=<надпись>.")
 

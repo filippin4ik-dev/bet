@@ -59,18 +59,15 @@ import logging
 import os
 import sys
 
-from .connectors import (LOGIN_TYPE_NAMES, get_connector, login_types,
-                         national_phone, normalize_login_type)
+from .connectors import (LOGIN_TYPE_NAMES, env_prefix, get_connector,
+                         login_types, national_phone, normalize_login_type,
+                         resolve_login_type)
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
 BOOKMAKERS = ["Winline", "Melbet", "BetBoom", "Fonbet", "Liga Stavok",
               "bc.game"]
-
-
-def _env_prefix(bookmaker: str) -> str:
-    return bookmaker.upper().replace(" ", "_").replace(".", "").replace("-", "_")
 
 
 def _collect_accounts() -> list[dict]:
@@ -88,7 +85,7 @@ def _collect_accounts() -> list[dict]:
         })
 
     for bk in BOOKMAKERS:
-        prefix = _env_prefix(bk)
+        prefix = env_prefix(bk)
         login = os.getenv(f"{prefix}_TEST_LOGIN", "").strip()
         password = os.getenv(f"{prefix}_TEST_PASSWORD", "").strip()
         if login and password and not any(a["bookmaker"] == bk
@@ -106,8 +103,15 @@ def _collect_accounts() -> list[dict]:
 def check_one(bookmaker: str, login: str, password: str, cookies: str = "",
               login_type: str = "") -> bool:
     allowed = login_types(bookmaker)
-    login_type = normalize_login_type(login_type, allowed[0])
+    requested = normalize_login_type(login_type, allowed[0])
+    # То же приведение, что и внутри коннектора, — иначе напечатали бы
+    # один способ, а вошли бы другим.
+    login_type = resolve_login_type(bookmaker, login_type)
     print(f"\n=== {bookmaker} ===")
+    if requested != login_type:
+        print(f"ВНИМАНИЕ: {bookmaker} принимает только "
+              f"{', '.join(LOGIN_TYPE_NAMES[t] for t in allowed)} — "
+              f"вхожу {LOGIN_TYPE_NAMES[login_type]}")
     # Логин обрезаем, пароль и cookie не печатаем вовсе. Телефон
     # показываем в том виде, в каком его получит форма: половина
     # неудачных входов — это как раз лишний код страны.
@@ -115,9 +119,6 @@ def check_one(bookmaker: str, login: str, password: str, cookies: str = "",
     print(f"вход {LOGIN_TYPE_NAMES[login_type]}: {shown[:3]}*** "
           f"(пароль не выводится)"
           + (", cookie: задана (не выводится)" if cookies else ""))
-    if login_type not in allowed:
-        print(f"ВНИМАНИЕ: {bookmaker} принимает только "
-              f"{', '.join(LOGIN_TYPE_NAMES[t] for t in allowed)}")
     connector = get_connector(bookmaker, login, password,
                               cookies=cookies or None,
                               login_type=login_type)
@@ -204,14 +205,16 @@ def inspect_form(bookmaker: str) -> int:
               "проверять реальным аккаунтом (<БК>_TEST_LOGIN/"
               "_TEST_PASSWORD/_TEST_LOGIN_TYPE).")
         return 0
-    prefix = _env_prefix(bookmaker)
+    prefix = env_prefix(bookmaker)
     print("Что-то не сошлось. Поправьте, не трогая код:")
     print(f"  {prefix}_TAB_PHONE=<надпись вкладки>")
     print(f"  {prefix}_TAB_LOGIN=<надпись вкладки>")
     print(f"  {prefix}_USERNAME_PHONE_SELECTOR=<css>")
     print(f"  {prefix}_USERNAME_LOGIN_SELECTOR=<css>")
-    print(f"  {prefix}_PASSWORD_SELECTOR=<css>  {prefix}_SUBMIT_SELECTOR=<css>")
-    print(f"  {prefix}_BALANCE_SELECTOR=<css>   {prefix}_LOGIN_BUTTON_TEXT=…")
+    print(f"  {prefix}_PASSWORD_SELECTOR=<css>")
+    print(f"  {prefix}_SUBMIT_SELECTOR=<css>")
+    print(f"  {prefix}_BALANCE_SELECTOR=<css>")
+    print(f"  {prefix}_LOGIN_BUTTON_TEXT=<надпись кнопки в шапке сайта>")
     return 0
 
 

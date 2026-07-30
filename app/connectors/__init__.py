@@ -30,15 +30,14 @@ from .base import (LOGIN_BY_LOGIN, LOGIN_BY_PHONE, LOGIN_TYPE_NAMES,
                    national_phone, normalize_login_type)
 from .mock import MockConnector
 from .selenium_generic import (BOOKMAKER_CONNECTORS, default_login_type,
-                               login_types)
+                               env_prefix, login_types, resolve_login_type)
 
 
 def get_connector(bookmaker: str, login: str, password: str,
                   account_id: int | None = None,
                   cookies: str | None = None,
                   login_type: str | None = None) -> BookmakerConnector:
-    login_type = normalize_login_type(login_type,
-                                      default_login_type(bookmaker))
+    login_type = resolve_login_type(bookmaker, login_type)
     cls = BOOKMAKER_CONNECTORS.get(bookmaker, MockConnector)
     return cls(bookmaker, login, password, account_id=account_id,
                cookies=cookies, login_type=login_type)
@@ -47,6 +46,6 @@ def get_connector(bookmaker: str, login: str, password: str,
 __all__ = [
     "LOGIN_BY_LOGIN", "LOGIN_BY_PHONE", "LOGIN_TYPES", "LOGIN_TYPE_NAMES",
     "BetLeg", "BetResult", "BookmakerConnector", "MockConnector",
-    "default_login_type", "get_connector", "login_types", "national_phone",
-    "normalize_login_type",
+    "default_login_type", "env_prefix", "get_connector", "login_types",
+    "national_phone", "normalize_login_type", "resolve_login_type",
 ]

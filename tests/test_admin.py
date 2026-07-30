@@ -106,6 +106,125 @@ def test_account_cookies_roundtrip():
     print("OK: test_account_cookies_roundtrip")
 
 
+def test_account_login_type_roundtrip():
+    """Способ входа («по телефону» или «по логину») хранится вместе с
+    аккаунтом и, в отличие от логина с паролем, НЕ шифруется: это не
+    секрет, а настройка формы, и она нужна интерфейсу как есть."""
+    phone_acc = db.add_account("Winline", "89991234567", "pw",
+                               login_type="phone")
+    login_acc = db.add_account("Winline", "ivan_petrov", "pw",
+                               login_type="login")
+    assert db.get_account(phone_acc)["login_type"] == "phone"
+    assert db.get_account(login_acc)["login_type"] == "login"
+
+    # способ не указан — берётся дефолт (какие способы вообще принимает
+    # конкретная БК, решает API админки, а не база: см. add_account)
+    silent = db.add_account("Winline", "u3", "p3")
+    assert db.get_account(silent)["login_type"] == db.DEFAULT_LOGIN_TYPE
+
+    # смена способа у существующего аккаунта
+    db.update_account(phone_acc, login_type="login")
+    assert db.get_account(phone_acc)["login_type"] == "login"
+    # None — «не трогать», а не «сбросить»
+    db.update_account(phone_acc, label="переименован")
+    assert db.get_account(phone_acc)["login_type"] == "login"
+
+    for acc_id in (phone_acc, login_acc, silent):
+        db.delete_account(acc_id)
+    print("OK: test_account_login_type_roundtrip")
+
+
+def test_account_from_before_the_choice_gets_phone():
+    """Аккаунты, заведённые до появления выбора, миграция не должна
+    оставить с пустым способом: колонка добавляется с DEFAULT 'phone' —
+    именно так эти аккаунты и вводились (поле телефона у Winline/BetBoom
+    стояло в селекторах первым)."""
+    from app.security import encrypt_str
+    with db._connect() as conn:
+        cur = conn.execute(
+            """INSERT INTO bk_accounts
+               (bookmaker, label, login_enc, password_enc, enabled, created_at)
+               VALUES (?,?,?,?,1,?)""",
+            ("Winline", "старый", encrypt_str("u"), encrypt_str("p"),
+             "2026-01-01T00:00:00+00:00"))
+        old_id = cur.lastrowid
+    assert db.get_account(old_id)["login_type"] == "phone"
+    db.delete_account(old_id)
+    print("OK: test_account_from_before_the_choice_gets_phone")
+
+
+def test_api_offers_only_login_types_the_bookmaker_accepts():
+    """Админка спрашивает способ входа у сервера, а не хардкодит его:
+    предложить «по телефону» там, где БК его не принимает, — обречь
+    оператора разбираться, почему форма молча не отправляется."""
+    from app import admin_api
+    data = admin_api.bookmakers(username="admin")
+    assert "Melbet" in data["bookmakers"]
+    assert data["login_types"]["Winline"] == ["phone", "login"]
+    assert data["login_types"]["bc.game"] == ["login"]
+    assert set(data["login_type_names"]) == {"phone", "login"}
+    print("OK: test_api_offers_only_login_types_the_bookmaker_accepts")
+
+
+def test_api_rejects_login_type_the_bookmaker_does_not_accept():
+    """Невозможный способ входа отвергается на входе, а не тихо
+    подменяется: аккаунт, заведённый «по телефону» в bc.game, — это
+    опечатка оператора, и сказать о ней надо сразу."""
+    from fastapi import HTTPException
+
+    from app import accounts_manager, admin_api
+    # добавление аккаунта дёргает обновление баланса в фоне — в тестах
+    # это лишний headless-браузер, а проверяем мы не его
+    orig = accounts_manager.refresh_balance_async
+    accounts_manager.refresh_balance_async = lambda account_id: None
+    created = []
+    try:
+        try:
+            admin_api.add_account(
+                admin_api.AccountBody(bookmaker="bc.game", login="u@e.com",
+                                      password="pw", login_type="phone"),
+                username="admin")
+        except HTTPException as exc:
+            assert exc.status_code == 400
+            assert "по логину" in exc.detail
+        else:
+            raise AssertionError("bc.game не пускает по телефону")
+
+        res = admin_api.add_account(
+            admin_api.AccountBody(bookmaker="Melbet", login="89991234567",
+                                  password="pw", login_type="phone"),
+            username="admin")
+        created.append(res["id"])
+        assert db.get_account(res["id"])["login_type"] == "phone"
+
+        # способ не указан — дефолт БК, без выдумок
+        res = admin_api.add_account(
+            admin_api.AccountBody(bookmaker="bc.game", login="u@e.com",
+                                  password="pw"),
+            username="admin")
+        created.append(res["id"])
+        assert db.get_account(res["id"])["login_type"] == "login"
+
+        # смена способа у существующего аккаунта — та же проверка
+        admin_api.update_account(
+            created[0], admin_api.AccountUpdateBody(login_type="login"),
+            username="admin")
+        assert db.get_account(created[0])["login_type"] == "login"
+        try:
+            admin_api.update_account(
+                created[1], admin_api.AccountUpdateBody(login_type="phone"),
+                username="admin")
+        except HTTPException as exc:
+            assert exc.status_code == 400
+        else:
+            raise AssertionError("bc.game не пускает по телефону и здесь")
+    finally:
+        accounts_manager.refresh_balance_async = orig
+        for acc_id in created:
+            db.delete_account(acc_id)
+    print("OK: test_api_rejects_login_type_the_bookmaker_does_not_accept")
+
+
 def test_parse_cookie_string():
     from app.connectors.selenium_generic import _parse_cookie_string
     assert _parse_cookie_string("a=1; b=2") == [
@@ -378,6 +497,10 @@ if __name__ == "__main__":
     test_session_token_roundtrip()
     test_account_crud_and_balance()
     test_account_cookies_roundtrip()
+    test_account_login_type_roundtrip()
+    test_account_from_before_the_choice_gets_phone()
+    test_api_offers_only_login_types_the_bookmaker_accepts()
+    test_api_rejects_login_type_the_bookmaker_does_not_accept()
     test_parse_cookie_string()
     test_parse_local_storage_string()
     test_autobet_plan_without_accounts_is_zero()
