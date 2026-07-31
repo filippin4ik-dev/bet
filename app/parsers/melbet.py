@@ -84,10 +84,12 @@ app.diagnose_melbet`.
 словарь имён рынков — добавим.
 """
 import logging
+import re
 import time
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from urllib.parse import urlsplit
+from dataclasses import dataclass
+from urllib.parse import urljoin, urlsplit
 
 import requests
 
@@ -133,6 +135,96 @@ _GEO_STUB_MARKERS = (
     "отключите vpn", "disable vpn", "недоступен в", "вашей стране",
     "site-unavailable", "cloudflare_error_1000s_box",
 )
+# По чему узнаём страницу защиты от ботов. Она приходит с кодом 200 и
+# внешне не отличается от «не тот префикс», а лечится наоборот: адрес
+# верный, не хватает кук, которые защита ставит на самом сайте.
+_ANTIBOT_MARKERS = (
+    ("ddos-guard", "DDoS-Guard"),
+    ("qrator", "Qrator"),
+    ("just a moment", "Cloudflare"),
+    ("checking your browser", "Cloudflare"),
+    ("cf-browser-verification", "Cloudflare"),
+    ("__cf_chl", "Cloudflare"),
+    ("captcha", "капчи"),
+)
+_TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.S | re.I)
+# Сколько новых доменов принимаем за один перебор: переадресации умеют
+# ходить по кругу, и без потолка перебор мог бы не кончиться.
+_MAX_FOUND_HOSTS = 3
+# Поиск адреса фида по скриптам сайта — последняя попытка, когда ни один
+# известный адрес не сработал. Скрипты бывают многомегабайтные, поэтому
+# берём только первые и следим за общим объёмом.
+_SCRIPT_SRC_RE = re.compile(r"<script[^>]+src=[\"']([^\"']+)[\"']", re.I)
+# Бандл часто подключён не тегом script, а предзагрузкой:
+# <link rel="modulepreload" href="/main.a1b2.js">
+_SCRIPT_LINK_RE = re.compile(
+    r"<link[^>]+href=[\"']([^\"']+\.m?js(?:\?[^\"']*)?)[\"']", re.I)
+# Путь, по которому страница зовёт фид («…/service-api/LineFeed/…»): всё,
+# что стоит перед «/LineFeed», и есть искомая база.
+# Закрывающая скобка в начале — ради шаблонных строк: адрес в бандле часто
+# собирается как `${host}/service-api/LineFeed/…`, и тогда сам хост берём
+# от площадки, а из скрипта — только префикс пути.
+_FEED_BASE_RE = re.compile(
+    r"[\"'`}]((?:https?://[\w.-]+)?(?:/[\w.-]+)*?)/?(?:Line|Live)Feed", re.I)
+MAX_DISCOVER_SCRIPTS = 8
+MAX_DISCOVER_BYTES = 8 * 1024 * 1024
+
+
+def script_urls(page: str, host: str, limit: int) -> list[str]:
+    """Адреса скриптов страницы (относительные приводим к полному виду)."""
+    out: list[str] = []
+    for src in _SCRIPT_SRC_RE.findall(page) + _SCRIPT_LINK_RE.findall(page):
+        url = urljoin(host + "/", src)
+        if url not in out:
+            out.append(url)
+    return out[:limit]
+
+
+def feed_bases(text: str, host: str) -> list[str]:
+    """Базы фида, найденные в тексте скрипта."""
+    out: list[str] = []
+    for path in _FEED_BASE_RE.findall(text):
+        base = (path if path.startswith("http") else host + path).rstrip("/")
+        if base not in out:
+            out.append(base)
+    return out
+
+
+@dataclass
+class PageReason:
+    """Разбор страницы, пришедшей вместо фида."""
+
+    note: str
+    # адрес верный, но нужны куки с самого сайта — стоит прогреть сессию
+    warm_up: bool = False
+    # сайт увёл на другой домен: возможно, площадка переехала
+    host: str = ""
+
+
+def _page_text(resp: requests.Response) -> str:
+    """Начало ответа текстом. Кодировку берём из содержимого: сайт отдаёт
+    «text/html» без charset, и requests по стандарту читает такой ответ как
+    ISO-8859-1 — русский заголовок в нём превращается в кракозябры."""
+    raw = resp.content[:8000]
+    return raw.decode(resp.apparent_encoding or "utf-8", "replace")
+
+
+def _page_title(body: str) -> str:
+    m = _TITLE_RE.search(body)
+    return " ".join(m.group(1).split())[:80] if m else ""
+
+
+def _alive_hosts(notes: list[tuple[str, str]]) -> list[str]:
+    """Площадки, которые хоть что-то ответили: с них есть что скачивать."""
+    hosts: list[str] = []
+    for base, note in notes:
+        if "нет ответа" in note or "VPN" in note:
+            continue
+        parts = urlsplit(base)
+        host = f"{parts.scheme}://{parts.netloc}"
+        if host not in hosts:
+            hosts.append(host)
+    return hosts
 # Пауза перед повторной попыткой, когда фид оборвал соединение
 RETRY_PAUSE = 0.5
 # Если по чемпионатам собралось меньше этой доли линии — фид отвечал не
@@ -163,6 +255,12 @@ class MelbetParser(BaseParser):
         self._layout_note = ""
         # База -> когда она отдала пустую линию (см. EMPTY_BASE_BACKOFF).
         self._empty_bases: dict[str, float] = {}
+        # Домены, куда сайт увёл переадресацией: их пробуем сверх списка
+        # зеркал из настроек — площадки движка переезжают чаще, чем
+        # обновляются MELBET_HOSTS.
+        self._found_hosts: list[str] = []
+        # Скрипты сайта за один перебор читаем один раз: они весят мегабайты
+        self._discovered = False
         # Что ответило каждое зеркало на последнем переборе — для лога и
         # для app/diagnose_melbet.py.
         self.probe_notes: list[tuple[str, str]] = []
@@ -187,6 +285,18 @@ class MelbetParser(BaseParser):
             for prefix in API_PREFIXES:
                 bases.append(host + prefix)
         return bases
+
+    def _take_found_bases(self) -> list[str]:
+        """Базы на доменах, куда сайт увёл переадресацией (и сбрасывает их)."""
+        found, self._found_hosts = self._found_hosts, []
+        return [f"https://{host}{prefix}"
+                for host in found for prefix in API_PREFIXES]
+
+    def _remember_host(self, netloc: str) -> None:
+        known = {urlsplit(b).netloc for b in self._candidates()}
+        if netloc and netloc not in known and netloc not in self._found_hosts \
+                and len(self._found_hosts) < _MAX_FOUND_HOSTS:
+            self._found_hosts.append(netloc)
 
     def _order_candidates(self, now: float) -> list[str]:
         """Кандидаты по порядку: сначала те, что не сидят в «пустых»."""
@@ -213,10 +323,23 @@ class MelbetParser(BaseParser):
                                     f"перебор зеркал через {left:.0f} с")
             return None
         self._last_probe = now
+        self._discovered = False
         notes: list[tuple[str, str]] = []
         # Зеркала, которые недавно ответили пустой линией, пробуем в
         # последнюю очередь: они на связи, но толку от них сейчас нет.
-        for base in self._order_candidates(now):
+        queue = self._order_candidates(now)
+        tried: set[str] = set()
+        dead_hosts: set[str] = set()
+        while queue:
+            base = queue.pop(0)
+            if base in tried:
+                continue
+            tried.add(base)
+            host = urlsplit(base).netloc
+            if host in dead_hosts:
+                # До хоста не достучались — остальные префиксы того же
+                # хоста стучатся туда же и стоят ещё по таймауту каждый.
+                continue
             note = self._probe(base)
             if note is None:
                 log.info("Melbet: рабочая база фида — %s", base)
@@ -224,7 +347,19 @@ class MelbetParser(BaseParser):
                 self.probe_notes = notes + [(base, "линия отдана")]
                 self.status_note = ""
                 return base
+            if "нет ответа" in note:
+                dead_hosts.add(host)
             notes.append((base, note))
+            # Сайт мог переехать и увести нас на новый домен — пробуем и
+            # его: список зеркал в настройках стареет быстрее, чем сайт.
+            queue.extend(b for b in self._take_found_bases()
+                         if b not in tried)
+            if not queue:
+                # Известные адреса кончились. Последняя попытка: спросить у
+                # самого сайта — в его скриптах записан тот адрес, которым
+                # страница пользуется прямо сейчас.
+                queue.extend(b for b in self._discover_bases(notes)
+                             if b not in tried)
         self.probe_notes = notes
         self.status_note = ("ни одно зеркало не отдало линию: "
                             + "; ".join(f"{b} → {n}" for b, n in notes))
@@ -238,7 +373,7 @@ class MelbetParser(BaseParser):
             "; ".join(f"{b} → {n}" for b, n in notes))
         return None
 
-    def _probe(self, base: str) -> str | None:
+    def _probe(self, base: str, warmed: bool = False) -> str | None:
         """Пробный запрос к базе: None — работает, иначе причина отказа."""
         try:
             # Попыток больше, чем обычно: неудачная проверка гасит Melbet на
@@ -247,9 +382,14 @@ class MelbetParser(BaseParser):
             data = self._get(base, "LineFeed", "GetSportsShortZip",
                              self._sports_params(), 8, attempts=3)
         except requests.JSONDecodeError:
-            # Ответ есть, но это не фид: обычно так отвечает сам сайт —
-            # значит эндпоинты лежат под другим префиксом.
-            return "ответ не JSON (это страница сайта, а не фид)"
+            # Ответ есть, но это не фид. Причин ровно три, и лечатся они
+            # по-разному: не тот префикс, защита от ботов (её проходит
+            # прогретая сессия) или переезд домена. Различить их можно
+            # только по самой странице — идём смотреть.
+            page = self._page_reason(base)
+            if page.warm_up and not warmed and self._warm_up(base):
+                return self._probe(base, warmed=True)
+            return page.note
         except requests.RequestException as exc:
             resp = getattr(exc, "response", None)
             code = getattr(resp, "status_code", None)
@@ -269,6 +409,99 @@ class MelbetParser(BaseParser):
         if not (isinstance(data, dict) and data.get("Value")):
             return "ответ без списка видов спорта"
         return None
+
+    def _page_reason(self, base: str) -> PageReason:
+        """Что за страницу отдал сайт вместо фида.
+
+        Повторяем тот же запрос напрямую (без разбора JSON), чтобы увидеть
+        код, адрес после переадресаций и заголовок страницы. Один лишний
+        запрос — и только когда проверка уже провалилась."""
+        try:
+            resp = self.session.get(f"{base}/LineFeed/GetSportsShortZip",
+                                    params=self._sports_params(),
+                                    headers=self._headers(), timeout=8)
+        except requests.RequestException:
+            return PageReason("ответ не JSON (это страница сайта, а не фид)")
+        body = _page_text(resp)
+        low = body.lower()
+        for marker, guard in _ANTIBOT_MARKERS:
+            if marker in low:
+                return PageReason(
+                    f"вместо фида страница защиты {guard} — сайт принял "
+                    f"сервер за бота", warm_up=True)
+        landed = urlsplit(resp.url).netloc
+        asked = urlsplit(base).netloc
+        if landed and landed != asked:
+            self._remember_host(landed)
+            return PageReason(f"переадресация на {landed} — фида по этому "
+                              f"адресу нет, пробую этот домен", host=landed)
+        title = _page_title(body)
+        # Прогреться стоит и здесь: фид, закрытый кукой сайта, отвечает той
+        # же страницей приложения, что и неверный путь, — снаружи это одно
+        # и то же, а одна лишняя страница дешевле потерянного обхода.
+        return PageReason(
+            f"ответ не JSON: HTTP {resp.status_code}, "
+            + (f"страница «{title}»" if title else "страница сайта")
+            + " — не тот префикс базы либо нужны куки сайта",
+            warm_up=True)
+
+    def _discover_bases(self, notes: list[tuple[str, str]]) -> list[str]:
+        """Читает адрес фида из скриптов сайта — там он настоящий.
+
+        Зовём только когда все известные адреса провалились: список зеркал
+        в настройках стареет (домены движка переезжают, префикс пути они
+        тоже меняли), а страница всегда знает, куда ходить за линией.
+        Смотрим лишь площадки, которые вообще ответили: до остальных нет
+        связи, и скачивать с них нечего."""
+        if self._discovered:
+            return []
+        self._discovered = True
+        found: list[str] = []
+        for host in _alive_hosts(notes):
+            page = self._get_page(host + "/")
+            if page is None:
+                continue
+            budget = MAX_DISCOVER_BYTES
+            for url in script_urls(page, host, MAX_DISCOVER_SCRIPTS):
+                script = self._get_page(url, budget)
+                if script is None:
+                    continue
+                budget -= len(script)
+                for base in feed_bases(script, host):
+                    if base not in found:
+                        found.append(base)
+                if budget <= 0:
+                    break
+        if found:
+            log.info("Melbet: в скриптах сайта нашлись адреса фида: %s",
+                     ", ".join(found))
+        return found
+
+    def _get_page(self, url: str, limit: int = MAX_DISCOVER_BYTES) -> str | None:
+        try:
+            resp = self.session.get(url, headers=self._headers(), timeout=20)
+        except requests.RequestException:
+            return None
+        return resp.content[:limit].decode("utf-8", "replace")
+
+    def _warm_up(self, base: str) -> bool:
+        """Заходим на сам сайт, чтобы забрать куки защиты, и пробуем снова.
+
+        Защита от ботов у 1xBet-движка ставит куки на первой же странице, а
+        парсер до сих пор ходил сразу на эндпоинт фида — с точки зрения
+        защиты это «клиент без истории»."""
+        parts = urlsplit(base)
+        root = f"{parts.scheme}://{parts.netloc}/"
+        try:
+            resp = self.session.get(root, headers=self._headers(), timeout=10)
+        except requests.RequestException as exc:
+            log.info("Melbet: прогреть сессию на %s не вышло (%s)",
+                     root, type(exc).__name__)
+            return False
+        log.info("Melbet: %s отдала страницу вместо фида — зашёл на сайт за "
+                 "куками (%s, %d шт.) и пробую снова",
+                 parts.netloc, resp.status_code, len(self.session.cookies))
+        return True
 
     # ------------------------------------------------------------------
     # Параметры запросов

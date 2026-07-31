@@ -573,6 +573,9 @@ def _refusing_parser(status=406, body="", content_type="text/html"):
         raise requests.HTTPError("не принято", response=resp)
 
     parser.get_json = refuse
+    # Сайт отказывает целиком: без этой строки поиск адреса фида по
+    # скриптам (последняя попытка перебора) полез бы в настоящую сеть.
+    parser.session.get = refuse
     return parser
 
 
@@ -668,6 +671,105 @@ def test_failed_probe_is_not_repeated_every_cycle(monkeypatch):
     clock["now"] += 300
     assert parser._resolve_base() is None
     assert len(parser.probe_notes) == tried
+
+
+def _html_response(url: str, body: str, status: int = 200):
+    resp = requests.Response()
+    resp.status_code = status
+    resp._content = body.encode("utf-8")
+    resp.url = url
+    resp.headers["Content-Type"] = "text/html"
+    return resp
+
+
+def test_antibot_page_is_retried_with_cookies_from_the_site():
+    """Защита от ботов отвечает страницей с кодом 200 — снаружи это не
+    отличить от «не тот путь». Куки она ставит на самом сайте, а парсер
+    ходил сразу на эндпоинт фида: сначала заходим на страницу, потом
+    повторяем запрос."""
+    parser = MelbetParser()
+    seen = {"feed": 0, "root": 0}
+
+    def get_json(url, **_kw):
+        seen["feed"] += 1
+        if seen["feed"] == 1:
+            raise requests.JSONDecodeError("no json", "<html>", 0)
+        return {"Value": [{"I": 1}]}
+
+    def session_get(url, **_kw):
+        if url.endswith("/"):
+            seen["root"] += 1
+            return _html_response(url, "<html><title>Melbet</title></html>")
+        return _html_response(url, "<html><title>Just a moment…</title>"
+                                   "<div class='ddos-guard'></div></html>")
+
+    parser.get_json = get_json
+    parser.session.get = session_get
+    assert parser._probe(parser._candidates()[0]) is None
+    assert seen["root"] == 1, "перед повтором надо зайти на сайт за куками"
+
+
+def test_site_that_moved_is_followed_to_the_new_domain():
+    """Площадки движка переезжают чаще, чем правят MELBET_HOSTS. Если сайт
+    увёл запрос на другой домен — пробуем фид там же, а не отчитываемся
+    «ни одно зеркало не ответило»."""
+    parser = MelbetParser()
+
+    def get_json(url, **_kw):
+        if "new-melbet.com" in url:
+            return {"Value": [{"I": 1}]}
+        raise requests.JSONDecodeError("no json", "<html>", 0)
+
+    parser.get_json = get_json
+    parser.session.get = lambda url, **_kw: _html_response(
+        "https://new-melbet.com/ru/", "<html><title>Мелбет</title></html>")
+    base = parser._resolve_base(force=True)
+    assert base and "new-melbet.com" in base
+
+
+def test_feed_address_is_read_from_the_site_scripts():
+    """Когда ни один известный адрес не сработал, спрашиваем сам сайт: в
+    его скриптах записан тот путь, которым страница ходит за линией прямо
+    сейчас. Иначе переезд префикса лечится только правкой настроек на
+    сервере — а узнать новый префикс снаружи неоткуда."""
+    parser = MelbetParser()
+
+    def get_json(url, **_kw):
+        if "/sport-api/" in url:
+            return {"Value": [{"I": 1}]}
+        raise requests.JSONDecodeError("no json", "<html>", 0)
+
+    def session_get(url, **_kw):
+        if url.endswith("/"):
+            return _html_response(
+                url, '<html><script src="/main.js"></script></html>')
+        if url.endswith("main.js"):
+            # шаблонная строка: хост подставляется переменной, в скрипте
+            # лежит только префикс пути
+            return _html_response(
+                url, "fetch(`${host}/sport-api/LineFeed/GetSportsShortZip`)")
+        return _html_response(url, "<html><title>Мелбет</title></html>")
+
+    parser.get_json = get_json
+    parser.session.get = session_get
+    base = parser._resolve_base(force=True)
+    assert base and base.endswith("/sport-api"), base
+
+
+def test_unreachable_host_is_not_probed_once_per_prefix(monkeypatch):
+    """До хоста не достучались — остальные префиксы того же хоста стучатся
+    туда же и стоят ещё по таймауту каждый. Ровно это и получил боевой
+    сервер: международные зеркала из России недоступны, и перебор тратил
+    вдвое больше времени, чем нужно."""
+    monkeypatch.setattr("app.parsers.melbet.RETRY_PAUSE", 0)
+    parser = MelbetParser()
+    parser.get_json = lambda *a, **kw: (_ for _ in ()).throw(
+        requests.ConnectTimeout("нет связи"))
+    assert parser._resolve_base(force=True) is None
+    hosts = [b.split("/")[2] for b, _n in parser.probe_notes]
+    assert len(hosts) == len(set(hosts)), \
+        f"каждый хост проверяется один раз, а не по разу на префикс: {hosts}"
+    assert all("нет ответа" in note for _b, note in parser.probe_notes)
 
 
 def test_mirror_that_answers_but_gives_no_line_is_set_aside(monkeypatch):
