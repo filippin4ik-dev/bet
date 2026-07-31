@@ -63,6 +63,7 @@ const els = {
   betSummary: document.getElementById("bet-summary"),
   betLimit: document.getElementById("bet-limit"),
   betOpenBoth: document.getElementById("bet-open-both"),
+  betSave: document.getElementById("bet-save"),
   betAutobet: document.getElementById("bet-autobet"),
   betAutobetResult: document.getElementById("bet-autobet-result"),
   bet3Modal: document.getElementById("bet3-modal"),
@@ -85,12 +86,23 @@ const els = {
   bet3Summary: document.getElementById("bet3-summary"),
   bet3Limit: document.getElementById("bet3-limit"),
   bet3OpenAll: document.getElementById("bet3-open-all"),
+  bet3Save: document.getElementById("bet3-save"),
   bet3Autobet: document.getElementById("bet3-autobet"),
   bet3AutobetResult: document.getElementById("bet3-autobet-result"),
+  profileLink: document.getElementById("profile-link"),
+  profileName: document.getElementById("profile-name"),
+  profileBalance: document.getElementById("profile-balance"),
+  logoutBtn: document.getElementById("logout-btn"),
 };
 
 let soundAlertProfit = 2.5;
 let alertedKeys = new Set(); // вилки, о которых уже «пропищали»
+// Игрок, под которым вошли (null — вошли администратором или по общему
+// паролю: профиля у такого входа нет, сохранять ставки некуда).
+let profile = null;
+// Видна ли авто-ставка. По умолчанию спрятана целиком (AUTOBET_UI на
+// сервере), но код и кнопки остались на месте.
+let autobetUi = false;
 
 /* ---------- цвета букмекеров ---------- */
 
@@ -462,6 +474,68 @@ function toast(message, kind = "") {
   setTimeout(() => el.remove(), 3200);
 }
 
+/* ---------- профиль игрока: имя и баланс в шапке ---------- */
+
+/* Кто вошёл, знает только сервер: под учёткой игрока — показываем имя,
+ * баланс и кнопку «Сохранить ставку»; администратором или по общему
+ * паролю — профиля нет, и сохранять ставку некуда. */
+async function loadProfile() {
+  try {
+    const resp = await fetch("/api/profile/me", { credentials: "same-origin" });
+    profile = resp.ok ? (await resp.json()).player : null;
+  } catch (_) {
+    profile = null;   // нет связи — шапка просто без профиля
+  }
+  renderProfile();
+}
+
+function renderProfile() {
+  els.profileLink.hidden = !profile;
+  if (profile) {
+    els.profileName.textContent = `👤 ${profile.name}`;
+    els.profileBalance.textContent = fmtMoney(Math.round(profile.balance));
+  }
+  els.betSave.hidden = !profile;
+  els.bet3Save.hidden = !profile;
+}
+
+/* Сохранение поставленной вилки в профиль. Суммы плеч уходят те же, что
+ * человек видит в модалке: прибыль сервер пересчитает по ним сам. */
+async function saveBet(btn, body) {
+  btn.disabled = true;
+  const original = btn.textContent;
+  btn.textContent = "Сохраняем…";
+  try {
+    const resp = await fetch("/api/profile/bets", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.detail || resp.statusText);
+    profile = data.player;
+    renderProfile();
+    btn.textContent = "✓ Сохранено";
+    toast(`Ставка в профиле. Прибыль +${fmtMoney(Math.round(data.profit))}, ` +
+      `баланс ${fmtMoney(Math.round(data.player.balance))}`);
+    setTimeout(() => { btn.textContent = original; }, 1600);
+  } catch (err) {
+    btn.textContent = original;
+    toast(err.message || "Не удалось сохранить ставку", "error");
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+els.logoutBtn.addEventListener("click", async () => {
+  try {
+    await fetch("/api/access/logout", {
+      method: "POST", credentials: "same-origin" });
+  } catch (_) { /* даже если сеть отвалилась — уводим на форму входа */ }
+  location.replace("/login");
+});
+
 /* Закреплённые вилки: клик по строке «пришпиливает» её к верху таблицы —
  * она стоит на месте и обведена, пока жива. Пропала из обновления —
  * исчезает из таблицы (и открепляется). Особенно нужно в лайве, где
@@ -639,7 +713,8 @@ function renderBetModal() {
     : "Укажите сумму ставки";
 
   renderLimit(els.betLimit, a.max_stake);
-  els.betAutobet.hidden = !isLiveView(state.view);
+  els.betSave.hidden = !profile;
+  els.betAutobet.hidden = !autobetUi || !isLiveView(state.view);
   els.betAutobetResult.hidden = true;
 }
 
@@ -747,6 +822,27 @@ els.betOpenBoth.addEventListener("click", () => {
   if (betArb.k1_url) window.open(betArb.k1_url, "_blank", "noopener");
 });
 
+els.betSave.addEventListener("click", () => {
+  if (!betArb) return;
+  const bank = Math.max(0, parseFloat(els.betBank.value) || 0);
+  const st = calcBetStakes(betArb.k1_max, betArb.k2_max, bank);
+  saveBet(els.betSave, {
+    match_key: betArb.match_key,
+    kind: betArb.kind,
+    kind3: false,
+    sport: betArb.sport,
+    match: betArb.match,
+    market: betArb.market,
+    profit_pct: betArb.profit_pct,
+    legs: [
+      { bookmaker: betArb.k1_bookmaker, outcome: betArb.outcome1,
+        odds: betArb.k1_max, stake: st.stake1 },
+      { bookmaker: betArb.k2_bookmaker, outcome: betArb.outcome2,
+        odds: betArb.k2_max, stake: st.stake2 },
+    ],
+  });
+});
+
 els.betAutobet.addEventListener("click", async () => {
   if (!betArb) return;
   els.betAutobet.disabled = true;
@@ -824,7 +920,8 @@ function renderBet3Modal() {
     : "Укажите сумму ставки";
 
   renderLimit(els.bet3Limit, a.max_stake);
-  els.bet3Autobet.hidden = !isLiveView(state.view);
+  els.bet3Save.hidden = !profile;
+  els.bet3Autobet.hidden = !autobetUi || !isLiveView(state.view);
   els.bet3AutobetResult.hidden = true;
 }
 
@@ -880,6 +977,29 @@ els.bet3OpenAll.addEventListener("click", () => {
   if (bet3Arb.k2_url) window.open(bet3Arb.k2_url, "_blank", "noopener");
   if (bet3Arb.kx_url) window.open(bet3Arb.kx_url, "_blank", "noopener");
   if (bet3Arb.k1_url) window.open(bet3Arb.k1_url, "_blank", "noopener");
+});
+
+els.bet3Save.addEventListener("click", () => {
+  if (!bet3Arb) return;
+  const bank = Math.max(0, parseFloat(els.bet3Bank.value) || 0);
+  const st = calcBetStakes3(bet3Arb.k1_max, bet3Arb.kx_max, bet3Arb.k2_max, bank);
+  saveBet(els.bet3Save, {
+    match_key: bet3Arb.match_key,
+    kind: bet3Arb.kind,
+    kind3: true,
+    sport: bet3Arb.sport,
+    match: bet3Arb.match,
+    market: "Исход (1X2)",
+    profit_pct: bet3Arb.profit_pct,
+    legs: [
+      { bookmaker: bet3Arb.k1_bookmaker, outcome: "П1",
+        odds: bet3Arb.k1_max, stake: st.stake1 },
+      { bookmaker: bet3Arb.kx_bookmaker, outcome: "X",
+        odds: bet3Arb.kx_max, stake: st.stakex },
+      { bookmaker: bet3Arb.k2_bookmaker, outcome: "П2",
+        odds: bet3Arb.k2_max, stake: st.stake2 },
+    ],
+  });
 });
 
 els.bet3Autobet.addEventListener("click", async () => {
@@ -952,6 +1072,7 @@ async function poll() {
     const data = await resp.json();
 
     soundAlertProfit = data.sound_alert_profit ?? 2.5;
+    autobetUi = !!data.autobet_ui;
     els.soundThreshold.textContent = soundAlertProfit;
     els.interval.textContent = data.scan_interval;
 
@@ -1166,4 +1287,5 @@ els.viewTabs.querySelectorAll("button").forEach(
   (b) => b.classList.toggle("active", b.dataset.view === state.view));
 updateVisibility();
 
+loadProfile();
 restartPolling();

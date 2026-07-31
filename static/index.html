@@ -18,8 +18,14 @@
         <span class="sub" id="mode-sub">прематч и лайв</span>
       </h1>
       <div class="header-actions">
+        <a href="/profile" class="ghost-btn profile-chip" id="profile-link" hidden
+           title="Профиль: баланс и сохранённые ставки">
+          <span id="profile-name">Профиль</span>
+          <b id="profile-balance"></b>
+        </a>
         <button type="button" class="icon-btn" id="theme-toggle" title="Сменить тему">🌙</button>
         <a href="/admin" class="ghost-btn" id="admin-link">⚙ Админка</a>
+        <button type="button" class="ghost-btn" id="logout-btn" title="Выйти с сайта">Выйти</button>
       </div>
     </div>
 
@@ -233,6 +239,8 @@
 
       <div class="bet-actions">
         <button id="bet-open-both" type="button">Открыть обе БК ↗</button>
+        <button id="bet-save" type="button" class="save-bet-btn" hidden
+                title="Записать эту вилку в свой профиль и увеличить баланс на прибыль">💾 Сохранить ставку</button>
         <button id="bet-autobet" type="button" class="autobet-btn" hidden>⚡ Авто-ставка (лайв)</button>
       </div>
       <div class="autobet-result" id="bet-autobet-result" hidden></div>
@@ -241,7 +249,8 @@
         Ставки размещаются вручную на сайтах БК: страницы матчей откроются в
         новых вкладках, суммы уже посчитаны — кликните нужный кэф и вставьте
         сумму в купон. Перед ставкой сверьте кэфы: если они изменились, вилка
-        могла исчезнуть.
+        могла исчезнуть. Поставили — нажмите «Сохранить ставку»: вилка ляжет
+        в ваш профиль, а баланс вырастет на её прибыль.
       </p>
     </div>
   </div>
@@ -306,6 +315,8 @@
 
       <div class="bet-actions">
         <button id="bet3-open-all" type="button">Открыть все 3 БК ↗</button>
+        <button id="bet3-save" type="button" class="save-bet-btn" hidden
+                title="Записать эту вилку в свой профиль и увеличить баланс на прибыль">💾 Сохранить ставку</button>
         <button id="bet3-autobet" type="button" class="autobet-btn" hidden>⚡ Авто-ставка (лайв)</button>
       </div>
       <div class="autobet-result" id="bet3-autobet-result" hidden></div>
@@ -314,7 +325,8 @@
         Три плеча — на исход 1, ничью и исход 2 (рынок «Исход 1X2»). Ставки
         размещаются вручную на сайтах БК: страницы матчей откроются в новых
         вкладках, суммы уже посчитаны. Перед ставкой сверьте кэфы: если они
-        изменились, вилка могла исчезнуть.
+        изменились, вилка могла исчезнуть. Поставили — нажмите «Сохранить
+        ставку»: вилка ляжет в ваш профиль, а баланс вырастет на её прибыль.
       </p>
     </div>
   </div>

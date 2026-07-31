@@ -48,6 +48,18 @@ const els = {
   limitFraction: document.getElementById("limit-fraction"),
   limitMax: document.getElementById("limit-max"),
   betlogBody: document.getElementById("betlog-body"),
+  panelAutobet: document.getElementById("panel-autobet"),
+  panelBetlog: document.getElementById("panel-betlog"),
+  navAutobet: document.getElementById("nav-autobet"),
+  navBetlog: document.getElementById("nav-betlog"),
+  playersBody: document.getElementById("players-body"),
+  playersNote: document.getElementById("players-note"),
+  playerForm: document.getElementById("player-form"),
+  playerUsername: document.getElementById("player-username"),
+  playerPassword: document.getElementById("player-password"),
+  playerName: document.getElementById("player-name"),
+  playerBalance: document.getElementById("player-balance"),
+  playerError: document.getElementById("player-error"),
   toastHost: document.getElementById("toast-host"),
 };
 
@@ -345,8 +357,22 @@ els.accountForm.addEventListener("submit", async (e) => {
   }
 });
 
+/* Авто-ставки временно спрятаны от всех (AUTOBET_UI на сервере): разделы
+ * «Авто-ставки» и «Журнал ставок» не показываем и не грузим. Механизм при
+ * этом цел — вернуть интерфейс можно одной переменной окружения. */
+let autobetUi = false;
+
+function applyAutobetVisibility() {
+  for (const el of [els.panelAutobet, els.panelBetlog,
+                    els.navAutobet, els.navBetlog]) {
+    if (el) el.hidden = !autobetUi;
+  }
+}
+
 async function loadSettings() {
   const s = await api("/api/admin/settings");
+  autobetUi = !!s.autobet_ui;
+  applyAutobetVisibility();
   els.settingEnabled.checked = s.autobet_enabled;
   els.settingDryRun.checked = s.autobet_dry_run;
   els.limitFraction.textContent = `${Math.round(s.autobet_max_balance_fraction * 100)}%`;
@@ -354,6 +380,114 @@ async function loadSettings() {
   els.settingLiveEnabled.checked = s.live_enabled;
   renderScannerState(s);
 }
+
+/* ---------- игроки: учётные записи для входа на сайт ---------- */
+
+function fmtRub(v) {
+  return `${Math.round(Number(v || 0)).toLocaleString("ru-RU")} ₽`;
+}
+
+function renderPlayers(list) {
+  const off = list.filter((p) => !p.enabled).length;
+  els.playersNote.textContent = list.length
+    ? `учёток: ${list.length}${off ? `, из них выключено ${off}` : ""}`
+    : "ни одной учётки — войти можно только реквизитами администратора";
+  els.playersNote.className = `panel-note ${list.length ? "ok" : "warn"}`;
+
+  els.playersBody.innerHTML = list.length ? list.map((p) => `
+    <tr class="${p.enabled ? "" : "row-blocked"}">
+      <td><b>${escapeHtml(p.username)}</b></td>
+      <td>${escapeHtml(p.display_name || "")}</td>
+      <td>${fmtRub(p.start_balance)}</td>
+      <td class="${p.profit >= 0 ? "ok-text" : "err-text"}">${p.profit >= 0 ? "+" : ""}${fmtRub(p.profit)}</td>
+      <td><b>${fmtRub(p.balance)}</b></td>
+      <td>${p.bets_count}</td>
+      <td>${escapeHtml(fmtDate(p.last_login_at))}</td>
+      <td><input type="checkbox" class="player-enabled" data-id="${p.id}"
+                 ${p.enabled ? "checked" : ""}></td>
+      <td>
+        <button class="player-password" data-id="${p.id}"
+                title="Задать новый пароль и продиктовать его игроку">Пароль</button>
+        <button class="player-delete" data-id="${p.id}"
+                data-name="${escapeHtml(p.username)}">Удалить</button>
+      </td>
+    </tr>`).join("")
+    : '<tr><td colspan="9" class="muted">Игроков нет. Заведите учётку — '
+      + 'без неё на сайт пускает только вход администратора.</td></tr>';
+}
+
+async function loadPlayers() {
+  const { players } = await api("/api/admin/players");
+  renderPlayers(players);
+}
+
+els.playerForm.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  els.playerError.hidden = true;
+  try {
+    await api("/api/admin/players", {
+      method: "POST",
+      body: JSON.stringify({
+        username: els.playerUsername.value,
+        password: els.playerPassword.value,
+        display_name: els.playerName.value,
+        start_balance: parseFloat(els.playerBalance.value) || 0,
+      }),
+    });
+    toast(`Игрок ${els.playerUsername.value.trim()} заведён — передайте ему `
+      + "логин и пароль");
+    els.playerUsername.value = "";
+    els.playerPassword.value = "";
+    els.playerName.value = "";
+    await loadPlayers();
+  } catch (err) {
+    els.playerError.textContent = err.message || "Не удалось завести игрока";
+    els.playerError.hidden = false;
+  }
+});
+
+els.playersBody.addEventListener("click", async (e) => {
+  const btn = e.target.closest("button[data-id]");
+  if (!btn) return;
+  const id = btn.dataset.id;
+  try {
+    if (btn.classList.contains("player-password")) {
+      const password = window.prompt(
+        "Новый пароль для игрока (продиктуйте его сами — обратно из базы "
+        + "пароль не достать):");
+      if (!password) return;
+      await api(`/api/admin/players/${id}`, {
+        method: "PUT",
+        body: JSON.stringify({ password }),
+      });
+      toast("Пароль изменён");
+    } else if (btn.classList.contains("player-delete")) {
+      if (!confirm(`Удалить игрока ${btn.dataset.name} вместе с его журналом `
+        + "ставок? Отменить это будет нечем.")) return;
+      await api(`/api/admin/players/${id}`, { method: "DELETE" });
+      toast("Игрок удалён");
+    }
+  } catch (err) {
+    toast(err.message || "Не удалось изменить", "error");
+  }
+  await loadPlayers();
+});
+
+els.playersBody.addEventListener("change", async (e) => {
+  const box = e.target.closest(".player-enabled");
+  if (!box) return;
+  try {
+    await api(`/api/admin/players/${box.dataset.id}`, {
+      method: "PUT",
+      body: JSON.stringify({ enabled: box.checked }),
+    });
+    toast(box.checked ? "Игрок включён" : "Игрок выключен — войти он не сможет");
+  } catch (err) {
+    box.checked = !box.checked;
+    toast(err.message || "Не удалось изменить", "error");
+  }
+  await loadPlayers();
+});
 
 function renderScannerState(s) {
   // Выключение вступает в силу не мгновенно: БК сначала докачивают то, что
@@ -571,22 +705,21 @@ function renderAccess(s) {
   els.accessWhitelist.value = (s.whitelist || []).join("\n");
   els.accessBlacklist.value = (s.ip_blacklist || []).join("\n");
   els.accessIpOnly.checked = !!s.ip_only;
-  const parts = [];
-  if (!s.gate_enabled) {
-    parts.push("Сайт открыт всем, кто знает адрес сервера");
-    els.accessState.className = "panel-note warn";
-  } else {
-    parts.push(s.password_set
-      ? (s.password_source === "db" ? "Пароль задан в админке"
-        : "Пароль из переменной SITE_PASSWORD")
-      : "Пароль не задан");
-    if (s.whitelist.length) {
-      parts.push(s.ip_only
-        ? `только ${s.whitelist.length} адрес(ов) из списка`
-        : `${s.whitelist.length} адрес(ов) входят без пароля`);
-    }
-    els.accessState.className = "panel-note ok";
+  // Сайт закрыт всегда — состояние отвечает не «закрыт ли», а «чем
+  // именно открывается»: учётки игроков, запасной пароль, ограничения по IP.
+  const parts = [s.players_count
+    ? `Учёток игроков: ${s.players_count}`
+    : "Учёток игроков нет — пускает только вход администратора"];
+  parts.push(s.password_set
+    ? (s.password_source === "db" ? "запасной пароль задан в админке"
+      : "запасной пароль из переменной SITE_PASSWORD")
+    : "запасного пароля нет");
+  if (s.whitelist.length) {
+    parts.push(s.ip_only
+      ? `строгий режим: только ${s.whitelist.length} адрес(ов) из списка`
+      : `в списке ${s.whitelist.length} адрес(ов)`);
   }
+  els.accessState.className = `panel-note ${s.players_count ? "ok" : "warn"}`;
   if (s.current_ip) parts.push(`ваш адрес ${s.current_ip}`);
   els.accessState.textContent = parts.join(" · ");
 }
@@ -654,9 +787,9 @@ function visitorTags(v, data) {
   const tags = [`<span class="tag">${escapeHtml(v.kind)}</span>`];
   if (v.device_id === data.my_device) tags.push('<span class="tag me">это вы</span>');
   if (v.admin) tags.push('<span class="tag admin">админка</span>');
-  // «по паролю» у админского устройства не пишем: сессия админки открывает
+  // «вошёл» у админского устройства не пишем: сессия админки открывает
   // сайт сама, и пометка только сбивала бы с толку
-  else if (v.authed) tags.push('<span class="tag" title="Вошёл по паролю доступа">по паролю</span>');
+  else if (v.authed) tags.push('<span class="tag" title="Есть действующая сессия: учётка игрока или общий пароль">вошёл</span>');
   if (v.blocked) {
     tags.push(v.block_reason === "twin"
       ? '<span class="tag banned" title="Вернулось тем же браузером с того же адреса, но уже без cookie">забанен (вернулся)</span>'
@@ -771,6 +904,7 @@ els.bannedIps.addEventListener("click", async (e) => {
 });
 
 async function loadBetLog() {
+  if (!autobetUi) return;   // раздел спрятан — незачем и грузить
   const { log } = await api("/api/admin/bet_log?limit=100");
   els.betlogBody.innerHTML = log.length ? "" :
     '<tr><td colspan="7" class="muted">Ставок пока не было.</td></tr>';
@@ -797,7 +931,10 @@ async function loadAll() {
   // сложился — это не повод не показать админку: без него выбор просто
   // предложит оба способа вместо списка конкретной БК.
   await loadBookmakers().catch(() => {});
-  await Promise.all([loadAccounts(), loadSettings(), loadParsers(),
+  // Настройки — раньше журнала ставок: по ним видно, показывать ли раздел
+  // авто-ставок вообще (сейчас он спрятан, см. applyAutobetVisibility).
+  await loadSettings();
+  await Promise.all([loadAccounts(), loadPlayers(), loadParsers(),
                      loadAccess(), loadVisitors(), loadBetLog()]);
 }
 

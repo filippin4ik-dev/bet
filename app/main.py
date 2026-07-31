@@ -18,6 +18,7 @@ from .admin_api import require_admin
 from .admin_api import router as admin_router
 from .config import LIVE_ENABLED, SOUND_ALERT_PROFIT
 from .models import KIND_LIVE, KIND_PREMATCH
+from .profile_api import router as profile_router
 from .runtime import balance_loop, live_scanner, scanner
 from .scanner import Scanner
 
@@ -39,16 +40,16 @@ async def lifespan(app: FastAPI):
     log.info("Лайв-сканер %s (переключается в админке)",
              "включён" if config.LIVE_ENABLED else
              "выключен — все ресурсы прематчу")
-    if access.gate_enabled():
-        log.info("Доступ к сайту закрыт: пароль %s, адресов в белом списке "
-                 "%d%s", "задан" if access.password_set() else "не задан",
-                 len(access.whitelist()),
-                 ", строгий режим (только свои IP)" if access.ip_only() else "")
-    else:
+    accounts = db.count_players()
+    log.info("Вход на сайт по логину и паролю: заведено учёток игроков %d, "
+             "общий пароль %s%s", accounts,
+             "задан" if access.password_set() else "не задан",
+             ", строгий режим (только свои IP)" if access.ip_only() else "")
+    if not accounts:
         log.warning(
-            "Сайт открыт всем, кто знает адрес сервера: вилки, линия всех БК "
-            "и страница входа в админку. Задайте пароль доступа в админке "
-            "(раздел «Доступ к сайту») или переменной SITE_PASSWORD.")
+            "Учётных записей игроков нет — войти можно только реквизитами "
+            "администратора (ADMIN_USERNAME/ADMIN_PASSWORD). Заведите "
+            "игроков в админке, раздел «Игроки».")
     # Лайв-сканер запускается всегда: он сам простаивает, пока выключен, и
     # поднимает воркеры, как только его включили из админки.
     tasks = [asyncio.create_task(scanner.run()),
@@ -66,6 +67,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Сканер вилок (двухисходные рынки)", lifespan=lifespan)
 app.include_router(admin_router)
 app.include_router(access_router)
+app.include_router(profile_router)
 
 # Что доступно БЕЗ пароля: сама страница входа, её стили/скрипт и ручки
 # входа. Остальная статика (app.js, admin.js) закрыта вместе с сайтом.
@@ -141,7 +143,7 @@ async def _gated_response(request: Request, call_next, *, ip: str,
                             headers={"Cache-Control": "no-cache"})
     if api:
         return JSONResponse(
-            {"detail": "Требуется вход: сайт закрыт паролем."},
+            {"detail": "Требуется вход: сайт открыт по логину и паролю."},
             status_code=401)
     nxt = path
     if request.url.query:
@@ -186,6 +188,7 @@ def get_arbs(
     snap["arbs_1x2"] = _with_limits(
         snap["arbs_1x2"], "k1_bookmaker", "k2_bookmaker", "kx_bookmaker")
     snap["sound_alert_profit"] = SOUND_ALERT_PROFIT
+    snap["autobet_ui"] = config.AUTOBET_UI
     return snap
 
 
@@ -255,6 +258,7 @@ def get_live_arbs(
     snap["sound_alert_profit"] = SOUND_ALERT_PROFIT
     snap["autobet_enabled"] = config.AUTOBET_ENABLED
     snap["autobet_dry_run"] = config.AUTOBET_DRY_RUN
+    snap["autobet_ui"] = config.AUTOBET_UI
     return snap
 
 
@@ -294,9 +298,11 @@ def autobet_place(
     """Ставит (или имитирует — см. AUTOBET_DRY_RUN) вилку по её match_key.
 
     Требует вход в админку (мутирует реальные деньги при выключенном
-    dry-run). Кнопка «Поставить» на фронтенде отправляет сюда именно
-    match_key активной вилки — сумма ставки считается на СЕРВЕРЕ по
-    актуальным кэфам и балансам, а не приходит с клиента."""
+    dry-run). Кнопка авто-ставки отправляет сюда именно match_key активной
+    вилки — сумма ставки считается на СЕРВЕРЕ по актуальным кэфам и
+    балансам, а не приходит с клиента. Саму кнопку по умолчанию не видно
+    (AUTOBET_UI=0), но ручка остаётся рабочей: функция спрятана, а не
+    выключена."""
     if not config.AUTOBET_ENABLED:
         raise HTTPException(
             status_code=403,
@@ -338,9 +344,16 @@ def admin_page():
                         headers={"Cache-Control": "no-cache"})
 
 
+@app.get("/profile")
+def profile_page():
+    """Профиль игрока: баланс, сохранённые ставки, прибыль."""
+    return FileResponse(STATIC_DIR / "profile.html",
+                        headers={"Cache-Control": "no-cache"})
+
+
 @app.get("/login")
 def login_page(request: Request):
-    """Страница ввода пароля доступа. Уже впущенных — сразу на сайт."""
+    """Страница входа по логину и паролю. Уже впущенных — сразу на сайт."""
     allowed, reason = access.check_request(request)
     if allowed:
         return RedirectResponse("/")

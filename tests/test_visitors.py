@@ -211,13 +211,13 @@ def test_forgotten_device_is_unbanned_and_gone():
     print("OK: test_forgotten_device_is_unbanned_and_gone")
 
 
-def test_ip_ban_closes_open_site():
-    """Бан адреса работает и на открытом сайте — иначе, чтобы выгнать
-    одного, пришлось бы закрывать сайт паролем от всех."""
+def test_ip_ban_names_its_own_reason():
+    """Забаненный адрес получает «banned», а не общее «войдите»: по этой
+    причине шлюз показывает страницу блокировки, и с формой входа она
+    ничего общего не имеет — вводить логин такому гостю бессмысленно."""
     _fresh()
     access.clear_password()
     access.set_whitelist("")
-    assert access.gate_enabled() is False
 
     access.set_ip_blacklist("8.8.8.8, 198.51.100.0/24")
     assert access.ip_banned("8.8.8.8") is True
@@ -226,9 +226,11 @@ def test_ip_ban_closes_open_site():
 
     allowed, reason = access.check_request(_FakeRequest(host="8.8.8.8"))
     assert allowed is False and reason == "banned"
-    assert access.check_request(_FakeRequest(host="203.0.113.9"))[0] is True
+    # незабаненному адресу без сессии предлагают войти
+    assert access.check_request(_FakeRequest(host="203.0.113.9")) == \
+        (False, "login")
     access.set_ip_blacklist("")
-    print("OK: test_ip_ban_closes_open_site")
+    print("OK: test_ip_ban_names_its_own_reason")
 
 
 def test_admin_session_is_never_banned():
