@@ -87,6 +87,16 @@ def main() -> None:
               "MELBET_API_HOST=https://<домен>/service-api")
         return
     print(f"База фида: {base}")
+    # Перебор останавливается на первом рабочем зеркале, поэтому в
+    # probe_notes лежат только те, что до него не дошли. Остальные
+    # опрашиваем отдельно: когда линии нет, первый вопрос — какие
+    # площадки вообще пускают этот сервер.
+    print("Зеркала:")
+    for host, note in parser.probe_notes:
+        print(f"  {host} → {note}")
+    for host in parser._candidates():
+        if host not in {h for h, _n in parser.probe_notes}:
+            print(f"  {host} → {parser._probe(host) or 'линия отдана'}")
 
     sports = parser._sports(base, "LineFeed")
     print(f"Видов спорта: {len(sports)}")

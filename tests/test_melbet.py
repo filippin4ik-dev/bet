@@ -10,6 +10,7 @@ import time
 
 import requests
 
+from app.parsers import melbet
 from app.parsers.melbet import (MelbetParser, _count, _is_geo_stub, _picks,
                                 _subgame_event, _subgames)
 from app.parsers.melbet_layout import (BTS, HCAP, ITOTAL_SIDES, TOTAL,
@@ -667,6 +668,42 @@ def test_failed_probe_is_not_repeated_every_cycle(monkeypatch):
     clock["now"] += 300
     assert parser._resolve_base() is None
     assert len(parser.probe_notes) == tried
+
+
+def test_mirror_that_answers_but_gives_no_line_is_set_aside(monkeypatch):
+    """Проверка дёргает только справочник видов спорта, и площадка может
+    ответить на неё, а линию не отдать (так закрываются эндпоинты для
+    адреса сервера). Раньше перебор каждый раз останавливался на таком
+    зеркале, и Melbet молча оставалась с нулём котировок при живых
+    остальных — теперь оно уходит в конец очереди."""
+    clock = {"now": 10_000.0}
+    monkeypatch.setattr("app.parsers.melbet.time.monotonic",
+                        lambda: clock["now"])
+    parser = MelbetParser()
+    parser._probe = lambda base: None          # отвечают все зеркала
+    parser._line = lambda *a, **kw: {}         # но линии нет ни у кого
+    silent = parser._candidates()[0]
+
+    assert parser.fetch_odds() == []
+    assert parser._base is None, "молчащая база не должна залипать"
+    assert silent in parser._empty_bases
+    assert "линию не отдаёт" in parser.status_note
+    # перебор не откладывается: очередь изменилась, пробовать надо сразу
+    assert parser._order_candidates(clock["now"])[0] != silent
+    assert parser._resolve_base() is not None
+
+    # через EMPTY_BASE_BACKOFF зеркало снова первое в очереди
+    clock["now"] += melbet.EMPTY_BASE_BACKOFF + 1
+    assert parser._order_candidates(clock["now"])[0] == silent
+
+
+def test_reason_for_an_empty_line_is_reported_to_the_admin_panel():
+    """Ноль котировок в интерфейсе не должен быть загадкой: причину
+    парсер кладёт в status_note, откуда её забирает сканер."""
+    parser = _refusing_parser(403, VPN_STUB_HTML)
+    assert parser._resolve_base() is None
+    assert "VPN" in parser.status_note
+    assert parser.status_note.startswith("ни одно зеркало")
 
 
 def test_diagnostics_probe_ignores_the_backoff(monkeypatch):
