@@ -50,11 +50,12 @@
   <nav class="admin-nav" id="admin-nav">
     <a href="#panel-scanner">Сканер</a>
     <a href="#panel-parsers">Парсеры БК</a>
+    <a href="#panel-players">Игроки</a>
     <a href="#panel-access">Доступ к сайту</a>
     <a href="#panel-visitors">Кто на сайте</a>
     <a href="#panel-accounts">Аккаунты БК</a>
-    <a href="#panel-autobet">Авто-ставки</a>
-    <a href="#panel-betlog">Журнал ставок</a>
+    <a href="#panel-autobet" id="nav-autobet" hidden>Авто-ставки</a>
+    <a href="#panel-betlog" id="nav-betlog" hidden>Журнал ставок</a>
   </nav>
 
   <section class="admin-panel" id="panel-scanner">
@@ -102,19 +103,66 @@
     <div class="parser-grid" id="parser-grid"></div>
   </section>
 
+  <section class="admin-panel" id="panel-players">
+    <div class="panel-head">
+      <h2>🧑‍💻 Игроки</h2>
+      <span class="panel-note" id="players-note"></span>
+    </div>
+    <p class="admin-hint">
+      Сайт открывается только по логину и паролю, а завести их может лишь
+      администратор — регистрации нет. Пароль после сохранения не показать
+      никому, включая вас: в базе лежит только его хэш. Передайте реквизиты
+      человеку сами, а если он их забудет — задайте новый пароль кнопкой
+      «Пароль». Выключенный игрок остаётся в списке вместе со своим журналом
+      ставок, но войти не может.
+    </p>
+    <form id="player-form" class="admin-form-row">
+      <label class="stack">Логин
+        <input type="text" id="player-username" required autocapitalize="off"
+               autocorrect="off" spellcheck="false" placeholder="напр. vanya">
+      </label>
+      <label class="stack">Пароль
+        <input type="text" id="player-password" required
+               placeholder="выдадите игроку">
+      </label>
+      <label class="stack">Имя (необязательно)
+        <input type="text" id="player-name" placeholder="как показывать">
+      </label>
+      <label class="stack">Стартовый баланс, ₽
+        <input type="number" id="player-balance" step="100" value="0">
+      </label>
+      <button type="submit" class="primary-btn">+ Завести игрока</button>
+    </form>
+    <div id="player-error" class="admin-error" hidden></div>
+    <div class="table-scroll">
+      <table class="admin-table" id="players-table">
+        <thead>
+          <tr>
+            <th>Логин</th><th>Имя</th><th>Стартовый</th><th>Прибыль</th>
+            <th>Баланс</th><th>Ставок</th><th>Заходил</th><th>Вкл</th><th></th>
+          </tr>
+        </thead>
+        <tbody id="players-body"></tbody>
+      </table>
+    </div>
+  </section>
+
   <section class="admin-panel" id="panel-access">
     <div class="panel-head">
       <h2>🔒 Доступ к сайту</h2>
       <span class="panel-note" id="access-state"></span>
     </div>
     <p class="admin-hint">
-      Пока пароль не задан и белый список пуст, сайт видит любой, кто знает
-      адрес сервера. Пароль закрывает весь сайт (вилки, линию, страницу
-      админки); адреса из белого списка входят без пароля. Пароль хранится
-      в базе только хэшем.
+      Сайт закрыт всегда: без входа посетитель не видит ни вилок, ни линии.
+      Основной вход — учётные записи игроков (раздел «Игроки»). Пароль ниже —
+      общий запасной вход: он пускает на сайт без учётки, но профиля и
+      журнала ставок у такого посетителя не будет. Белый список сам по себе
+      больше никого не пускает — он нужен строгому режиму («только с этих
+      адресов»), логин при этом спрашивается всё равно. В базе хранится
+      только хэш пароля.
     </p>
     <div class="admin-form">
-      <label>Новый пароль доступа (пусто — не менять)
+      <label>Общий запасной пароль (пусто — не менять)
         <input type="password" id="access-password" autocomplete="new-password"
                placeholder="минимум 4 символа">
       </label>
@@ -130,6 +178,10 @@
         <input type="checkbox" id="access-ip-only">
         <span>Строгий режим: пускать только адреса из списка</span>
       </label>
+      <p class="admin-hint">
+        Кнопка «Снять пароль» убирает только запасной вход по общему паролю.
+        Учётки игроков и вход администратора работают независимо от него.
+      </p>
       <div class="admin-form-row">
         <button id="save-access-btn" class="primary-btn">Сохранить</button>
         <button id="clear-access-btn" class="soft-btn">Снять пароль</button>
@@ -215,7 +267,10 @@
     </div>
   </section>
 
-  <section class="admin-panel" id="panel-autobet">
+  <!-- Авто-ставки временно спрятаны от всех: раздел и кнопка в карточке
+       вилки показываются только при AUTOBET_UI=1 (см. app/config.py).
+       Сам механизм остался на месте — спрятан, а не удалён. -->
+  <section class="admin-panel" id="panel-autobet" hidden>
     <h2>⚡ Авто-ставки</h2>
     <p class="admin-hint admin-warning">
       ⚠️ Автоматическая постановка ставки — риск бана аккаунта у
@@ -239,7 +294,7 @@
     </p>
   </section>
 
-  <section class="admin-panel" id="panel-betlog">
+  <section class="admin-panel" id="panel-betlog" hidden>
     <h2>📜 Журнал ставок</h2>
     <div class="table-scroll">
       <table class="admin-table" id="betlog-table">

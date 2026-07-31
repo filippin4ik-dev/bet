@@ -1,4 +1,4 @@
-"""API админки: логин, аккаунты БК, парсеры, доступ к сайту, авто-ставки.
+"""API админки: логин, игроки, аккаунты БК, парсеры, доступ к сайту.
 
 Все /api/admin/* (кроме /login) требуют валидную сессионную cookie —
 см. require_admin().Cookie подписана HMAC (app/security.py), сам пароль
@@ -7,6 +7,7 @@
 """
 import logging
 import os
+import re
 import sys
 import threading
 import time
@@ -15,7 +16,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel
 
 from . import (access, accounts_manager, bk_control, config, connectors, db,
-               otp, visitors)
+               otp, players, visitors)
 from .runtime import live_scanner, scanner
 from .security import create_session_token, verify_admin_password, \
     verify_session_token
@@ -499,6 +500,110 @@ def forget_visitor(device_id: str, username: str = Depends(require_admin)):
 
 
 # ---------------------------------------------------------------------------
+# Игроки: учётные записи для входа на сайт
+# ---------------------------------------------------------------------------
+
+# Логин: буквы (в т.ч. русские), цифры, точка, дефис и подчёркивание.
+# Пробелы и всё остальное запрещаем не из вредности: логин диктуют
+# голосом и пересылают в мессенджере, и «Петя Иванов » с хвостовым
+# пробелом — это вечное «у меня не заходит».
+_USERNAME_RE = re.compile(r"^[\w.\-]{3,32}$", re.UNICODE)
+
+
+def _checked_username(raw: str, exclude_id: int | None = None) -> str:
+    username = db.normalize_username(raw)
+    if not _USERNAME_RE.match(username):
+        raise HTTPException(
+            status_code=400,
+            detail="Логин: от 3 до 32 символов, буквы, цифры, точка, дефис "
+                   "или подчёркивание, без пробелов.")
+    existing = db.get_player_by_username(username)
+    if existing and existing["id"] != exclude_id:
+        raise HTTPException(status_code=400,
+                            detail=f"Логин «{username}» уже занят")
+    return username
+
+
+def _checked_password(password: str) -> str:
+    if len(password or "") < players.MIN_PASSWORD_LEN:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Пароль короче {players.MIN_PASSWORD_LEN} символов "
+                   "не защищает")
+    return password
+
+
+@router.get("/players")
+def list_players(username: str = Depends(require_admin)):
+    """Игроки с их деньгами: стартовый баланс, прибыль, текущий баланс."""
+    return {"players": db.list_players(),
+            "min_password_len": players.MIN_PASSWORD_LEN}
+
+
+class PlayerBody(BaseModel):
+    username: str
+    password: str
+    display_name: str = ""
+    start_balance: float = 0.0
+
+
+@router.post("/players")
+def add_player(body: PlayerBody, username: str = Depends(require_admin)):
+    """Заводит учётку игрока. Пароль администратор передаёт человеку сам —
+    обратно из базы его не достать, там только хэш."""
+    login = _checked_username(body.username)
+    _checked_password(body.password)
+    player_id = db.add_player(login, body.password,
+                              display_name=body.display_name,
+                              start_balance=body.start_balance)
+    log.info("Заведён игрок %s (%s)", login, username)
+    return {"ok": True, "id": player_id}
+
+
+class PlayerUpdateBody(BaseModel):
+    display_name: str | None = None
+    start_balance: float | None = None
+    enabled: bool | None = None
+    # Новый пароль (администратор сбрасывает забытый). None/"" — не менять.
+    password: str | None = None
+
+
+@router.put("/players/{player_id}")
+def update_player(player_id: int, body: PlayerUpdateBody,
+                  username: str = Depends(require_admin)):
+    if db.get_player(player_id) is None:
+        raise HTTPException(status_code=404, detail="Игрок не найден")
+    if body.password:
+        _checked_password(body.password)
+    db.update_player(player_id, display_name=body.display_name,
+                     start_balance=body.start_balance, enabled=body.enabled,
+                     password=body.password or None)
+    log.info("Игрок %s изменён из админки (%s)", player_id, username)
+    return {"ok": True, "player": db.get_player(player_id)}
+
+
+@router.delete("/players/{player_id}")
+def delete_player(player_id: int, username: str = Depends(require_admin)):
+    """Удаляет игрока вместе с его журналом ставок (баланс уйдёт с ним)."""
+    if db.get_player(player_id) is None:
+        raise HTTPException(status_code=404, detail="Игрок не найден")
+    db.delete_player(player_id)
+    log.info("Игрок %s удалён из админки (%s)", player_id, username)
+    return {"ok": True}
+
+
+@router.get("/players/{player_id}/bets")
+def player_bets(player_id: int, limit: int = 200,
+                username: str = Depends(require_admin)):
+    """Журнал ставок одного игрока — чтобы разобрать спорную запись."""
+    player = db.get_player(player_id)
+    if player is None:
+        raise HTTPException(status_code=404, detail="Игрок не найден")
+    return {"player": players.public_profile(player),
+            "bets": db.list_player_bets(player_id, max(1, min(limit, 1000)))}
+
+
+# ---------------------------------------------------------------------------
 # Настройки авто-ставок
 # ---------------------------------------------------------------------------
 
@@ -507,6 +612,10 @@ def get_settings(username: str = Depends(require_admin)):
     return {
         "autobet_enabled": config.AUTOBET_ENABLED,
         "autobet_dry_run": config.AUTOBET_DRY_RUN,
+        # Видна ли авто-ставка в интерфейсе (по умолчанию спрятана целиком,
+        # см. config.AUTOBET_UI). Админка по этому флагу показывает или
+        # прячет разделы «Авто-ставки» и «Журнал ставок».
+        "autobet_ui": config.AUTOBET_UI,
         "autobet_max_stake": config.AUTOBET_MAX_STAKE,
         "autobet_max_balance_fraction": config.AUTOBET_MAX_BALANCE_FRACTION,
         "balance_refresh_interval": config.BALANCE_REFRESH_INTERVAL,
