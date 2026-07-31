@@ -20,6 +20,15 @@
 - как разложились рынки и с каким счётом голосов;
 - пример события с готовыми котировками — их и увидит сканер.
 
+Если ни одно зеркало не отдало линию, адрес фида ищется по самому сайту:
+
+    cd /opt/arb-scanner && venv/bin/python -m app.diagnose_melbet --api
+
+Этот режим показывает, что площадка отвечает вашему серверу на самом деле
+(код, куда увела переадресация, заголовок страницы, защиту от ботов), а
+потом достаёт адрес фида из скриптов сайта — там он записан ровно тот,
+которым пользуется сама страница, — и проверяет найденное запросом.
+
 Отдельный режим — подбор ссылки на страницу матча:
 
     cd /opt/arb-scanner && venv/bin/python -m app.diagnose_melbet --links
@@ -31,16 +40,20 @@
 каждый и показывает, какой из них действительно открыл матч.
 """
 import logging
+import re
 import sys
 import time
 from collections import Counter
+from urllib.parse import urlsplit
 
 import requests
 
 from .config import (MELBET_EVENT_URL, MELBET_GROUPS, MELBET_SITE_HOST_SET)
 from .parsers.melbet import (EVENT_URL_DEFAULT, EVENT_URL_SEO, MelbetParser,
-                             _picks, _subgame_event, _subgame_scope,
-                             _subgames, _team, event_url_parts, site_host)
+                             _ANTIBOT_MARKERS, _page_title, _picks,
+                             _subgame_event, _subgame_scope, _subgames, _team,
+                             event_url_parts, feed_bases, script_urls,
+                             site_host)
 from .parsers.melbet_layout import FAMILY_OF, RawEvent, detect
 
 logging.basicConfig(level=logging.INFO,
@@ -62,6 +75,9 @@ SAMPLE_FULL = 15
 def main() -> None:
     if "--links" in sys.argv[1:]:
         check_links()
+        return
+    if "--api" in sys.argv[1:]:
+        find_api()
         return
     print("=" * 64)
     print("ДИАГНОСТИКА ПАРСЕРА MELBET")
@@ -227,6 +243,140 @@ LINK_CANDIDATES = [
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
+
+
+# Скриптов смотрим больше, чем сам парсер: здесь мы разбираемся руками, и
+# лишняя минута дешевле, чем ещё один заход с вопросами.
+MAX_SCRIPTS = 12
+MAX_SCRIPT_BYTES = 12 * 1024 * 1024
+
+
+def find_api() -> None:
+    """Ищет живой адрес фида: спрашивает сам сайт и читает его скрипты.
+
+    Запускать на сервере сканера. Список зеркал в настройках стареет: домены
+    движка переезжают, а с российского адреса международные площадки ещё и
+    недоступны — тогда единственный источник правды это сама страница."""
+    print("=" * 64)
+    print("ПОИСК АДРЕСА ФИДА MELBET")
+    print("=" * 64)
+
+    parser = MelbetParser()
+    session = requests.Session()
+    session.headers["User-Agent"] = UA
+
+    print("Что отвечает каждая площадка на запрос фида:")
+    for base in parser._candidates():
+        print(f"  {base}\n      {parser._probe(base) or 'ЛИНИЯ ОТДАНА'}")
+
+    found: list[str] = []
+    for host in _api_hosts(parser):
+        print("-" * 64)
+        page = _fetch_site(session, host)
+        if page is None:
+            continue
+        for base in _bases_from_scripts(session, host, page):
+            if base not in found:
+                found.append(base)
+
+    print("-" * 64)
+    if not found:
+        print("В скриптах сайта адрес фида не нашёлся. Пришлите распечатку "
+              "целиком: по ней видно, отвечает ли сайт вообще и не увёл ли "
+              "он на другой домен.")
+        return
+    print("Адреса фида, зашитые в скриптах сайта (их зовёт сама страница):")
+    working = []
+    for base in found:
+        note = parser._probe(base)
+        print(f"  {base}\n      {note or 'ЛИНИЯ ОТДАНА'}")
+        if note is None:
+            working.append(base)
+    print("-" * 64)
+    if working:
+        print("Пропишите рабочий адрес в переменную окружения и "
+              "перезапустите сканер:")
+        print(f"  MELBET_API_HOST={working[0]}")
+    else:
+        print("Ни один найденный адрес линию не отдал — пришлите распечатку, "
+              "разберём по ней.")
+
+
+def _api_hosts(parser: MelbetParser) -> list[str]:
+    """Хосты площадок без префикса пути — по ним и ходим за страницей."""
+    hosts: list[str] = []
+    for base in parser._candidates():
+        parts = urlsplit(base)
+        root = f"{parts.scheme}://{parts.netloc}"
+        if root not in hosts:
+            hosts.append(root)
+    return hosts
+
+
+def _fetch_site(session: requests.Session, host: str) -> str | None:
+    """Забирает главную страницу и рассказывает, что это за ответ."""
+    try:
+        resp = session.get(host + "/", timeout=20, allow_redirects=True)
+    except Exception as exc:  # noqa: BLE001
+        print(f"{host} — не открылась: {type(exc).__name__}")
+        return None
+    body = resp.content[:200_000].decode(resp.apparent_encoding or "utf-8",
+                                         "replace")
+    title = _page_title(body)
+    print(f"{host} — HTTP {resp.status_code}, {len(resp.content)} байт"
+          + (f", заголовок «{title}»" if title else ""))
+    if resp.url.rstrip("/") != host:
+        print(f"    переадресация на {resp.url}")
+    low = body.lower()
+    for marker, guard in _ANTIBOT_MARKERS:
+        if marker in low:
+            print(f"    похоже на страницу защиты {guard}")
+            break
+    if resp.cookies:
+        print(f"    куки: {', '.join(sorted(resp.cookies.keys()))[:120]}")
+    return body
+
+
+def _bases_from_scripts(session: requests.Session, host: str,
+                        page: str) -> list[str]:
+    """Скачивает скрипты страницы и вынимает из них базу фида."""
+    urls = script_urls(page, host, MAX_SCRIPTS)
+    print(f"    скриптов смотрю: {len(urls)}")
+    bases: list[str] = []
+    budget = MAX_SCRIPT_BYTES
+    for url in urls:
+        try:
+            resp = session.get(url, timeout=20)
+        except Exception:  # noqa: BLE001
+            continue
+        text = resp.content[:budget].decode("utf-8", "replace")
+        budget -= len(resp.content)
+        name = url.rsplit("/", 1)[-1][:40]
+        for base in feed_bases(text, host):
+            if base not in bases:
+                bases.append(base)
+                print(f"    нашёл в {name}: {base}")
+        # Адрес может собираться из переменной — тогда регулярка его не
+        # достанет. Печатаем сырые куски вокруг вызова фида: по ним видно,
+        # из чего он складывается.
+        for snippet in _feed_snippets(text):
+            print(f"    в {name}: …{snippet}…")
+        if budget <= 0:
+            break
+    return bases
+
+
+def _feed_snippets(text: str, limit: int = 3) -> list[str]:
+    """Куски скрипта вокруг обращения к фиду — по одному на место."""
+    out: list[str] = []
+    for m in re.finditer(r"(?:Line|Live)Feed", text):
+        piece = text[max(0, m.start() - 90):m.end() + 40]
+        piece = " ".join(piece.split())
+        if piece not in out:
+            out.append(piece)
+        if len(out) >= limit:
+            break
+    return out
 
 
 def check_links() -> None:
