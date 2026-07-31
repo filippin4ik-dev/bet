@@ -270,20 +270,26 @@ def find_api() -> None:
         print(f"  {base}\n      {parser._probe(base) or 'ЛИНИЯ ОТДАНА'}")
 
     found: list[str] = []
+    alive: list[str] = []
     for host in _api_hosts(parser):
         print("-" * 64)
         page = _fetch_site(session, host)
         if page is None:
             continue
+        alive.append(host)
         for base in _bases_from_scripts(session, host, page):
             if base not in found:
                 found.append(base)
 
     print("-" * 64)
     if not found:
-        print("В скриптах сайта адрес фида не нашёлся. Пришлите распечатку "
-              "целиком: по ней видно, отвечает ли сайт вообще и не увёл ли "
-              "он на другой домен.")
+        print("Фида движка 1xBet на площадке нет. Возможно, она переехала на "
+              "другую платформу — смотрю, что там.")
+        for host in alive:
+            probe_platform(session, host)
+        print("-" * 64)
+        print("Пришлите распечатку целиком: по адресам и ответам выше видно, "
+              "какой платформой сайт пользуется и откуда берёт линию.")
         return
     print("Адреса фида, зашитые в скриптах сайта (их зовёт сама страница):")
     working = []
@@ -300,6 +306,77 @@ def find_api() -> None:
     else:
         print("Ни один найденный адрес линию не отдал — пришлите распечатку, "
               "разберём по ней.")
+
+
+# Что спрашиваем у площадки, если фида движка 1xBet на ней нет. Настройки
+# сайта отдают адреса, которыми пользуется сама страница (в загрузчике
+# melbet.ru этот путь так и остался в комментарии), а спортбук на таких
+# сборках живёт отдельным приложением на поддомене sport.<домен>.
+PLATFORM_PATHS = ("/siteapi/ProjectSettings/GetSettings",
+                  "/siteapi2/ProjectSettings/GetSettings")
+# Загрузчик виджета, настройки партнёра (в них адреса, которыми пользуется
+# сам спортбук) и страница приложения — с неё тянутся бандлы из /sportcdn.
+SPORTSBOOK_PATHS = ("/js/partner/bootstrapper.min.js",
+                    "/StaticContent/GlobalSettings.js", "/")
+_URL_RE = re.compile(r"https?://[\w.-]+(?:/[\w./-]*)?")
+_API_PATH_RE = re.compile(r"[\"'](/[\w./-]*[Aa][Pp][Ii][\w./-]*)[\"']")
+_SPORT_PATH_RE = re.compile(
+    r"[\"'](/[\w/-]*(?:[Ss]port|[Cc]hamp|[Ee]vent|[Oo]dds|[Pp]rematch"
+    r"|[Ll]ive|[Tt]ournament)[\w/-]*)[\"']")
+
+
+def probe_platform(session: requests.Session, host: str) -> None:
+    """Разведка «не 1xBet» площадки: настройки сайта и приложение спортбука."""
+    print("-" * 64)
+    print(f"{host}: настройки платформы")
+    for path in PLATFORM_PATHS:
+        _dump(session, host + path)
+
+    parts = urlsplit(host)
+    sport = f"{parts.scheme}://sport.{parts.netloc}"
+    print(f"{sport}: спортбук (обычно он отдельным приложением во фрейме)")
+    for path in SPORTSBOOK_PATHS:
+        body = _dump(session, sport + path)
+        if not body:
+            continue
+        _print_set("ссылки", _URL_RE.findall(body), 20)
+        _print_set("пути с api", _API_PATH_RE.findall(body), 20)
+        for url in script_urls(body, sport, 6):
+            script = _dump(session, url, quiet=True)
+            if not script:
+                continue
+            print(f"    скрипт {url.rsplit('/', 1)[-1][:50]}")
+            _print_set("пути с api", _API_PATH_RE.findall(script), 15)
+            _print_set("пути про спорт", _SPORT_PATH_RE.findall(script), 15)
+
+
+def _dump(session: requests.Session, url: str,
+          quiet: bool = False) -> str | None:
+    """Запрашивает адрес и коротко показывает, что пришло."""
+    try:
+        resp = session.get(url, timeout=25, allow_redirects=True)
+    except Exception as exc:  # noqa: BLE001
+        print(f"  {url}\n      не открылось: {type(exc).__name__}")
+        return None
+    body = resp.content[:MAX_SCRIPT_BYTES].decode(
+        resp.apparent_encoding or "utf-8", "replace")
+    if not quiet:
+        kind = resp.headers.get("Content-Type", "?").split(";")[0]
+        title = _page_title(body)
+        head = "" if title else " ".join(body[:600].split())
+        print(f"  {url}\n      HTTP {resp.status_code}, {kind}, "
+              f"{len(resp.content)} байт"
+              + (f", «{title}»" if title else "")
+              + (f"\n      начало: {head}" if head else ""))
+    return body
+
+
+def _print_set(label: str, values: list[str], limit: int) -> None:
+    uniq = sorted(set(values))
+    if not uniq:
+        return
+    print(f"      {label} ({len(uniq)}): " + ", ".join(uniq[:limit])
+          + (" …" if len(uniq) > limit else ""))
 
 
 def _api_hosts(parser: MelbetParser) -> list[str]:
