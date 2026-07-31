@@ -14,22 +14,28 @@
     <div class="gate-card">
       <div class="gate-logo">⚡</div>
       <h1>Сканер <span class="accent">вилок</span></h1>
-      <p class="gate-hint">Сайт закрыт. Введите пароль доступа.</p>
+      <p class="gate-hint">Сайт закрыт. Войдите под своей учётной записью.</p>
 
       <form id="gate-form" autocomplete="on">
         <label class="gate-field">
+          <span>Логин</span>
+          <input type="text" id="gate-username" autocomplete="username"
+                 autocapitalize="off" autocorrect="off" spellcheck="false"
+                 autofocus required>
+        </label>
+        <label class="gate-field">
           <span>Пароль</span>
           <input type="password" id="gate-password" autocomplete="current-password"
-                 autofocus required>
+                 required>
         </label>
         <button type="submit" id="gate-submit">Войти</button>
         <div class="gate-error" id="gate-error" hidden></div>
       </form>
 
       <p class="gate-note">
-        Пароль задаётся в админке (раздел «Доступ к сайту») или переменной
-        окружения <code>SITE_PASSWORD</code>. Подходит и пароль администратора.
-        Свои адреса можно внести в белый список — с них вход без пароля.
+        Логин и пароль выдаёт администратор — регистрации на сайте нет.
+        Забыли пароль или нужна учётка — напишите ему, он заведёт её в
+        админке (раздел «Игроки»). Реквизиты администратора тоже подходят.
       </p>
     </div>
   </main>
