@@ -71,6 +71,9 @@ class Scanner:
         # котировки по каждой БК (живут между циклами) + время их получения
         self._odds_by_bk: dict[str, list[MarketOdds]] = {}
         self._fetched_at: dict[str, float] = {}
+        # почему у БК нет линии — словами от самого парсера (status_note),
+        # чтобы в админке было видно причину, а не только ноль
+        self._notes: dict[str, str] = {}
         self._last_scan: float | None = None
         self._scan_count = 0
         # какие БК опрашиваются ПРЯМО СЕЙЧАС — чтобы в интерфейсе было
@@ -154,11 +157,14 @@ class Scanner:
                     bk: {"count": len(self._odds_by_bk.get(bk) or ()),
                          "age_sec": round(now - self._fetched_at.get(bk, now)),
                          "busy": bk in self._busy,
-                         "off": bk in self._disabled}
+                         "off": bk in self._disabled,
+                         "note": self._notes.get(bk, "")}
                     # БК, которую опрашивают впервые, котировок ещё не
                     # принесла, но показать её уже надо
                     for bk in sorted(set(self._odds_by_bk) | self._busy
-                                     | self._disabled)},
+                                     | self._disabled
+                                     | {bk for bk, n in self._notes.items()
+                                        if n})},
                 "arbs": [a.to_dict() for a in self._arbs],
                 "arbs_1x2": [a.to_dict() for a in self._arbs3],
             }
@@ -688,6 +694,7 @@ class Scanner:
         with self._lock:
             self._odds_by_bk.clear()
             self._fetched_at.clear()
+            self._notes.clear()
             self._mark_changed_locked()
             self._drop_groups_locked()
             self._busy.clear()
@@ -715,6 +722,7 @@ class Scanner:
         with self._lock:
             had = self._odds_by_bk.pop(bk, None)
             self._fetched_at.pop(bk, None)
+            self._notes.pop(bk, None)
             if had:
                 self._mark_changed_locked()
                 # БК выключили или перезапустили — в списке матчей она должна
@@ -783,6 +791,8 @@ class Scanner:
                 self._store_odds(parser.name, odds)
                 failures = 0 if odds else failures + 1
                 with self._lock:
+                    self._notes[parser.name] = "" if odds else getattr(
+                        parser, "status_note", "")
                     self._scan_count += 1
                     total = sum(len(o) for o in self._odds_by_bk.values())
                 log.info("[%s] %s: %d котировок за %.0f c — в памяти %d",

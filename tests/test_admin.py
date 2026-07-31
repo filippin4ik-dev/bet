@@ -387,6 +387,20 @@ def test_parser_endpoints_toggle_and_restart():
     assert bk_control.is_enabled("Winline") is True
 
     assert admin_api.restart_parser("Fonbet", username="admin")["ok"] is True
+
+    # Причина, по которой у БК нет линии, обязана доехать до карточки:
+    # ноль котировок сам по себе не отличает «не успела обновиться» от
+    # «сайт не пускает сервер» (см. Scanner._notes и status_note парсеров).
+    from app.runtime import scanner
+    with scanner._lock:
+        scanner._notes["Melbet"] = "ни одно зеркало не отдало линию"
+    try:
+        state = next(p for p in admin_api.list_parsers(username="admin")["parsers"]
+                     if p["name"] == "Melbet")
+        assert state["prematch"]["note"] == "ни одно зеркало не отдало линию"
+    finally:
+        with scanner._lock:
+            scanner._notes.pop("Melbet", None)
     for name in ("НетТакойБК",):
         for call in (lambda: admin_api.update_parser(
                         name, admin_api.ParserBody(enabled=False),

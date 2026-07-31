@@ -190,6 +190,13 @@ main#admin-view { max-width: 1080px; margin: 0 auto; }
 .parser-row .state { margin-left: auto; }
 .parser-row .state.busy { color: var(--hot); }
 .parser-row .state.stale { color: var(--live); }
+.parser-why {
+  font-size: 0.76rem;
+  line-height: 1.35;
+  color: var(--hot);
+  padding-left: 66px;
+  overflow-wrap: anywhere;
+}
 .parser-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 .parser-actions button { padding: 5px 11px; font-size: 0.82rem; }
 

@@ -439,7 +439,10 @@ function renderBkCounts(bookmakers) {
       : [state.count ? age(state.age_sec) : "", state.busy ? "обновляется…" : ""]
         .filter(Boolean).join(", ");
     const extra = [state.busy ? "busy" : "", state.off ? "off" : ""].join(" ").trim();
-    return `<span class="bk-fresh ${cls} ${extra}" title="${escapeHtml(bk)}">
+    // Почему БК на нуле — под курсором: подробности место в шапке
+    // и так, а совсем без причины ноль выглядит как загадка.
+    const hint = state.note ? `${bk}: ${state.note}` : bk;
+    return `<span class="bk-fresh ${cls} ${extra}" title="${escapeHtml(hint)}">
         <span class="dot"></span>${escapeHtml(bk)}
         <span class="bk-count">${count}</span>
         ${note ? `<span class="bk-note">${note}</span>` : ""}

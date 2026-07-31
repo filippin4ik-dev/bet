@@ -114,6 +114,12 @@ log = logging.getLogger("parsers.melbet")
 API_PREFIXES = ["/service-api", ""]
 # Если ни один домен не ответил — не перебираем весь список каждый цикл
 PROBE_BACKOFF = 300
+# Сколько держать в стороне зеркало, которое проверку прошло, а линию не
+# отдало. Проверка дёргает только справочник видов спорта, и площадка может
+# ответить на неё, но закрыть остальные эндпоинты для адреса сервера. Без
+# этой памяти перебор каждый раз останавливался на первом же таком зеркале,
+# и Melbet молча оставалась с нулём котировок, хотя рабочие зеркала есть.
+EMPTY_BASE_BACKOFF = 1800
 # «Зеркала ещё ни разу не перебирались». Именно минус бесконечность, а не
 # ноль: time.monotonic() на Linux считает секунды с загрузки МАШИНЫ, и с
 # нулём первые PROBE_BACKOFF секунд после каждой перезагрузки сервера
@@ -155,6 +161,8 @@ class MelbetParser(BaseParser):
         self._base: str | None = None
         self._last_probe = NEVER_PROBED
         self._layout_note = ""
+        # База -> когда она отдала пустую линию (см. EMPTY_BASE_BACKOFF).
+        self._empty_bases: dict[str, float] = {}
         # Что ответило каждое зеркало на последнем переборе — для лога и
         # для app/diagnose_melbet.py.
         self.probe_notes: list[tuple[str, str]] = []
@@ -180,6 +188,15 @@ class MelbetParser(BaseParser):
                 bases.append(host + prefix)
         return bases
 
+    def _order_candidates(self, now: float) -> list[str]:
+        """Кандидаты по порядку: сначала те, что не сидят в «пустых»."""
+        fresh, empty = [], []
+        for base in self._candidates():
+            seen = self._empty_bases.get(base)
+            (empty if seen is not None and now - seen < EMPTY_BASE_BACKOFF
+             else fresh).append(base)
+        return fresh + empty
+
     def _resolve_base(self, force: bool = False) -> str | None:
         if self._base:
             return self._base
@@ -187,21 +204,30 @@ class MelbetParser(BaseParser):
         if not force and now - self._last_probe < PROBE_BACKOFF:
             # Без этой строки обход, пропущенный из-за паузы, выглядел в
             # логе как «Melbet: 0 котировок» безо всякой причины.
+            left = PROBE_BACKOFF - (now - self._last_probe)
             log.info("Melbet: рабочей базы фида нет, следующий перебор "
                      "зеркал через %.0f с — в этом обходе линии не будет",
-                     PROBE_BACKOFF - (now - self._last_probe))
+                     left)
+            if not self.status_note:
+                self.status_note = ("рабочей базы фида нет, следующий "
+                                    f"перебор зеркал через {left:.0f} с")
             return None
         self._last_probe = now
         notes: list[tuple[str, str]] = []
-        for base in self._candidates():
+        # Зеркала, которые недавно ответили пустой линией, пробуем в
+        # последнюю очередь: они на связи, но толку от них сейчас нет.
+        for base in self._order_candidates(now):
             note = self._probe(base)
             if note is None:
                 log.info("Melbet: рабочая база фида — %s", base)
                 self._base = base
                 self.probe_notes = notes + [(base, "линия отдана")]
+                self.status_note = ""
                 return base
             notes.append((base, note))
         self.probe_notes = notes
+        self.status_note = ("ни одно зеркало не отдало линию: "
+                            + "; ".join(f"{b} → {n}" for b, n in notes))
         # Причину пишем словами: без неё «фид не ответил» одинаково выглядит
         # и когда сменился домен, и когда сайт не пускает адрес.
         log.warning(
@@ -314,10 +340,22 @@ class MelbetParser(BaseParser):
         games = self._line(base, feed, live, deadline)
         if not games:
             if not live:
-                # Домен мог смениться прямо во время работы — при следующем
-                # обходе перебор начнётся заново.
+                # Прематч пустым не бывает: в линии всегда тысячи событий.
+                # Значит эта площадка нам линию не отдаёт — запоминаем её,
+                # сбрасываем базу и тут же (не выжидая PROBE_BACKOFF) идём
+                # искать другую: перебор теперь поставит её в конец.
+                self._empty_bases[base] = time.monotonic()
                 self._base = None
+                self._last_probe = NEVER_PROBED
+                self.status_note = (
+                    f"{base} отвечает, но линию не отдаёт — в следующем "
+                    f"обходе беру другое зеркало")
+                log.warning("Melbet: %s ответила на проверку, но линия "
+                            "пустая — зеркало отложено на %d с, следующий "
+                            "обход начнёт перебор заново",
+                            base, EMPTY_BASE_BACKOFF)
             return []
+        self.status_note = ""
         log.info("Melbet: %s — %d событий", "лайв" if live else "линия",
                  len(games))
 

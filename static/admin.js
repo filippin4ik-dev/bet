@@ -412,11 +412,16 @@ function parserModeRow(label, info, offText) {
       <span class="state">ждём первый обход</span></div>`;
   const state = info.busy ? '<span class="state busy">обновляется…</span>'
     : `<span class="state">${fmtAge(info.age_sec)}</span>`;
+  /* Причину нуля показываем прямо здесь: иначе «0 котировок» одинаково
+   * выглядит и когда БК не успела обновиться, и когда сайт неделю не
+   * пускает сервер, а разница видна только в логах. */
+  const why = info.note
+    ? `<div class="parser-why">${escapeHtml(info.note)}</div>` : "";
   return `<div class="parser-row">
       <span class="mode">${label}</span>
       <span class="count">${info.count.toLocaleString("ru-RU")}</span>
       <span>котировок</span>${state}
-    </div>`;
+    </div>${why}`;
 }
 
 /* Карточки БК живут между обновлениями: состояние подтягивается раз в

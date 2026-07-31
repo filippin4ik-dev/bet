@@ -116,6 +116,29 @@ def test_failing_bookmaker_backs_off():
     assert dead.calls >= 2
 
 
+def test_reason_for_zero_quotes_reaches_the_snapshot():
+    """Ноль котировок сам по себе ничего не объясняет: почему БК молчит,
+    знает только парсер (Melbet — что ни одно зеркало не пускает адрес
+    сервера). Причину он кладёт в status_note, сканер — в снимок, а
+    админка её показывает."""
+    mute = _Fake("Молчит", odds=[])
+    mute.status_note = "ни одно зеркало не отдало линию: melbet.ru → HTTP 403"
+    sc = Scanner(mode=KIND_PREMATCH, parsers=[mute])
+    sc.interval = 0.5
+    asyncio.run(_run_for(sc, 1.0))
+    assert "HTTP 403" in sc.snapshot()["bookmakers"]["Молчит"]["note"]
+
+
+def test_note_is_cleared_once_the_bookmaker_answers():
+    """Причина не должна пережить починку: линия пришла — пометки нет."""
+    p = _Fake("БК")
+    p.status_note = "было плохо"
+    sc = Scanner(mode=KIND_PREMATCH, parsers=[p])
+    sc.interval = 0.5
+    asyncio.run(_run_for(sc, 1.0))
+    assert sc.snapshot()["bookmakers"]["БК"]["note"] == ""
+
+
 def test_bookmaker_marked_busy_while_fetching():
     """Пока БК качает линию, в статусе стоит busy — в интерфейсе вместо
     возраста котировок видно «обновляется…», а не «зависла»."""

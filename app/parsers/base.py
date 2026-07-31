@@ -44,6 +44,12 @@ class BaseParser:
 
     def __init__(self) -> None:
         self.session = requests.Session()
+        # Почему в прошлом обходе не вышло взять линию — человеческими
+        # словами, для админки. Пустая строка — всё в порядке. Без этого
+        # ноль котировок выглядел в интерфейсе одинаково и когда БК просто
+        # не успела обновиться, и когда сайт неделю не пускает сервер, а
+        # причина лежала только в логах.
+        self.status_note: str = ""
 
     # ---------- защита от блокировок ----------
 
@@ -98,6 +104,7 @@ class BaseParser:
             return odds
         except Exception as exc:  # noqa: BLE001 — любые сбои сети/разметки
             log.warning("%s: ошибка парсинга: %s", self.name, exc)
+            self.status_note = f"ошибка разбора: {exc}"
             return []
 
     def safe_fetch_live(self) -> list[MarketOdds]:
@@ -109,4 +116,5 @@ class BaseParser:
             return odds
         except Exception as exc:  # noqa: BLE001
             log.warning("%s: ошибка лайв-парсинга: %s", self.name, exc)
+            self.status_note = f"ошибка разбора лайва: {exc}"
             return []
