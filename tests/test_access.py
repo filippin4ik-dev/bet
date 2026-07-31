@@ -1,8 +1,8 @@
-"""Тесты закрытого доступа к сайту: пароль, белый список IP, строгий режим.
+"""Тесты закрытого доступа к сайту: вход, белый список IP, строгий режим.
 
 Проверяем именно то, из-за чего доступ обычно ломают: чтобы посторонний не
 прошёл, чтобы оператор не запер себя сам и чтобы X-Forwarded-For нельзя было
-подделать в обход белого списка.
+подделать в обход белого списка. Учётки игроков — в tests/test_players.py.
 
 Использует ВРЕМЕННУЮ базу (не трогает arbs.sqlite3 из рабочего каталога).
 """
@@ -46,14 +46,16 @@ def _reset():
     access.invalidate_cache()
 
 
-def test_open_site_when_nothing_configured():
-    """Пароль не задан и список пуст — сайт работает как раньше, открытым:
-    иначе первый запуск запирал бы оператора снаружи."""
+def test_site_is_closed_even_when_nothing_configured():
+    """Сайт закрыт всегда: без входа посетитель не видит ни вилок, ни
+    линии. Раньше пустые настройки означали «открыт всем» — теперь вход
+    по логину и паролю, и попасть внутрь без сессии нельзя (реквизиты
+    администратора при этом работают, запереть себя нечем)."""
     _reset()
-    assert access.gate_enabled() is False
+    assert access.gate_enabled() is True
     allowed, reason = access.check_request(_FakeRequest())
-    assert allowed is True and reason == ""
-    print("OK: test_open_site_when_nothing_configured")
+    assert allowed is False and reason == "login"
+    print("OK: test_site_is_closed_even_when_nothing_configured")
 
 
 def test_password_hash_roundtrip():
@@ -66,15 +68,16 @@ def test_password_hash_roundtrip():
     print("OK: test_password_hash_roundtrip")
 
 
-def test_password_closes_site():
+def test_shared_password_still_opens_the_site():
+    """Общий пароль остался запасным входом: учётки игроков — основной
+    путь, но старые установки с SITE_PASSWORD не должны остаться снаружи."""
     _reset()
     access.set_password("tajna123")
-    assert access.gate_enabled() is True
     assert access.password_source() == "db"
     assert db.get_setting("site_password_hash") != "tajna123"
 
     allowed, reason = access.check_request(_FakeRequest())
-    assert allowed is False and reason == "password"
+    assert allowed is False and reason == "login"
 
     assert access.check_password("tajna123") is True
     assert access.check_password("другой") is False
@@ -88,23 +91,29 @@ def test_password_closes_site():
     # с испорченной — нет
     bad = _FakeRequest(cookies={access.COOKIE_NAME: "мусор.подпись"})
     assert access.check_request(bad)[0] is False
-    print("OK: test_password_closes_site")
+    print("OK: test_shared_password_still_opens_the_site")
 
 
-def test_whitelist_lets_own_ip_in_without_password():
+def test_whitelist_alone_no_longer_lets_anyone_in():
+    """Белый список больше не пропуск: у каждого игрока свой журнал
+    ставок, и «свой адрес» не отвечает на вопрос, кто именно пришёл.
+    Списку осталась роль ограничения (строгий режим)."""
     _reset()
     access.set_password("tajna123")
     access.set_whitelist("203.0.113.9\n198.51.100.0/24")
     assert access.whitelist() == ["203.0.113.9/32", "198.51.100.0/24"]
 
-    assert access.check_request(_FakeRequest("203.0.113.9"))[0] is True
-    assert access.check_request(_FakeRequest("198.51.100.77"))[0] is True
-    assert access.check_request(_FakeRequest("8.8.8.8"))[0] is False
-    print("OK: test_whitelist_lets_own_ip_in_without_password")
+    for ip in ("203.0.113.9", "198.51.100.77", "8.8.8.8"):
+        assert access.check_request(_FakeRequest(ip)) == (False, "login")
+    # с сессией — пускаем, откуда бы ни пришли
+    req = _FakeRequest("8.8.8.8",
+                       cookies={access.COOKIE_NAME: access.session_cookie()})
+    assert access.check_request(req)[0] is True
+    print("OK: test_whitelist_alone_no_longer_lets_anyone_in")
 
 
 def test_ip_only_blocks_everyone_else():
-    """Строгий режим: посторонним не показываем даже форму пароля, и
+    """Строгий режим: посторонним не показываем даже форму входа, и
     действующая cookie их тоже не спасает."""
     _reset()
     access.set_password("tajna123")
@@ -116,7 +125,11 @@ def test_ip_only_blocks_everyone_else():
     with_cookie = _FakeRequest(
         "8.8.8.8", cookies={access.COOKIE_NAME: access.session_cookie()})
     assert access.check_request(with_cookie)[0] is False
-    assert access.check_request(_FakeRequest("203.0.113.9"))[0] is True
+    # свой адрес проходит ограничение, но войти всё равно надо
+    assert access.check_request(_FakeRequest("203.0.113.9")) == (False, "login")
+    ok = _FakeRequest("203.0.113.9",
+                      cookies={access.COOKIE_NAME: access.session_cookie()})
+    assert access.check_request(ok)[0] is True
     print("OK: test_ip_only_blocks_everyone_else")
 
 
@@ -130,17 +143,8 @@ def test_ip_only_without_list_does_not_lock_out():
     assert access.state()["ip_only"] is False
     access.set_password("tajna123")
     allowed, reason = access.check_request(_FakeRequest("8.8.8.8"))
-    assert allowed is False and reason == "password"   # пароль, а не отказ
+    assert allowed is False and reason == "login"   # вход, а не отказ
     print("OK: test_ip_only_without_list_does_not_lock_out")
-
-
-def test_whitelist_without_password_keeps_site_open():
-    """Список задан, пароля нет, строгий режим выключен — запрещать нечем,
-    и молча запирать сайт (403 всем, кто не в списке) было бы сюрпризом."""
-    _reset()
-    access.set_whitelist("203.0.113.9")
-    assert access.check_request(_FakeRequest("8.8.8.8"))[0] is True
-    print("OK: test_whitelist_without_password_keeps_site_open")
 
 
 def test_forwarded_for_only_trusted_from_local_proxy():
@@ -151,16 +155,20 @@ def test_forwarded_for_only_trusted_from_local_proxy():
     access.set_password("tajna123")
     access.set_whitelist("203.0.113.9")
 
+    access.set_ip_only(True)
+
     spoof = _FakeRequest("8.8.8.8",
-                         headers={"X-Forwarded-For": "203.0.113.9"})
+                         headers={"X-Forwarded-For": "203.0.113.9"},
+                         cookies={access.COOKIE_NAME: access.session_cookie()})
     assert access.client_ip(spoof) == "8.8.8.8"
-    assert access.check_request(spoof)[0] is False
+    assert access.check_request(spoof) == (False, "ip")
 
     # тот же заголовок от своего nginx — учитываем, причём ПОСЛЕДНИЙ адрес
     # цепочки (его дописал nginx, всё раньше прислал клиент)
     proxied = _FakeRequest(
         "127.0.0.1",
-        headers={"X-Forwarded-For": "9.9.9.9, 203.0.113.9"})
+        headers={"X-Forwarded-For": "9.9.9.9, 203.0.113.9"},
+        cookies={access.COOKIE_NAME: access.session_cookie()})
     assert access.client_ip(proxied) == "203.0.113.9"
     assert access.check_request(proxied)[0] is True
 
