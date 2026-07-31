@@ -1,4 +1,4 @@
-"""SQLite: история найденных вилок, аккаунты БК и журнал авто-ставок."""
+"""SQLite: история вилок, аккаунты БК, журнал ставок и учётные записи игроков."""
 import json
 import sqlite3
 import threading
@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 
 from .config import DB_PATH
 from .models import Arb, Arb3
-from .security import decrypt_str, encrypt_str
+from .security import decrypt_str, encrypt_str, hash_password
 
 _lock = threading.Lock()
 
@@ -170,6 +170,50 @@ def init_db() -> None:
             )
         """)
 
+        # Игроки: учётные записи для входа на сайт. Заводит их только
+        # администратор (регистрации нет), пароль хранится хэшем PBKDF2 —
+        # так же, как общий пароль доступа (см. app/security.py).
+        # Логин храним в нижнем регистре: NOCASE в SQLite складывает только
+        # латиницу, а логин вполне может быть русским, и «Петя» с «петя»
+        # оказались бы разными людьми.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS players (
+                id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                username       TEXT NOT NULL UNIQUE,
+                password_hash  TEXT NOT NULL,
+                display_name   TEXT NOT NULL DEFAULT '',
+                start_balance  REAL NOT NULL DEFAULT 0,
+                enabled        INTEGER NOT NULL DEFAULT 1,
+                created_at     TEXT NOT NULL,
+                last_login_at  TEXT
+            )
+        """)
+
+        # Ставки, сохранённые игроком с карточки вилки. Это его личный
+        # журнал прибыли, а не журнал авто-ставок (bet_log): туда пишет бот,
+        # сюда — человек, поставивший руками на сайтах БК.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS player_bets (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                player_id    INTEGER NOT NULL,
+                saved_at     TEXT NOT NULL,
+                match_key    TEXT NOT NULL DEFAULT '',
+                kind         TEXT NOT NULL DEFAULT 'prematch',
+                kind3        INTEGER NOT NULL DEFAULT 0,
+                sport        TEXT NOT NULL DEFAULT '',
+                match        TEXT NOT NULL DEFAULT '',
+                market       TEXT NOT NULL DEFAULT '',
+                profit_pct   REAL NOT NULL DEFAULT 0,
+                stake_total  REAL NOT NULL DEFAULT 0,
+                payout       REAL NOT NULL DEFAULT 0,
+                profit       REAL NOT NULL DEFAULT 0,
+                legs_json    TEXT NOT NULL DEFAULT '[]',
+                note         TEXT NOT NULL DEFAULT ''
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_player_bets_player "
+                     "ON player_bets (player_id, id DESC)")
+
 
 def get_setting(key: str) -> str | None:
     with _lock, _connect() as conn:
@@ -264,6 +308,181 @@ def prune_visitors(keep: int) -> None:
             "DELETE FROM site_visitors WHERE blocked=0 AND device_id NOT IN ("
             "  SELECT device_id FROM site_visitors WHERE blocked=0"
             "  ORDER BY last_seen DESC LIMIT ?)", (keep,))
+
+
+# ---------------------------------------------------------------------------
+# Игроки и их сохранённые ставки — см. app/players.py
+# ---------------------------------------------------------------------------
+
+def normalize_username(username: str) -> str:
+    """Логин в каноническом виде: без пробелов по краям и в нижнем регистре.
+
+    Регистр не различаем сознательно: логин выдаёт администратор голосом
+    или в переписке, и «Petya» вместо «petya» — не повод не пустить
+    человека на сайт."""
+    return " ".join(str(username or "").split()).casefold()
+
+
+def _player_row_to_dict(r: sqlite3.Row, with_hash: bool = False) -> dict:
+    d = dict(r)
+    if not with_hash:
+        d.pop("password_hash", None)
+    d["enabled"] = bool(d["enabled"])
+    return d
+
+
+def add_player(username: str, password: str, *, display_name: str = "",
+               start_balance: float = 0.0) -> int:
+    """Заводит игрока. Проверять занятость логина должен вызывающий:
+    UNIQUE тут только последняя линия обороны (гонка двух вкладок)."""
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    with _lock, _connect() as conn:
+        cur = conn.execute(
+            """INSERT INTO players
+               (username, password_hash, display_name, start_balance,
+                enabled, created_at)
+               VALUES (?,?,?,?,1,?)""",
+            (normalize_username(username), hash_password(password),
+             display_name.strip(), float(start_balance), now))
+        return cur.lastrowid
+
+
+def get_player(player_id: int, with_hash: bool = False) -> dict | None:
+    with _lock, _connect() as conn:
+        r = conn.execute("SELECT * FROM players WHERE id=?",
+                         (player_id,)).fetchone()
+    return _player_row_to_dict(r, with_hash) if r else None
+
+
+def get_player_by_username(username: str,
+                           with_hash: bool = False) -> dict | None:
+    with _lock, _connect() as conn:
+        r = conn.execute("SELECT * FROM players WHERE username=?",
+                         (normalize_username(username),)).fetchone()
+    return _player_row_to_dict(r, with_hash) if r else None
+
+
+def list_players() -> list[dict]:
+    """Игроки вместе с их деньгами: сколько сохранено ставок, какая прибыль
+    и текущий баланс (стартовый + прибыль)."""
+    with _lock, _connect() as conn:
+        rows = conn.execute("""
+            SELECT p.*,
+                   COUNT(b.id)               AS bets_count,
+                   COALESCE(SUM(b.profit),0) AS profit,
+                   COALESCE(SUM(b.stake_total),0) AS staked
+            FROM players p
+            LEFT JOIN player_bets b ON b.player_id = p.id
+            GROUP BY p.id
+            ORDER BY p.username
+        """).fetchall()
+    out = []
+    for r in rows:
+        d = _player_row_to_dict(r)
+        d["balance"] = round(d["start_balance"] + d["profit"], 2)
+        d["profit"] = round(d["profit"], 2)
+        d["staked"] = round(d["staked"], 2)
+        out.append(d)
+    return out
+
+
+def count_players() -> int:
+    with _lock, _connect() as conn:
+        return conn.execute("SELECT COUNT(*) AS n FROM players").fetchone()["n"]
+
+
+def update_player(player_id: int, *, password: str | None = None,
+                  display_name: str | None = None,
+                  start_balance: float | None = None,
+                  enabled: bool | None = None) -> None:
+    fields, params = [], []
+    if password is not None:
+        fields.append("password_hash=?")
+        params.append(hash_password(password))
+    if display_name is not None:
+        fields.append("display_name=?")
+        params.append(display_name.strip())
+    if start_balance is not None:
+        fields.append("start_balance=?")
+        params.append(float(start_balance))
+    if enabled is not None:
+        fields.append("enabled=?")
+        params.append(1 if enabled else 0)
+    if not fields:
+        return
+    params.append(player_id)
+    with _lock, _connect() as conn:
+        conn.execute(f"UPDATE players SET {', '.join(fields)} WHERE id=?",
+                     params)
+
+
+def delete_player(player_id: int) -> None:
+    """Удаляет игрока вместе с его журналом ставок."""
+    with _lock, _connect() as conn:
+        conn.execute("DELETE FROM player_bets WHERE player_id=?", (player_id,))
+        conn.execute("DELETE FROM players WHERE id=?", (player_id,))
+
+
+def touch_player_login(player_id: int) -> None:
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    with _lock, _connect() as conn:
+        conn.execute("UPDATE players SET last_login_at=? WHERE id=?",
+                     (now, player_id))
+
+
+def add_player_bet(player_id: int, *, match_key: str = "",
+                   kind: str = "prematch", kind3: bool = False,
+                   sport: str = "", match: str = "", market: str = "",
+                   profit_pct: float = 0.0, stake_total: float = 0.0,
+                   payout: float = 0.0, profit: float = 0.0,
+                   legs: list[dict] | None = None, note: str = "") -> int:
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    with _lock, _connect() as conn:
+        cur = conn.execute(
+            """INSERT INTO player_bets
+               (player_id, saved_at, match_key, kind, kind3, sport, match,
+                market, profit_pct, stake_total, payout, profit, legs_json,
+                note)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (player_id, now, match_key, kind, 1 if kind3 else 0, sport, match,
+             market, round(profit_pct, 2), round(stake_total, 2),
+             round(payout, 2), round(profit, 2),
+             json.dumps(legs or [], ensure_ascii=False), note.strip()))
+        return cur.lastrowid
+
+
+def list_player_bets(player_id: int, limit: int = 200) -> list[dict]:
+    with _lock, _connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM player_bets WHERE player_id=? "
+            "ORDER BY id DESC LIMIT ?", (player_id, limit)).fetchall()
+    out = []
+    for r in rows:
+        d = dict(r)
+        d["legs"] = json.loads(d.pop("legs_json"))
+        d["kind3"] = bool(d["kind3"])
+        out.append(d)
+    return out
+
+
+def delete_player_bet(player_id: int, bet_id: int) -> bool:
+    """Удаляет ставку — но только свою: id ставки приходит из браузера."""
+    with _lock, _connect() as conn:
+        cur = conn.execute("DELETE FROM player_bets WHERE id=? AND player_id=?",
+                           (bet_id, player_id))
+        return cur.rowcount > 0
+
+
+def player_totals(player_id: int) -> dict:
+    """Итоги журнала: сколько ставок, сколько поставлено и заработано."""
+    with _lock, _connect() as conn:
+        r = conn.execute(
+            """SELECT COUNT(*) AS bets_count,
+                      COALESCE(SUM(stake_total),0) AS staked,
+                      COALESCE(SUM(profit),0)      AS profit
+               FROM player_bets WHERE player_id=?""", (player_id,)).fetchone()
+    return {"bets_count": r["bets_count"], "staked": round(r["staked"], 2),
+            "profit": round(r["profit"], 2)}
 
 
 def save_arbs(arbs: list[Arb]) -> None:
