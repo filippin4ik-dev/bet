@@ -445,6 +445,37 @@ def _start_tolerance(sport: str) -> float:
     return START_TS_TOLERANCE
 
 
+def _ambiguous_pairs(ts_by_book: dict[tuple, set],
+                     combat: set[tuple]) -> set[tuple]:
+    """События, где пара соперников встречается сегодня НЕ ОДИН раз.
+
+    Признак берём у самой БК: если одна контора выставила два матча одной
+    пары с разным временем старта, значит соперники играют дважды — и
+    широкий допуск по времени становится опасен. Третья БК, у которой этот
+    матч записан с расхождением в час, приклеится к соседнему матчу, и
+    получится «вилка» из цен двух РАЗНЫХ матчей.
+
+    Так ломался, например, Esports World Cup: Fonbet выставлял Wildcard —
+    FURIA дважды, по Counter-Strike в 21:00 и по Rainbow Six в 17:00, а
+    Winline дисциплину в названии не указывал вовсе («Киберспорт · Esports
+    World Cup», старт 20:00). Час разницы укладывался в допуск, цена
+    Rainbow Six считалась против цены Counter-Strike, и выходила «вилка»
+    на 65 %. Различать дисциплины по названию нельзя — у Winline его в
+    строке просто нет; зато сам факт повтора пары виден из данных.
+
+    Единоборства исключены: там допуск большой намеренно (БК сильно
+    расходятся в оценке времени боя), а одна пара бойцов дважды за день
+    не дерётся.
+    """
+    ambiguous: set[tuple] = set()
+    for (key, _bk), ts_set in ts_by_book.items():
+        if key in ambiguous or key in combat or len(ts_set) < 2:
+            continue
+        if max(ts_set) - min(ts_set) > START_TS_TOLERANCE_RAPID:
+            ambiguous.add(key)
+    return ambiguous
+
+
 def _time_clusters(odds: list[MarketOdds],
                    name_map: dict[str, str] | None = None) -> dict[tuple, dict]:
     """Кластеры времени старта по каждому событию (kind, пара команд).
@@ -459,12 +490,20 @@ def _time_clusters(odds: list[MarketOdds],
     строгий (START_TS_TOLERANCE_RAPID), для единоборств — большой
     (START_TS_TOLERANCE_COMBAT): там время боя оценочное.
 
+    Отдельно строгий допуск включается там, где повтор пары виден прямо в
+    данных: одна БК выставила два матча одних и тех же соперников — см.
+    _ambiguous_pairs. Название турнира об этом знать не обязано.
+
     name_map (build_name_canon_map) сливает разные написания имени одной
     команды между БК ДО группировки по паре команд — иначе такие пары
     вообще не встретились бы в одном ключе события.
     """
     ts_by_event: dict[tuple, set] = defaultdict(set)
     tol_by_event: dict[tuple, float] = {}
+    combat: set[tuple] = set()
+    # (событие, БК) -> времена старта у ЭТОЙ БК: по ним видно, что пара
+    # встречается сегодня не один раз (см. _ambiguous ниже)
+    ts_by_book: dict[tuple, set] = defaultdict(set)
     for o in odds:
         if o.kind == KIND_PREMATCH and o.start_ts \
                 and _named(o.team1, o.team2):
@@ -472,12 +511,18 @@ def _time_clusters(odds: list[MarketOdds],
                                _canon(name_map, norm_team(o.team2))))
             key = (o.kind, teams)
             ts_by_event[key].add(o.start_ts)
+            ts_by_book[(key, o.bookmaker)].add(o.start_ts)
             tol = _start_tolerance(o.sport)
+            if tol == START_TS_TOLERANCE_COMBAT:
+                combat.add(key)
             if tol > tol_by_event.get(key, 0.0):
                 tol_by_event[key] = tol
+    ambiguous = _ambiguous_pairs(ts_by_book, combat)
     clusters: dict[tuple, dict] = {}
     for key, ts_set in ts_by_event.items():
         tol = tol_by_event.get(key, START_TS_TOLERANCE)
+        if key in ambiguous:
+            tol = min(tol, START_TS_TOLERANCE_RAPID)
         mapping: dict[float, int] = {}
         cluster, prev = 0, None
         for ts in sorted(ts_set):

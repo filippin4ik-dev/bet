@@ -85,10 +85,74 @@ def test_rapid_fixture_does_not_merge_within_hour_gap():
     print("OK: test_rapid_fixture_does_not_merge_within_hour_gap")
 
 
+def test_pair_playing_twice_today_is_not_glued_by_the_hour_gap():
+    """Одна БК выставила пару дважды — широкий допуск для неё опасен.
+
+    Живой случай с Esports World Cup: Fonbet выставлял Wildcard — FURIA
+    дважды (Counter-Strike в 21:00 и Rainbow Six в 17:00), а Winline
+    дисциплину в названии не указывал вовсе и ставил матч на 20:00. Час
+    разницы укладывался в допуск, цена одной дисциплины считалась против
+    цены другой — и выходила «вилка» на 65 %, то есть ставка на два разных
+    матча.
+    """
+    sport = "Киберспорт · Esports World Cup"
+    odds = [
+        mk("Fonbet", k1=6.00, k2=1.13, start_ts=NOW + 4 * 3600, sport=sport,
+           team1="Wildcard", team2="FURIA Esports"),
+        mk("Fonbet", k1=1.55, k2=2.30, start_ts=NOW, sport=sport,
+           team1="Wildcard", team2="FURIA Esports"),
+        mk("Winline", k1=1.55, k2=2.29, start_ts=NOW + 3 * 3600, sport=sport,
+           team1="WILDCARD", team2="FURIA ESPORTS"),
+    ]
+    assert not find_arbs(odds), (
+        "цена одного матча посчиталась против цены другого матча той же пары")
+    print("OK: test_pair_playing_twice_today_is_not_glued_by_the_hour_gap")
+
+
+def test_a_pair_playing_once_still_merges_within_the_hour():
+    """Обратная граница: пара играет один раз — час разницы по-прежнему свой.
+
+    Строгий допуск включается ТОЛЬКО там, где повтор пары виден в данных.
+    """
+    sport = "Киберспорт · Esports World Cup"
+    odds = [
+        mk("Fonbet", k1=1.95, k2=2.30, start_ts=NOW, sport=sport,
+           team1="Wildcard", team2="FURIA Esports"),
+        mk("Winline", k1=2.10, k2=2.05, start_ts=NOW + 55 * 60, sport=sport,
+           team1="WILDCARD", team2="FURIA ESPORTS"),
+    ]
+    assert find_arbs(odds), (
+        "пара играет один раз — событие должно склеиться, как и раньше")
+    print("OK: test_a_pair_playing_once_still_merges_within_the_hour")
+
+
+def test_two_fights_of_one_pair_do_not_tighten_combat_tolerance():
+    """У единоборств допуск большой намеренно — БК расходятся во времени боя.
+
+    Даже если БК показала пару бойцов дважды, сужать окно нельзя: иначе
+    один бой снова развалится на два «события» и вилки по нему потеряются.
+    """
+    sport = "Единоборства · UFC 305"
+    odds = [
+        mk("Fonbet", k1=1.95, k2=2.30, start_ts=NOW, sport=sport,
+           team1="Эйб Альсагир", team2="Фабрицио Эскарре"),
+        mk("Fonbet", k1=1.90, k2=2.20, start_ts=NOW + 5 * 3600, sport=sport,
+           team1="Эйб Альсагир", team2="Фабрицио Эскарре"),
+        mk("Winline", k1=2.10, k2=2.05, start_ts=NOW + 3 * 3600, sport=sport,
+           team1="Эйб Альсагир", team2="Фабрицио Эскарре"),
+    ]
+    assert find_arbs(odds), (
+        "бой развалился на два события — вилки по единоборствам потеряются")
+    print("OK: test_two_fights_of_one_pair_do_not_tighten_combat_tolerance")
+
+
 if __name__ == "__main__":
     test_default_tolerance_for_regular_sports()
     test_combat_tolerance()
     test_rapid_fixture_tolerance()
     test_regular_sport_merges_within_hour_gap()
     test_rapid_fixture_does_not_merge_within_hour_gap()
+    test_pair_playing_twice_today_is_not_glued_by_the_hour_gap()
+    test_a_pair_playing_once_still_merges_within_the_hour()
+    test_two_fights_of_one_pair_do_not_tighten_combat_tolerance()
     print("Все тесты прошли.")
