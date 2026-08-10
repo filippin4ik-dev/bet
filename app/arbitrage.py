@@ -24,7 +24,8 @@ from .config import (ARB_MAX_PROFIT, BANKS, FUZZY_NAME_MIN_SINGLE_RATIO,
                      FUZZY_NAME_SIM_THRESHOLD, START_TS_TOLERANCE,
                      START_TS_TOLERANCE_COMBAT, START_TS_TOLERANCE_RAPID)
 from .models import Arb, Arb3, KIND_PREMATCH, MarketOdds
-from .parsers.html_utils import display_market, neg_hcap as _neg_hcap
+from .parsers.html_utils import (canon_market_key, display_market,
+                                 neg_hcap as _neg_hcap)
 
 log = logging.getLogger("arbitrage")
 
@@ -274,25 +275,26 @@ def _explode(o: MarketOdds, name_map: dict[str, str] | None = None):
     без него, если БК пишут имя команды чуть по-разному, «Победитель»/фора/
     инд.тотал не сошьются между БК даже при совпавшем событии.
     """
-    if o.market_key.startswith("itotal"):
+    key = canon_market_key(o.market_key)
+    if key.startswith("itotal"):
         # itotal:<сторона 1|2>:<scope>:<линия> — тотал ОДНОЙ команды.
         # Исход привязан к нормализованному имени команды: у БК с
         # перевёрнутым порядком команд тот же рынок сшивается корректно.
-        _, side, scope, pt = o.market_key.split(":", 3)
+        _, side, scope, pt = key.split(":", 3)
         team = _canon(name_map, norm_team(o.team1 if side == "1" else o.team2))
         return [
             (f"itover:{team}:{scope}:{pt}", o.outcome1, o.k1),
             (f"itunder:{team}:{scope}:{pt}", o.outcome2, o.k2),
         ]
-    if o.market_key.startswith("total"):
-        pt = o.market_key.split(":", 1)[1] if ":" in o.market_key else ""
+    if key.startswith("total"):
+        pt = key.split(":", 1)[1] if ":" in key else ""
         return [
             (f"over:{pt}", o.outcome1, o.k1),
             (f"under:{pt}", o.outcome2, o.k2),
         ]
-    if o.market_key.startswith("hcap"):
+    if key.startswith("hcap"):
         # hcap:<scope>:<линия team1>
-        h1 = o.market_key.rsplit(":", 1)[1]
+        h1 = key.rsplit(":", 1)[1]
         t1 = _canon(name_map, norm_team(o.team1))
         t2 = _canon(name_map, norm_team(o.team2))
         return [
@@ -330,14 +332,19 @@ def _market_group(o: MarketOdds, name_map: dict[str, str] | None = None) -> str:
     фор выбирался бы по-разному, ломая сопоставление. Индивидуальный тотал
     привязываем к нормализованному ИМЕНИ команды — сторона (1/2) у разных
     БК может быть разной.
+
+    Ключ парсера сначала приводится к канону (canon_market_key): БК
+    расходились в записи рынка без scope и в формате линии, и один и тот
+    же рынок попадал в РАЗНЫЕ группы — вилка по нему не находилась вовсе.
     """
-    if o.market_key.startswith("itotal"):
-        _, side, scope, pt = o.market_key.split(":", 3)
+    key = canon_market_key(o.market_key)
+    if key.startswith("itotal"):
+        _, side, scope, pt = key.split(":", 3)
         team = _canon(name_map, norm_team(o.team1 if side == "1" else o.team2))
         return f"itotal:{team}:{scope}:{pt}"
-    if not o.market_key.startswith("hcap"):
-        return o.market_key
-    prefix, h1 = o.market_key.rsplit(":", 1)  # prefix = hcap:<scope>
+    if not key.startswith("hcap"):
+        return key
+    prefix, h1 = key.rsplit(":", 1)  # prefix = hcap:<scope>
     a = _canon(name_map, norm_team(o.team1))
     b = _canon(name_map, norm_team(o.team2))
     anchor = h1 if a <= b else _neg_hcap(h1)
