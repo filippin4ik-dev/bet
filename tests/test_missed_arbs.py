@@ -169,6 +169,35 @@ def test_same_single_bookmaker_spellings_still_not_merged():
     print("OK: test_same_single_bookmaker_spellings_still_not_merged")
 
 
+def test_one_malformed_quote_does_not_wipe_out_every_arb():
+    """Ключ рынка неожиданной формы («hcap» без сегментов, «itotal» без
+    scope) разбирался по сегментам и падал с ValueError — но падал ВНУТРИ
+    общего пересчёта. То есть одна кривая котировка одной БК уносила разом
+    ВСЕ вилки по всем БК, и так каждый цикл, пока эта котировка жива
+    (до ODDS_TTL — получаса). Не понять один рынок можно, потерять всю
+    линию — нет."""
+    healthy = [
+        mk("Winline", "winner", 2.20, 1.90, outcome1="П1", outcome2="П2"),
+        mk("Fonbet", "winner", 1.80, 2.30, outcome1="П1", outcome2="П2"),
+    ]
+    assert len(find_arbs(healthy)) == 1
+    for broken in ("hcap", "hcap:", "itotal", "itotal:1:2.5", "total"):
+        odds = healthy + [mk("Betcity", broken, 2.0, 2.0)]
+        assert len(find_arbs(odds)) == 1, (
+            f"котировка с ключом {broken!r} не должна ронять пересчёт")
+    print("OK: test_one_malformed_quote_does_not_wipe_out_every_arb")
+
+
+def test_canon_fills_in_missing_key_segments():
+    """Недостающий scope достраивается на своё место — перед линией, а не
+    в конец (иначе линия рынка стала бы его уточнением)."""
+    assert canon_market_key("hcap") == "hcap::"
+    assert canon_market_key("hcap:-1.5") == "hcap::-1.5"
+    assert canon_market_key("itotal:1:2.5") == "itotal:1::2.5"
+    assert canon_market_key("itotal:2:half1:1.5") == "itotal:2:half1:1.5"
+    print("OK: test_canon_fills_in_missing_key_segments")
+
+
 def test_live_quotes_get_fuzzy_name_merging_too():
     """Лайв-сканер держит ТОЛЬКО лайв-котировки, а фаззи-слияние имён брало
     в работу один прематч — карта имён у лайва выходила пустой всегда, и
@@ -236,6 +265,8 @@ if __name__ == "__main__":
     test_third_bookmaker_spelling_merges_when_two_others_agree()
     test_two_bookmakers_each_side_of_a_spelling_merge()
     test_same_single_bookmaker_spellings_still_not_merged()
+    test_one_malformed_quote_does_not_wipe_out_every_arb()
+    test_canon_fills_in_missing_key_segments()
     test_live_quotes_get_fuzzy_name_merging_too()
     test_prefilter_never_rejects_a_pair_difflib_would_accept()
     print("Все тесты прошли.")

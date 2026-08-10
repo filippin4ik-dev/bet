@@ -378,15 +378,26 @@ def canon_market_key(key: str) -> str:
     Здесь недостающий пустой scope достраивается, а линия приводится к
     общему виду (fmt_hcap/fmt_total): «1.5» и «+1.5» — одна и та же фора,
     «2.0» и «2» — один и тот же тотал.
+
+    Заодно ключ добивается до той формы, которую движок разбирает по
+    сегментам («hcap:<scope>:<линия>», «itotal:<сторона>:<scope>:<линия>»).
+    Это не косметика: на ключе неожиданной формы разбор падал с
+    ValueError — а падал он внутри общего пересчёта, то есть ОДНА кривая
+    котировка одной БК уносила разом ВСЕ вилки по всем БК, и так каждый
+    цикл, пока эта котировка жива. Лучше не понять один рынок, чем
+    потерять всю линию.
     """
     if key.startswith("hcap"):
         parts = key.split(":")
-        if len(parts) == 2:            # hcap:<линия> → hcap::<линия>
-            parts = ["hcap", "", parts[1]]
-        if len(parts) >= 3:
-            return ":".join(parts[:-1] + [fmt_hcap(parts[-1])])
-        return key
-    if key.startswith(("itotal", "total")):
+        while len(parts) < 3:          # hcap:<линия> → hcap::<линия>
+            parts.insert(1, "")
+        return ":".join(parts[:-1] + [fmt_hcap(parts[-1])])
+    if key.startswith("itotal"):
+        parts = key.split(":")
+        while len(parts) < 4:          # недостающий scope — перед линией
+            parts.insert(2, "")
+        return ":".join(parts[:-1] + [fmt_total(parts[-1])])
+    if key.startswith("total"):
         parts = key.split(":")
         if len(parts) >= 2:
             return ":".join(parts[:-1] + [fmt_total(parts[-1])])
