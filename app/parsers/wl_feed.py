@@ -44,7 +44,9 @@ import time
 import zlib
 
 from ..config import (WINLINE_FEED_URL, WINLINE_PLUS_ENABLED,
-                      WINLINE_PLUS_RATE, WINLINE_PLUS_REFRESH,
+                      WINLINE_PLUS_MAX_AGE, WINLINE_PLUS_PENDING,
+                      WINLINE_PLUS_RATE,
+                      WINLINE_PLUS_REFRESH, WINLINE_PLUS_WINDOW,
                       WINLINE_SNAPSHOT_WAIT, WINLINE_STALE_AFTER)
 
 log = logging.getLogger("parsers.wl_feed")
@@ -208,6 +210,20 @@ class WinlineFeed:
         self._exotic_ok: dict[int, bool] = {}
         # event_id -> monotonic-время последнего ЗАПРОСА полной росписи
         self._plus_asked: dict[int, float] = {}
+        # event_id -> monotonic-время, когда роспись реально ПРИШЛА. Запрос и
+        # ответ надо считать порознь: сервер отвечает примерно 2 росписи в
+        # секунду, и по факту отправки событие «спрошено» ещё ничего не
+        # значит — ответ придёт через минуты. Пока разделения не было, круг
+        # запросов проходил по всем событиям за две минуты, помечал все
+        # спрошенными, и следующий круг стартовал по таймеру поверх
+        # неотвеченной очереди: события, до которых сервер не дошёл, ждали
+        # росписи бесконечно, и у Winline оставались одни топ-линии.
+        self._plus_got: dict[int, float] = {}
+        # event_id -> время запроса, на который ещё не пришёл ответ. Держим
+        # в полёте не больше WINLINE_PLUS_WINDOW штук: слать быстрее, чем
+        # сервер отвечает, бессмысленно — лишнее просто стоит в очереди и
+        # приезжает уже несвежим.
+        self._plus_pending: dict[int, float] = {}
         self._plus_budget = 0.0        # накопленный лимит запросов (rate)
         self._plus_tick = 0.0          # время последнего пополнения лимита
         # Лайв
@@ -244,10 +260,16 @@ class WinlineFeed:
         Линии — объединение полной росписи («event.plus») и топ-линий
         снапшота. Топ-линии кладутся ПОВЕРХ: они обновляются дельтами
         непрерывно, а роспись — по кругу раз в WINLINE_PLUS_REFRESH с.
+        Роспись старше WINLINE_PLUS_MAX_AGE не отдаём вовсе: круг по всем
+        событиям идёт около четверти часа, и залежавшийся кэф дал бы вилку,
+        которой на сайте уже нет.
         """
         with self._lock:
+            now = time.monotonic()
             merged: dict[int, dict] = {}
-            for lines in self.plus_lines.values():
+            for eid, lines in self.plus_lines.items():
+                if now - self._plus_got.get(eid, 0.0) > WINLINE_PLUS_MAX_AGE:
+                    continue
                 merged.update(lines)
             merged.update(self.pre_lines)
             return (dict(self.sports), dict(self.tiplines),
@@ -299,6 +321,8 @@ class WinlineFeed:
                 self.pre_lines.clear()
                 self.plus_lines.clear()
                 self._plus_asked.clear()
+                self._plus_got.clear()
+                self._plus_pending.clear()
                 self.live_events.clear()
                 self.live_lines.clear()
             time.sleep(backoff)
@@ -522,6 +546,8 @@ class WinlineFeed:
                 for eid in gone:
                     self.plus_lines.pop(eid, None)
                     self._plus_asked.pop(eid, None)
+                    self._plus_got.pop(eid, None)
+                    self._plus_pending.pop(eid, None)
 
     def _is_exotic(self, tl: dict) -> bool:
         """Разбираемая экзотика src=16 (тотал/фора/чет-нечет любого предмета
@@ -542,7 +568,15 @@ class WinlineFeed:
 
         Частота ограничена WINLINE_PLUS_RATE запросов/с (сайт шлёт такие
         запросы при каждом открытии события — умеренный поток нормален);
-        каждое событие повторно опрашивается раз в WINLINE_PLUS_REFRESH с.
+        каждое событие повторно опрашивается раз в WINLINE_PLUS_REFRESH с
+        ПОСЛЕ прихода росписи, а не после отправки запроса.
+
+        Ответ отстаёт от запроса на минуты: сервер отдаёт росписи со своей
+        скоростью (порядка двух в секунду), и всё, что послано сверх того,
+        просто ждёт очереди. Поэтому событие с неотвеченным запросом не
+        спрашивается повторно ещё WINLINE_PLUS_PENDING секунд: дубль встал бы
+        в ту же очередь и отодвинул события, у которых росписи нет вовсе.
+        Первыми идут те, чью роспись не видели ни разу.
         """
         if not WINLINE_PLUS_ENABLED or not self._prematch_ready.is_set():
             return
@@ -554,18 +588,27 @@ class WinlineFeed:
         if self._plus_budget < 1 or not self.tiplines:
             return
         with self._lock:
+            # неотвеченные запросы: просроченные считаем потерянными
+            for eid, asked in list(self._plus_pending.items()):
+                if now - asked > WINLINE_PLUS_PENDING:
+                    del self._plus_pending[eid]
+            slots = WINLINE_PLUS_WINDOW - len(self._plus_pending)
+            if slots < 1:
+                return
             due = [eid for eid in self.pre_events
-                   if now - self._plus_asked.get(eid, 0.0)
+                   if eid not in self._plus_pending
+                   and now - self._plus_got.get(eid, 0.0)
                    > WINLINE_PLUS_REFRESH]
-        if not due:
-            return
-        # сперва события, которых ещё не спрашивали, затем самые давние
-        due.sort(key=lambda eid: self._plus_asked.get(eid, 0.0))
-        for eid in due[:int(self._plus_budget)]:
+            # сперва события без росписи вовсе, затем с самой старой
+            due.sort(key=lambda eid: self._plus_got.get(eid, 0.0))
+            due = due[:min(slots, int(self._plus_budget))]
+            for eid in due:
+                self._plus_asked[eid] = now
+                self._plus_pending[eid] = now
+        for eid in due:
             ws.send("event.plus")
             ws.send(base64.b64encode(
                 struct.pack("<i", eid) + b"\x00").decode())
-            self._plus_asked[eid] = now
             self._plus_budget -= 1
 
     def _parse_event_fill(self, p: bytes, step: int) -> None:
@@ -604,6 +647,8 @@ class WinlineFeed:
         with self._lock:
             if eid in self.pre_events:
                 self.plus_lines[eid] = lines
+                self._plus_got[eid] = time.monotonic()
+            self._plus_pending.pop(eid, None)
 
     # -- лайв --
 
