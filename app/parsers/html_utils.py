@@ -1,4 +1,5 @@
 """Общие помощники для HTML-парсеров (Winline / BetBoom / Лига Ставок)."""
+import functools
 import re
 import time as _time
 from datetime import datetime, timedelta, timezone
@@ -114,14 +115,16 @@ _SUBJECT_TOKENS = [
     ("карт", "maps"),              # карты (киберспорт) / карты (футбол)
     ("двойн", "doublefaults"),     # двойные ошибки (теннис)
     ("эйс", "aces"),               # эйсы (теннис)
-    ("фол", "fouls"),              # фолы
-    ("офсайд", "offsides"),        # офсайды
+    ("фол", "fouls"), ("нарушен", "fouls"),  # фолы / нарушения
+    ("офсайд", "offsides"), ("вне игры", "offsides"),  # офсайды
+    ("навылет", "aces"),           # подачи навылет = эйсы
     ("створ", "shotsontarget"),    # удары в створ (уточняет shots)
     ("от ворот", "goalkicks"),     # удары от ворот (уточняет shots)
     ("удар", "shots"),             # удары
     ("голев", "assists"),          # голевые передачи
     ("попыт", "tries"),            # попытки (регби)
-    ("вброс", "throwins"), ("аут", "throwins"),  # вбросы аутов
+    ("вброс", "throwins"), ("вбрасыв", "throwins"),  # вбросы/вбрасывания
+    ("аут", "throwins"),           # ауты
     ("сет", "sets"),               # сеты (как предмет счёта, теннис)
     ("парти", "sets"),             # партии (волейбол/наст. теннис) = сеты
     ("иннинг", "innings"),         # иннинги (бейсбол)
@@ -145,7 +148,7 @@ _SUBJECT_TOKENS = [
     ("рошан", "roshan"),
     ("ингибитор", "inhibitors"),
     ("казарм", "barracks"),
-    ("башн", "towers"), ("вышк", "towers"),
+    ("башн", "towers"), ("башен", "towers"), ("вышк", "towers"),
     ("кровь", "firstblood"),       # первая кровь
     ("убийств", "kills"),          # убийства чемпионов (киберспорт)
     # «геймы»/«очки»/«раунды» НЕ считаем отдельным предметом: это основная
@@ -206,13 +209,28 @@ _SCOPE_STOPWORDS = {
     # «Индивидуальный тотал»/«Инд. тотал» — то, что тотал командный, уже
     # несёт ключ рынка (itotal:<сторона>), в scope это слово не нужно.
     "инд", "индивид", "индивидуальный", "индивидуальные",
-    "победитель", "победа", "итоговая", "итоговый", "матч", "матча",
+    "победитель", "победа", "матч", "матча",
     "матче", "игра", "игры",
-    "гол", "гола", "голы", "голов", "забьет", "забьют",
-    "очко", "очка", "очки", "очков", "гейм", "гейма", "геймы", "геймов",
-    "геймам", "баллы", "баллов",
+    # Итог/результат матча — тот же основной рынок. Падежи перечислены
+    # полностью: слово, которого нет в списке, уходит в ЗАПАСНОЙ токен, и
+    # рынок с ним не сходится ни с одной другой БК — так «Итог матча» и
+    # «Тотал результативности» молча теряли все свои вилки.
+    "итог", "итога", "итоге", "итоги", "итогов", "итоговая", "итоговый",
+    "итоговое", "итоговые", "итогового",
+    "результат", "результате", "результата", "результативности",
+    # Гол и мяч — одно и то же (БК пишут и «тотал голов», и «тотал мячей»)
+    "гол", "гола", "голу", "голы", "голов", "голам", "голах",
+    "мяч", "мяча", "мячу", "мячи", "мячей", "мячам", "мячах",
+    # «Забитые» голы — это и есть тотал голов. «Пропущенные» намеренно НЕ
+    # в списке: индивидуальный тотал пропущенных — ДРУГОЙ рынок, слить его
+    # с забитыми значило бы выдать ложную вилку.
+    "забьет", "забьют", "забитый", "забитые", "забитых", "забито",
+    "очко", "очка", "очку", "очки", "очков", "очкам", "очках",
+    "гейм", "гейма", "геймы", "геймов", "геймам",
+    "балл", "балла", "баллы", "баллов", "баллам",
     "раунд", "раунда", "раунды", "раундов", "раундам",
-    "основное", "осн", "время", "общий", "общее", "общая",
+    "основное", "основной", "основного", "основным", "осн",
+    "время", "времени", "общий", "общее", "общая",
     "команд", "команда", "команды", "командам", "обеих", "обе", "оба",
     "кол", "во", "количество", "число",
     "больше", "меньше", "чет", "нечет",
@@ -227,12 +245,27 @@ _SCOPE_STOPWORDS = {
 }
 _WORD_RE = re.compile(r"[а-яa-z]+")
 
-# Названный объект карты снимает общий токен kills: «убийства дракона» —
-# это дракон, а не убийства. Иначе у одной БК рынок был бы [dragons, kills],
-# у другой (она пишет просто «тотал драконов») — [dragons], и одинаковый по
-# смыслу рынок не сошёлся бы.
-_OBJECTIVE_TOKENS = {"dragons", "baron", "roshan", "towers", "inhibitors",
-                     "barracks"}
+# УТОЧНЯЮЩИЙ токен вытесняет ОБЩИЙ: формулировка БК почти всегда содержит и
+# то и другое слово («убийства дракона», «угловые удары», «жёлтые карты»), а
+# соседняя БК пишет только уточнение («тотал драконов», «тотал угловых»,
+# «тотал карточек»). Без вытеснения у первой рынок выходил [dragons, kills] /
+# [corners, shots] / [cards, maps], у второй — [dragons] / [corners] /
+# [cards], scope расходился, и один и тот же рынок попадал в РАЗНЫЕ группы —
+# вилка по нему не находилась вовсе. Проверено на живых подписях: так
+# молча терялись все вилки по угловым и по карточкам между БК, которые
+# называют их «угловыми ударами» и «жёлтыми картами».
+_REFINES = {
+    # киберспорт: объект карты — это не «убийства чемпионов»
+    "dragons": ("kills",), "baron": ("kills",), "roshan": ("kills",),
+    "towers": ("kills",), "inhibitors": ("kills",), "barracks": ("kills",),
+    # элементальные драконы (без Элдера) — своя линия, а не все драконы
+    "elemental": ("dragons",),
+    # футбол: угловой удар — это угловой, а не удар по воротам
+    "corners": ("shots",),
+    "shotsontarget": ("shots",), "goalkicks": ("shots",),
+    # «жёлтые/красные карты» — это карточки, а не карты киберспорта
+    "cards": ("maps",), "redcards": ("cards", "maps"),
+}
 
 # Предмет, который не поймать подстрокой: значение несёт оборот целиком.
 # «Убийства С 10 МИНУТ» — это не тотал убийств за весь матч; номер минуты
@@ -244,6 +277,7 @@ _SUBJECT_PATTERNS = [
 ]
 
 
+@functools.lru_cache(maxsize=100_000)
 def market_scope(text: str | None) -> str:
     """Канонический субъект/период рынка для ключа (или "" для основного).
 
@@ -257,6 +291,12 @@ def market_scope(text: str | None) -> str:
     сливается с основным рынком — из его слов строится запасной токен.
     Такой рынок может не сопоставиться с другой БК (другая формулировка),
     зато не даст ЛОЖНУЮ вилку «экзотика против основного рынка».
+
+    Подписей рынков на всю линию — считанные десятки, а зовут эту функцию
+    на каждый рынок каждого события (у Betcity с полной росписью это сотни
+    тысяч вызовов за обход), и внутри неё несколько регулярных выражений.
+    Функция чистая, поэтому просто кэшируем результат по подписи: время,
+    отданное разбору, — это время, отнятое у самих обходов БК.
     """
     if not text:
         return ""
@@ -293,8 +333,9 @@ def market_scope(text: str | None) -> str:
             tokens.append(token)
             subject_found = True
 
-    if _OBJECTIVE_TOKENS.intersection(tokens):
-        tokens = [tk for tk in tokens if tk != "kills"]
+    general = {gen for tk in tokens for gen in _REFINES.get(tk, ())}
+    if general:
+        tokens = [tk for tk in tokens if tk not in general]
 
     if not subject_found:
         # Предмет не распознан — строим запасной токен из значимых слов
@@ -362,6 +403,7 @@ def neg_hcap(line: str) -> str:
     return "-" + line
 
 
+@functools.lru_cache(maxsize=100_000)
 def canon_market_key(key: str) -> str:
     """Единая форма ключа рынка: один и тот же рынок у разных БК — один ключ.
 
@@ -386,23 +428,51 @@ def canon_market_key(key: str) -> str:
     котировка одной БК уносила разом ВСЕ вилки по всем БК, и так каждый
     цикл, пока эта котировка жива. Лучше не понять один рынок, чем
     потерять всю линию.
+
+    Функция чистая, а зовёт её движок дважды на КАЖДУЮ котировку (разбор
+    исходов и группировка) — это миллионы вызовов за пересчёт при считанных
+    сотнях разных ключей на всю линию, поэтому с кэшем.
     """
     if key.startswith("hcap"):
-        parts = key.split(":")
-        while len(parts) < 3:          # hcap:<линия> → hcap::<линия>
-            parts.insert(1, "")
+        parts = _key_parts(key, 3)     # hcap:<scope>:<линия>
         return ":".join(parts[:-1] + [fmt_hcap(parts[-1])])
     if key.startswith("itotal"):
-        parts = key.split(":")
-        while len(parts) < 4:          # недостающий scope — перед линией
-            parts.insert(2, "")
+        parts = _key_parts(key, 4)     # itotal:<сторона>:<scope>:<линия>
         return ":".join(parts[:-1] + [fmt_total(parts[-1])])
-    if key.startswith("total"):
-        parts = key.split(":")
-        if len(parts) >= 2:
-            return ":".join(parts[:-1] + [fmt_total(parts[-1])])
-        return key
+    if key.startswith("total") and ":" in key:
+        # у тотала канон БЕЗ scope — двухчастный («total:2.5»), поэтому
+        # пустой сегмент здесь не достраивается, а убирается
+        parts = _key_parts(key, 2)     # total[:<scope>]:<линия>
+        return ":".join(parts[:-1] + [fmt_total(parts[-1])])
+    if key.startswith(("winner", "bothscore", "oddeven")):
+        # рынки без линии: scope либо есть, либо сегмента нет вовсе. Пустой
+        # хвост («winner1x2:») развёл бы рынок всего матча с тем же рынком
+        # у соседней БК — ровно та же потеря, что была на форе
+        kind, _, scope = key.partition(":")
+        scope = ":".join(s for s in scope.split(":") if s)
+        return f"{kind}:{scope}" if scope else kind
     return key
+
+
+def _key_parts(key: str, want: int) -> list[str]:
+    """Сегменты ключа рынка: пустые сегменты в середине убираются, а до
+    нужной длины ключ достраивается пустыми — перед линией.
+
+    Пустой сегмент в середине значит «scope не задан», и записать его можно
+    и одним двоеточием, и ни одного: «hcap:-1.5» и «hcap::-1.5» — одна и та
+    же фора всего матча. Пока формы не сводились к одной, рынок жил в двух
+    РАЗНЫХ группах и вилка по нему не находилась.
+
+    want — сколько сегментов у ключа МИНИМУМ (у форы 3, у инд. тотала 4, у
+    тотала 2: там канон без scope как раз двухчастный). Лишние сегменты не
+    трогаем: непустой scope — это настоящий отдельный рынок (тотал по
+    сетам — не тотал матча), а не мусор."""
+    head, *rest = key.split(":")
+    line = rest.pop() if rest else ""
+    rest = [p for p in rest if p]      # пустой «scope» ничего не значит
+    while len(rest) < want - 2:
+        rest.append("")
+    return [head] + rest + [line]
 
 
 def display_market(key: str, fallback: str) -> str:
@@ -548,6 +618,65 @@ def pair(coefs: list[str]) -> tuple[float | None, float | None]:
     return num(coefs[0]), num(coefs[1])
 
 
+# Разметка исхода тотала: «ТБ»/«Б»/«больше»/«over» против «ТМ»/«М»/
+# «меньше»/«under». Однобуквенные подписи отделены границами слова, иначе
+# «м» поймается в любом слове.
+_OVER_RE = re.compile(r"(?<![а-яa-z])(тб|б|больше|более|over|more)(?![а-яa-z])",
+                      re.IGNORECASE)
+_UNDER_RE = re.compile(r"(?<![а-яa-z])(тм|м|меньше|менее|under|less)(?![а-яa-z])",
+                       re.IGNORECASE)
+_HINT_ATTRS = ("class", "title", "aria-label", "data-outcome", "data-type",
+               "data-name", "data-selection", "data-outcome-name")
+
+
+def _outcome_hint(el) -> str:
+    """Слова вокруг кэфа, по которым виден исход: свои и родительские
+    атрибуты плюс текст родителя без самого кэфа."""
+    parts = []
+    for node in (el, el.parent):
+        attrs = getattr(node, "attrs", None)
+        if not attrs:
+            continue
+        for name in _HINT_ATTRS:
+            value = attrs.get(name)
+            if value:
+                parts.append(" ".join(value) if isinstance(value, list)
+                             else str(value))
+    parent = el.parent
+    if parent is not None:
+        own = el.get_text(strip=True)
+        text = parent.get_text(" ", strip=True)
+        parts.append(text.replace(own, " ", 1) if own else text)
+    return " ".join(parts)
+
+
+def _over_under(block, coef_selector: str) -> tuple[float | None, float | None]:
+    """Кэфы тотала как (больше, меньше).
+
+    Порядок ТБ/ТМ в вёрстке у БК не закреплён, а перепутанные местами
+    стороны — хуже потерянного рынка: ключ у них тот же, и движок сведёт
+    ТБ одной БК с ТБ другой по ЧУЖОЙ цене, выдав ложную вилку. Поэтому
+    сначала пробуем опознать стороны по подписи и берём порядок вёрстки
+    только тогда, когда подписи нет вовсе."""
+    cells = block.select(coef_selector)
+    if len(cells) != 2:
+        return None, None
+    first, second = (num(c.get_text(strip=True)) for c in cells)
+    hints = [_outcome_hint(c) for c in cells]
+    marks = [(bool(_OVER_RE.search(h)), bool(_UNDER_RE.search(h)))
+             for h in hints]
+    # сторону засчитываем, только если подпись говорит однозначно: и «Б», и
+    # «М» в одной подписи — не разметка исхода, а случайные слова
+    over_first, under_first = marks[0]
+    over_second, under_second = marks[1]
+    if over_first != under_first and over_second != under_second:
+        if over_first and under_second:
+            return first, second
+        if under_first and over_second:
+            return second, first
+    return first, second
+
+
 def parse_totals(event, base: dict, coef_selector: str) -> list[MarketOdds]:
     """Достаёт двухисходные тоталы (ТБ/ТМ) с карточки события.
 
@@ -561,8 +690,7 @@ def parse_totals(event, base: dict, coef_selector: str) -> list[MarketOdds]:
         if not pt:
             label = block.select_one(".total-value, .param, .handicap")
             pt = label.get_text(strip=True) if label else None
-        coefs = [c.get_text(strip=True) for c in block.select(coef_selector)]
-        over, under = pair(coefs)
+        over, under = _over_under(block, coef_selector)
         if pt and over and under:
             # линия со страницы приходит как есть («2,5», «2.50») — в ключ
             # она обязана попасть в общем формате, иначе тотал не сойдётся
