@@ -23,7 +23,7 @@ from typing import Iterable
 from .config import (ARB_MAX_PROFIT, BANKS, FUZZY_NAME_MIN_SINGLE_RATIO,
                      FUZZY_NAME_SIM_THRESHOLD, START_TS_TOLERANCE,
                      START_TS_TOLERANCE_COMBAT, START_TS_TOLERANCE_RAPID)
-from .models import Arb, Arb3, KIND_LIVE, KIND_PREMATCH, MarketOdds
+from .models import Arb, Arb3, KIND_PREMATCH, MarketOdds
 from .parsers.html_utils import (canon_market_key, display_market,
                                  neg_hcap as _neg_hcap)
 
@@ -178,16 +178,7 @@ def build_name_canon_map(odds: list[MarketOdds]) -> dict[str, str]:
         # хуже прематчевого. Раньше лайв отсекался, а лайв-сканер держит
         # ТОЛЬКО лайв — то есть карта имён у него выходила пустой всегда, и
         # любое расхождение в написании стоило лайв-вилки целиком.
-        #
-        # Лайв-котировка БЕЗ времени старта участвует тоже, просто без окна
-        # (см. ниже). Лайв-парсеры, в отличие от прематчевых, время старта
-        # НЕ требуют — матч уже идёт, и отбрасывать его не за что, — так что
-        # у BetBoom, Fonbet, Melbet и bc.game оно вполне может не прийти. А
-        # событие в лайве по времени и не разбивается (_time_clusters
-        # работает только по прематчу): якоря там нет ни у кого, терять
-        # нечего. Прематч без времени старта по-прежнему мимо: там окно —
-        # единственное, что отделяет первый матч пары от ответного.
-        if not o.start_ts and o.kind != KIND_LIVE:
+        if not o.start_ts:
             continue
         t1, t2 = norm_team(o.team1), norm_team(o.team2)
         if not t1 or not t2 or t1 == t2:
@@ -199,90 +190,69 @@ def build_name_canon_map(odds: list[MarketOdds]) -> dict[str, str]:
         if ev is None:
             events[key] = {"books": {o.bookmaker}, "lo": o.start_ts,
                            "hi": o.start_ts, "tol": tol}
-            continue
-        ev["books"].add(o.bookmaker)
-        ev["tol"] = max(ev["tol"], tol)
-        if o.start_ts:
-            # у события хватит одной котировки со временем, чтобы получить
-            # окно: остальные БК того же события просто попадут в него
-            ev["lo"] = o.start_ts if ev["lo"] is None \
-                else min(ev["lo"], o.start_ts)
-            ev["hi"] = o.start_ts if ev["hi"] is None \
-                else max(ev["hi"], o.start_ts)
+        else:
+            ev["books"].add(o.bookmaker)
+            ev["lo"] = min(ev["lo"], o.start_ts)
+            ev["hi"] = max(ev["hi"], o.start_ts)
+            ev["tol"] = max(ev["tol"], tol)
 
-    # события с окном — отдельно от бессрочных: у первых кандидатов
-    # ограничивает время, вторых сравниваем со всем корнем вида спорта
-    timed: dict[str, list[tuple]] = defaultdict(list)
-    loose: dict[str, list[tuple]] = defaultdict(list)
+    buckets: dict[str, list[tuple]] = defaultdict(list)
     for (root, teams), ev in events.items():
         pair = tuple(teams)
-        item = (pair, _name_sig(pair[0]), _name_sig(pair[1]),
-                ev["books"], ev["lo"], ev["hi"], ev["tol"])
-        (timed if ev["lo"] is not None else loose)[root].append(item)
+        buckets[root].append((pair, _name_sig(pair[0]), _name_sig(pair[1]),
+                              ev["books"], ev["lo"], ev["hi"], ev["tol"]))
 
     dsu = _UnionFind()
-    for root, items in timed.items():
+    for root, items in buckets.items():
         items.sort(key=lambda x: x[4])  # по началу окна старта
         cap = _fuzzy_window_cap(root)
         n = len(items)
         for i in range(n):
-            hi_i, tol_i = items[i][5], items[i][6]
+            pair_i, sig_i0, sig_i1, books_i, _lo_i, hi_i, tol_i = items[i]
+            single_i = len(books_i) == 1
             for j in range(i + 1, n):
+                pair_j, sig_j0, sig_j1, books_j, lo_j, _hi_j, tol_j = items[j]
                 # нижняя оценка расстояния между временами старта: окна
                 # отсортированы по началу, поэтому оценка только растёт
-                gap = items[j][4] - hi_i
+                gap = lo_j - hi_i
                 if gap > cap:
                     break
-                if gap > max(tol_i, items[j][6]):
+                if single_i and books_i == books_j:
+                    continue  # оба написания только у ОДНОЙ БК — разные матчи
+                if gap > max(tol_i, tol_j):
                     continue
-                _merge_if_alike(dsu, items[i], items[j])
-
-    for root, items in loose.items():
-        # бессрочных событий немного (только лайв и только там, где БК не
-        # прислала время), поэтому сравнение со всем корнем не дорого
-        rest = timed.get(root, ())
-        for i, item in enumerate(items):
-            for other in itertools.chain(items[i + 1:], rest):
-                _merge_if_alike(dsu, item, other)
+                straight_ok = (_may_match(sig_i0, sig_j0)
+                              and _may_match(sig_i1, sig_j1))
+                swapped_ok = (_may_match(sig_i0, sig_j1)
+                             and _may_match(sig_i1, sig_j0))
+                if not straight_ok and not swapped_ok:
+                    continue  # ни в одной ориентации имена не дотянут до порога
+                straight = swapped = -1.0
+                if straight_ok:
+                    r00 = difflib.SequenceMatcher(None, pair_i[0], pair_j[0]).ratio()
+                    r11 = difflib.SequenceMatcher(None, pair_i[1], pair_j[1]).ratio()
+                    straight = (r00 + r11) / 2
+                if swapped_ok:
+                    r01 = difflib.SequenceMatcher(None, pair_i[0], pair_j[1]).ratio()
+                    r10 = difflib.SequenceMatcher(None, pair_i[1], pair_j[0]).ratio()
+                    swapped = (r01 + r10) / 2
+                if straight >= swapped:
+                    avg, ra, rb = straight, r00, r11
+                    match0, match1 = pair_j[0], pair_j[1]
+                else:
+                    avg, ra, rb = swapped, r01, r10
+                    match0, match1 = pair_j[1], pair_j[0]
+                if avg < FUZZY_NAME_SIM_THRESHOLD:
+                    continue
+                if ra < FUZZY_NAME_MIN_SINGLE_RATIO \
+                        or rb < FUZZY_NAME_MIN_SINGLE_RATIO:
+                    continue
+                if pair_i[0] != match0:
+                    dsu.union(pair_i[0], match0)
+                if pair_i[1] != match1:
+                    dsu.union(pair_i[1], match1)
 
     return {name: dsu.find(name) for name in dsu._parent}
-
-
-def _merge_if_alike(dsu: _UnionFind, a: tuple, b: tuple) -> None:
-    """Сливает имена двух пар команд, если они достаточно похожи.
-
-    Решение о времени старта принимает вызывающий — здесь только имена."""
-    pair_a, sig_a0, sig_a1, books_a = a[0], a[1], a[2], a[3]
-    pair_b, sig_b0, sig_b1, books_b = b[0], b[1], b[2], b[3]
-    if len(books_a) == 1 and books_a == books_b:
-        return  # оба написания только у ОДНОЙ БК — это разные её матчи
-    straight_ok = _may_match(sig_a0, sig_b0) and _may_match(sig_a1, sig_b1)
-    swapped_ok = _may_match(sig_a0, sig_b1) and _may_match(sig_a1, sig_b0)
-    if not straight_ok and not swapped_ok:
-        return  # ни в одной ориентации имена не дотянут до порога
-    straight = swapped = -1.0
-    if straight_ok:
-        r00 = difflib.SequenceMatcher(None, pair_a[0], pair_b[0]).ratio()
-        r11 = difflib.SequenceMatcher(None, pair_a[1], pair_b[1]).ratio()
-        straight = (r00 + r11) / 2
-    if swapped_ok:
-        r01 = difflib.SequenceMatcher(None, pair_a[0], pair_b[1]).ratio()
-        r10 = difflib.SequenceMatcher(None, pair_a[1], pair_b[0]).ratio()
-        swapped = (r01 + r10) / 2
-    if straight >= swapped:
-        avg, ra, rb = straight, r00, r11
-        match0, match1 = pair_b[0], pair_b[1]
-    else:
-        avg, ra, rb = swapped, r01, r10
-        match0, match1 = pair_b[1], pair_b[0]
-    if avg < FUZZY_NAME_SIM_THRESHOLD:
-        return
-    if ra < FUZZY_NAME_MIN_SINGLE_RATIO or rb < FUZZY_NAME_MIN_SINGLE_RATIO:
-        return
-    if pair_a[0] != match0:
-        dsu.union(pair_a[0], match0)
-    if pair_a[1] != match1:
-        dsu.union(pair_a[1], match1)
 
 
 def _canon(name_map: dict[str, str] | None, name: str) -> str:
@@ -639,7 +609,7 @@ def find_arbs_1x2(odds: Iterable[MarketOdds],
         cluster = 0
         if o.kind == KIND_PREMATCH and o.start_ts:
             cluster = time_clusters.get((o.kind, teams), {}).get(o.start_ts, 0)
-        key = (o.kind, teams, cluster, canon_market_key(o.market_key))
+        key = (o.kind, teams, cluster, o.market_key)
         g = groups[key]
         g["sample"] = g["sample"] or o
         g["books"].add(o.bookmaker)

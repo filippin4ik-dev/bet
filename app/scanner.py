@@ -100,9 +100,6 @@ class Scanner:
         # _name_map) и переиспользуем на вилки, матчи и роспись.
         self._name_map_cache: dict[str, str] = {}
         self._name_map_at: float = 0.0
-        # по каким БК построена карта имён: пока в памяти есть БК, которой
-        # в ней не было, карта заведомо неполная (см. _name_map)
-        self._name_map_books: set[str] = set()
         self._name_map_lock = threading.Lock()
         # Разбор котировок по событиям (список матчей и роспись одного
         # матча) стоит секунды на сотни тысяч котировок, а интерфейс тянет
@@ -184,7 +181,7 @@ class Scanner:
         with self._lock:
             return [o for odds in self._odds_by_bk.values() for o in odds]
 
-    def _name_map(self, all_odds: list[MarketOdds], books: set[str],
+    def _name_map(self, all_odds: list[MarketOdds],
                   refresh: bool = False) -> dict[str, str]:
         """Каноничные имена команд — один кэш на весь сканер.
 
@@ -199,26 +196,15 @@ class Scanner:
         пересчёта вилок. Запросам из интерфейса (refresh=False) отдаём
         готовую карту, даже если ей пора обновиться: «устаревшая» карта
         значит лишь, что пара новых написаний имён ещё не слита, а платить
-        за пересчёт секундами посреди ответа незачем.
-
-        books — какие БК уже лежат в памяти. Появилась БК, которой в карте
-        не было, — карта строится заново НЕ ДОЖИДАЯСЬ срока: слияние имён
-        существует только между РАЗНЫМИ БК, поэтому карта, построенная по
-        одной первой отчитавшейся БК, пуста. А первый пересчёт вилок как раз
-        и запускается, едва отчиталась первая БК, — и эта пустая карта
-        застревала на пять минут (FUZZY_NAME_MAP_REFRESH), пока остальные БК
-        уже давно принесли линию. Всё это время вилки по событиям, где БК
-        пишут имя команды хоть немного по-разному, не находились вовсе — и
-        так после каждого запуска и каждого перезапуска сканера."""
+        за пересчёт секундами посреди ответа незачем."""
         now = time.time()
         with self._name_map_lock:
-            fresh = now - self._name_map_at <= FUZZY_NAME_MAP_REFRESH
-            whole = not books - self._name_map_books
-            if self._name_map_at and (not refresh or (fresh and whole)):
+            if self._name_map_at and (refresh is False
+                                      or now - self._name_map_at
+                                      <= FUZZY_NAME_MAP_REFRESH):
                 return self._name_map_cache
             self._name_map_cache = build_name_canon_map(all_odds)
             self._name_map_at = now
-            self._name_map_books = set(books)
             return self._name_map_cache
 
     @staticmethod
@@ -266,8 +252,7 @@ class Scanner:
                 rev = self._odds_rev
                 all_odds = [o for odds in self._odds_by_bk.values()
                             for o in odds]
-                books = set(self._odds_by_bk)
-            name_map = self._name_map(all_odds, books)
+            name_map = self._name_map(all_odds)
             groups = self._event_groups(all_odds, name_map)
             with self._lock:
                 # за время разбора пришли новые котировки — этот разбор уже
@@ -504,9 +489,8 @@ class Scanner:
         with self._lock:
             self._dirty = False
             all_odds = [o for os_ in self._odds_by_bk.values() for o in os_]
-            books = set(self._odds_by_bk)
 
-        name_map = self._name_map(all_odds, books, refresh=True)
+        name_map = self._name_map(all_odds, refresh=True)
         arbs = find_arbs(all_odds, name_map)
         arbs3 = find_arbs_1x2(all_odds, name_map)
         with self._lock:
@@ -721,12 +705,6 @@ class Scanner:
             self._events_checked = 0
             self._quotes_checked = 0
             self._running = False
-        with self._name_map_lock:
-            # линии больше нет — карта имён от неё же и осталась бы висеть
-            # до конца своего срока, уже ни к чему не относясь
-            self._name_map_cache = {}
-            self._name_map_at = 0.0
-            self._name_map_books = set()
         log.info("[%s] сканер остановлен", self.mode)
 
     def _replace_parser(self, parser: BaseParser) -> BaseParser:
