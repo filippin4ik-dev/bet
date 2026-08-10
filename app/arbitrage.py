@@ -173,7 +173,12 @@ def build_name_canon_map(odds: list[MarketOdds]) -> dict[str, str]:
     # какое окно времени укладываются их времена старта
     events: dict[tuple, dict] = {}
     for o in odds:
-        if o.kind != KIND_PREMATCH or not o.start_ts:
+        # Время старта нужно как якорь окна кандидатов; лайв тоже участвует
+        # — у лайв-котировки это время начала уже идущего матча, якорь не
+        # хуже прематчевого. Раньше лайв отсекался, а лайв-сканер держит
+        # ТОЛЬКО лайв — то есть карта имён у него выходила пустой всегда, и
+        # любое расхождение в написании стоило лайв-вилки целиком.
+        if not o.start_ts:
             continue
         t1, t2 = norm_team(o.team1), norm_team(o.team2)
         if not t1 or not t2 or t1 == t2:

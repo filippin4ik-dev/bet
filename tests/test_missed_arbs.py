@@ -14,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.arbitrage import (build_name_canon_map, find_arbs,  # noqa: E402
                            norm_team)
-from app.models import KIND_PREMATCH, MarketOdds  # noqa: E402
+from app.models import KIND_LIVE, KIND_PREMATCH, MarketOdds  # noqa: E402
 from app.parsers.html_utils import canon_market_key  # noqa: E402
 
 NOW = 2_000_000_000.0
@@ -169,6 +169,27 @@ def test_same_single_bookmaker_spellings_still_not_merged():
     print("OK: test_same_single_bookmaker_spellings_still_not_merged")
 
 
+def test_live_quotes_get_fuzzy_name_merging_too():
+    """Лайв-сканер держит ТОЛЬКО лайв-котировки, а фаззи-слияние имён брало
+    в работу один прематч — карта имён у лайва выходила пустой всегда, и
+    любое расхождение в написании стоило лайв-вилки целиком."""
+    live = [
+        MarketOdds(bookmaker=bk, sport="Футбол", team1=team1,
+                   team2="Партизан", market="Победитель",
+                   market_key="winner", outcome1="П1", outcome2="П2",
+                   k1=k1, k2=k2, kind=KIND_LIVE, start_ts=NOW,
+                   start_time="01.01 20:00")
+        for bk, team1, k1, k2 in (
+            ("Winline", "Црвена Звезда", 2.20, 1.90),
+            ("Fonbet", "Црвена Зведза", 1.80, 2.30))
+    ]
+    assert build_name_canon_map(live), "лайв тоже должен сливать написания"
+    arbs = find_arbs(live)
+    assert len(arbs) == 1
+    assert arbs[0].kind == KIND_LIVE
+    print("OK: test_live_quotes_get_fuzzy_name_merging_too")
+
+
 def test_prefilter_never_rejects_a_pair_difflib_would_accept():
     """Предфильтр по «паспорту» имени (длина + маска символов) обязан быть
     честным: он вправе пропустить лишнее, но не вправе отсечь пару, которую
@@ -215,5 +236,6 @@ if __name__ == "__main__":
     test_third_bookmaker_spelling_merges_when_two_others_agree()
     test_two_bookmakers_each_side_of_a_spelling_merge()
     test_same_single_bookmaker_spellings_still_not_merged()
+    test_live_quotes_get_fuzzy_name_merging_too()
     test_prefilter_never_rejects_a_pair_difflib_would_accept()
     print("Все тесты прошли.")
