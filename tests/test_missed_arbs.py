@@ -220,6 +220,44 @@ def test_live_quotes_get_fuzzy_name_merging_too():
     print("OK: test_live_quotes_get_fuzzy_name_merging_too")
 
 
+def test_live_quote_without_start_time_still_merges_names():
+    """Лайв-парсеры, в отличие от прематчевых, время старта НЕ требуют:
+    матч уже идёт, отбрасывать его не за что, — и у BetBoom, Fonbet, Melbet
+    и bc.game оно вполне может не прийти. А слияние написаний имён брало
+    только котировки со временем старта: БК без него выпадала из карты имён,
+    и её кэфы не попадали в событие. В лайве это тем обиднее, что событие по
+    времени там и не разбивается (_time_clusters работает по прематчу) —
+    якоря нет ни у кого, терять было нечего."""
+    def live(bk, team1, k1, k2, start_ts):
+        return MarketOdds(
+            bookmaker=bk, sport="Футбол", team1=team1, team2="Партизан",
+            market="Победитель", market_key="winner",
+            outcome1="П1", outcome2="П2", k1=k1, k2=k2,
+            kind=KIND_LIVE, start_ts=start_ts, start_time=None)
+
+    odds = [live("Winline", "Црвена Звезда", 2.20, 1.90, NOW),
+            live("Fonbet", "Црвена Зведза", 1.80, 2.30, None)]
+    name_map = build_name_canon_map(odds)
+    assert name_map.get(norm_team("Црвена Звезда")) == \
+        name_map.get(norm_team("Црвена Зведза")) is not None
+    assert len(find_arbs(odds)) == 1
+    print("OK: test_live_quote_without_start_time_still_merges_names")
+
+
+def test_prematch_without_start_time_is_still_left_alone():
+    """Обратная граница: в прематче окно по времени старта — единственное,
+    что отделяет первый матч пары от ответного, и без него сливать имена
+    нельзя. Такая котировка в карту имён по-прежнему не попадает."""
+    odds = [
+        _named("Winline", "Црвена Звезда", 2.20, 1.90),
+        mk("Fonbet", "winner", 1.80, 2.30, outcome1="П1", outcome2="П2",
+           team1="Црвена Зведза", team2="Партизан", start_ts=None),
+    ]
+    assert not build_name_canon_map(odds), (
+        "прематч без времени старта сливать имена не должен")
+    print("OK: test_prematch_without_start_time_is_still_left_alone")
+
+
 # ---------- подпись рынка: одно и то же разными словами ----------
 
 def _scopes(*names):
@@ -370,6 +408,8 @@ if __name__ == "__main__":
     test_one_malformed_quote_does_not_wipe_out_every_arb()
     test_canon_fills_in_missing_key_segments()
     test_live_quotes_get_fuzzy_name_merging_too()
+    test_live_quote_without_start_time_still_merges_names()
+    test_prematch_without_start_time_is_still_left_alone()
     test_corner_market_is_the_same_whatever_it_is_called()
     test_cards_market_is_the_same_whatever_it_is_called()
     test_refined_market_is_not_merged_with_the_general_one()
