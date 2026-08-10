@@ -258,6 +258,27 @@ def test_prematch_without_start_time_is_still_left_alone():
     print("OK: test_prematch_without_start_time_is_still_left_alone")
 
 
+def test_scoring_wordings_land_where_they_belong():
+    """BetBoom выбрасывала ЛЮБОЙ рынок со словом «результативность» — под
+    тот же фильтр, что отрезки по минутам и командные рынки. Но «Тотал
+    результативности» — это обычный тотал голов, и выбрасывался он вместе
+    с ними, то есть у БК пропадал самый ходовой рынок целиком.
+
+    Фильтр снят, и вот почему это безопасно: на ОСНОВНОЙ рынок выходят
+    только те формулировки, которые основным рынком и являются. Всё
+    остальное сохраняет свой токен и остаётся отдельной группой — слиться
+    с тоталом матча в ложную вилку ему не с чем."""
+    for name in ("Тотал результативности", "Тотал результативности матча",
+                 "Фора по результативности", "Исход по результативности"):
+        assert market_scope(name) == "", f"{name}: это основной рынок"
+    for name in ("Тотал результативных передач", "Индивидуальная "
+                 "результативность", "Результативность 1-15 мин.",
+                 "Тотал результативных действий"):
+        assert market_scope(name) != "", (
+            f"{name}: это НЕ основной рынок, ему нужен свой токен")
+    print("OK: test_scoring_wordings_land_where_they_belong")
+
+
 # ---------- запасной разбор страницы: стороны тотала ----------
 
 def _totals_from_html(html):
@@ -478,6 +499,7 @@ if __name__ == "__main__":
     test_live_quotes_get_fuzzy_name_merging_too()
     test_live_quote_without_start_time_still_merges_names()
     test_prematch_without_start_time_is_still_left_alone()
+    test_scoring_wordings_land_where_they_belong()
     test_total_sides_follow_the_label_not_the_layout_order()
     test_total_sides_read_the_label_from_attributes_too()
     test_total_without_a_label_keeps_the_layout_order()

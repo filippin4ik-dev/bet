@@ -213,7 +213,7 @@ class BetBoomParser(BaseParser):
             group = _text(st, _ST_GROUP).lower().replace("ё", "е").strip()
             if group in _SKIP_GROUPS:
                 continue  # экспрессы, интервалы, игроки… — не наши рынки
-            if "ком." in low or "мин." in low or "результативн" in low:
+            if "ком." in low or "мин." in low:
                 continue  # командные рынки и отрезки без явной группы
             # «Тотал чет/нечет» — двухисходный (Чётный/Нечётный)
             if low == "тотал чет/нечет" and short in (_OE_EVEN, _OE_ODD):
