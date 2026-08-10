@@ -15,7 +15,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from app.arbitrage import (build_name_canon_map, find_arbs,  # noqa: E402
                            norm_team)
 from app.models import KIND_LIVE, KIND_PREMATCH, MarketOdds  # noqa: E402
-from app.parsers.html_utils import canon_market_key  # noqa: E402
+from app.parsers.html_utils import (canon_market_key,  # noqa: E402
+                                    market_scope)
 
 NOW = 2_000_000_000.0
 
@@ -219,6 +220,107 @@ def test_live_quotes_get_fuzzy_name_merging_too():
     print("OK: test_live_quotes_get_fuzzy_name_merging_too")
 
 
+# ---------- подпись рынка: одно и то же разными словами ----------
+
+def _scopes(*names):
+    return {market_scope(n) for n in names}
+
+
+def test_corner_market_is_the_same_whatever_it_is_called():
+    """«Угловые удары» давали scope corners+shots, а «Тотал угловых» —
+    corners: угловой попадал ещё и в токен ударов по воротам. Рынок
+    расходился по двум группам, и вилки по угловым между такими БК не
+    находились вовсе."""
+    assert len(_scopes("Тотал угловых", "Тотал угловых ударов",
+                       "Фора по угловым", "Угловые")) == 1
+    assert market_scope("Тотал угловых") == "corners"
+    print("OK: test_corner_market_is_the_same_whatever_it_is_called")
+
+
+def test_cards_market_is_the_same_whatever_it_is_called():
+    """«Жёлтые карты» уходили в карты киберспорта (cards+maps), а «Жёлтые
+    карточки» — в cards. Тотал ЖК — ходовой футбольный рынок, и все вилки
+    по нему между такими БК терялись молча."""
+    assert len(_scopes("Жёлтые карточки", "Желтые карты", "Тотал карточек",
+                       "Тотал жёлтых карт")) == 1
+    assert market_scope("Тотал карточек") == "cards"
+    assert len(_scopes("Красные карточки", "Красные карты")) == 1
+    assert market_scope("Красные карты") == "redcards"
+    print("OK: test_cards_market_is_the_same_whatever_it_is_called")
+
+
+def test_refined_market_is_not_merged_with_the_general_one():
+    """Вытеснение общего токена не должно склеивать РАЗНЫЕ рынки: угловые
+    — это не удары, карточки — не карты киберспорта, красные — не все
+    карточки."""
+    assert market_scope("Тотал угловых") != market_scope("Тотал ударов")
+    assert market_scope("Тотал карточек") != market_scope("Тотал карт")
+    assert market_scope("Тотал красных карточек") != \
+        market_scope("Тотал карточек")
+    assert market_scope("Тотал ударов в створ") != market_scope("Тотал ударов")
+    print("OK: test_refined_market_is_not_merged_with_the_general_one")
+
+
+def test_main_market_survives_every_wording():
+    """Основной рынок — самый ходовой, и любое слово, которого нет в
+    словаре служебных, уводило его в ЗАПАСНОЙ токен: «Тотал мячей», «Итог
+    матча», «Тотал по очкам» переставали быть основным рынком и не
+    сшивались уже НИ С ОДНОЙ БК."""
+    assert _scopes(
+        "Тотал", "Фора", "Исход", "Тотал голов", "Тотал мячей",
+        "Тотал забитых мячей", "Количество мячей", "Фора по мячам",
+        "Тотал по очкам", "Фора по очкам", "Тотал по баллам",
+        "Фора по голам", "Итог матча", "Итоговый результат",
+        "Тотал результативности", "Основной исход",
+        "Исход основного времени") == {""}
+    print("OK: test_main_market_survives_every_wording")
+
+
+def test_individual_total_conceded_is_not_the_same_as_scored():
+    """Обратная защита: «пропущенные» намеренно оставлены отдельным
+    рынком — слить их с забитыми значило бы выдать ложную вилку."""
+    assert market_scope("Тотал пропущенных мячей") != market_scope(
+        "Тотал забитых мячей")
+    print("OK: test_individual_total_conceded_is_not_the_same_as_scored")
+
+
+def test_synonym_markets_meet_each_other():
+    """Разные БК называют один рынок разными словами: «Нарушения» и
+    «Фолы», «Вбрасывания» и «Вбросы», «Положение вне игры» и «Офсайды»."""
+    assert len(_scopes("Тотал фолов", "Тотал нарушений")) == 1
+    assert len(_scopes("Тотал аутов", "Тотал вбрасываний")) == 1
+    assert len(_scopes("Офсайды", "Положение вне игры")) == 1
+    assert len(_scopes("Тотал эйсов", "Тотал подач навылет")) == 1
+    assert len(_scopes("Тотал башен", "Башни", "Вышки")) == 1
+    print("OK: test_synonym_markets_meet_each_other")
+
+
+def test_corner_total_arb_is_found_between_differently_worded_books():
+    """Тот же баг целиком, от подписи БК до вилки."""
+    from app.parsers.html_utils import market_scope as scope
+    odds = [
+        mk("Winline", f"total:{scope('Тотал угловых')}:9.5", 2.20, 1.90,
+           outcome1="ТБ 9.5", outcome2="ТМ 9.5"),
+        mk("BetBoom", f"total:{scope('Тотал угловых ударов')}:9.5",
+           1.80, 2.30, outcome1="ТБ 9.5", outcome2="ТМ 9.5"),
+    ]
+    assert len(find_arbs(odds)) == 1, "вилка по угловым обязана находиться"
+    print("OK: test_corner_total_arb_is_found_between_differently_worded_books")
+
+
+def test_empty_scope_segment_does_not_split_a_total():
+    """«total::2.5» и «total:2.5» — один и тот же тотал матча."""
+    assert canon_market_key("total::2.5") == canon_market_key("total:2.5")
+    assert canon_market_key("hcap:::-1.5") == canon_market_key("hcap:-1.5")
+    assert canon_market_key("total:corners:9.5") == "total:corners:9.5"
+    odds = [
+        mk("Winline", "total::2.5", 2.20, 1.90, outcome1="ТБ", outcome2="ТМ"),
+        mk("Fonbet", "total:2.5", 1.80, 2.30, outcome1="ТБ", outcome2="ТМ"),
+    ]
+    assert len(find_arbs(odds)) == 1
+    print("OK: test_empty_scope_segment_does_not_split_a_total")
+
+
 def test_prefilter_never_rejects_a_pair_difflib_would_accept():
     """Предфильтр по «паспорту» имени (длина + маска символов) обязан быть
     честным: он вправе пропустить лишнее, но не вправе отсечь пару, которую
@@ -268,5 +370,13 @@ if __name__ == "__main__":
     test_one_malformed_quote_does_not_wipe_out_every_arb()
     test_canon_fills_in_missing_key_segments()
     test_live_quotes_get_fuzzy_name_merging_too()
+    test_corner_market_is_the_same_whatever_it_is_called()
+    test_cards_market_is_the_same_whatever_it_is_called()
+    test_refined_market_is_not_merged_with_the_general_one()
+    test_main_market_survives_every_wording()
+    test_individual_total_conceded_is_not_the_same_as_scored()
+    test_synonym_markets_meet_each_other()
+    test_corner_total_arb_is_found_between_differently_worded_books()
+    test_empty_scope_segment_does_not_split_a_total()
     test_prefilter_never_rejects_a_pair_difflib_would_accept()
     print("Все тесты прошли.")
