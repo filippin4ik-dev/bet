@@ -1,4 +1,5 @@
 """Общие помощники для HTML-парсеров (Winline / BetBoom / Лига Ставок)."""
+import functools
 import re
 import time as _time
 from datetime import datetime, timedelta, timezone
@@ -395,6 +396,7 @@ def neg_hcap(line: str) -> str:
     return "-" + line
 
 
+@functools.lru_cache(maxsize=100_000)
 def canon_market_key(key: str) -> str:
     """Единая форма ключа рынка: один и тот же рынок у разных БК — один ключ.
 
@@ -419,6 +421,10 @@ def canon_market_key(key: str) -> str:
     котировка одной БК уносила разом ВСЕ вилки по всем БК, и так каждый
     цикл, пока эта котировка жива. Лучше не понять один рынок, чем
     потерять всю линию.
+
+    Функция чистая, а зовёт её движок дважды на КАЖДУЮ котировку (разбор
+    исходов и группировка) — это миллионы вызовов за пересчёт при считанных
+    сотнях разных ключей на всю линию, поэтому с кэшем.
     """
     if key.startswith("hcap"):
         parts = _key_parts(key, 3)     # hcap:<scope>:<линия>
