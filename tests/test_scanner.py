@@ -18,6 +18,7 @@ os.environ["DB_PATH"] = str(Path(_tmpdir) / "scanner-test.sqlite3")
 os.environ["SECRET_KEY"] = "test-secret-key-not-for-prod"
 
 from app import bk_control, config, db  # noqa: E402
+from app.arbitrage import norm_team  # noqa: E402
 from app.models import KIND_LIVE, KIND_PREMATCH, MarketOdds  # noqa: E402
 from app.parsers.base import BaseParser  # noqa: E402
 from app.scanner import Scanner  # noqa: E402
@@ -502,6 +503,37 @@ def test_grouping_survives_new_odds_for_a_short_while():
     sc._groups_ttl = 0
     sc._drop_stale_groups()
     assert sc._groups == {} and sc._matches == []
+
+
+def test_name_map_is_rebuilt_when_a_new_bookmaker_arrives():
+    """Карта имён держится FUZZY_NAME_MAP_REFRESH (пять минут) — она дорогая.
+    Но слияние написаний существует только МЕЖДУ РАЗНЫМИ БК, поэтому карта,
+    построенная по одной первой отчитавшейся БК, пуста. А первый пересчёт
+    вилок запускается как раз тогда, когда отчиталась первая БК: пустая
+    карта застревала на пять минут, и всё это время вилки по событиям с
+    разным написанием имени не находились вовсе — после каждого запуска."""
+    def quote(bk, team1):
+        return MarketOdds(
+            bookmaker=bk, sport="Футбол", team1=team1, team2="Партизан",
+            market="Победитель", market_key="winner",
+            outcome1="П1", outcome2="П2", k1=2.2, k2=1.9,
+            start_ts=time.time() + 3600, start_time="01.01 20:00")
+
+    sc = Scanner(mode=KIND_PREMATCH, parsers=[_Fake("БК1"), _Fake("БК2")])
+    first = [quote("БК1", "Црвена Звезда")]
+    assert sc._name_map(first, {"БК1"}, refresh=True) == {}, (
+        "по одной БК сливать нечего — карта пуста")
+
+    both = first + [quote("БК2", "Црвена Зведза")]
+    name_map = sc._name_map(both, {"БК1", "БК2"}, refresh=True)
+    assert name_map, "вторая БК обязана пересобрать карту, не дожидаясь срока"
+    assert name_map[norm_team("Црвена Звезда")] == \
+        name_map[norm_team("Црвена Зведза")]
+
+    # знакомый набор БК срока не отменяет: карта дорогая, её и берегут
+    sc._name_map_cache = {"метка": "метка"}
+    assert sc._name_map(both, {"БК1", "БК2"}, refresh=True) == {
+        "метка": "метка"}
 
 
 def test_matches_snapshot_sorted_by_start_time():
