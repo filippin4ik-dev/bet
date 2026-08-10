@@ -47,7 +47,8 @@ from itertools import combinations
 
 from .arbitrage import (_market_group, _start_tolerance,
                         _team_pair_similarity, find_arbs, norm_team)
-from .config import FUZZY_NAME_SIM_THRESHOLD, START_TS_TOLERANCE
+from .config import (ARB_MAX_PROFIT, FUZZY_NAME_SIM_THRESHOLD,
+                     START_TS_TOLERANCE)
 from .models import KIND_PREMATCH
 from .parsers import get_parsers
 from .parsers.html_utils import format_start
@@ -64,6 +65,37 @@ logging.basicConfig(level=logging.INFO,
 _NAME_SIM_THRESHOLD = 0.6
 _NEAR_TS_TOLERANCE = 3 * 3600
 _MAX_NEAR_MISSES = 40
+_MAX_CAPPED = 40
+
+
+def _report_capped(prematch: list, shown: list) -> None:
+    """Показывает вилки, которые отбросил потолок доходности.
+
+    Потолок (ARB_MAX_PROFIT) стоит не против «слишком большой прибыли», а
+    против ошибок сопоставления: если движок свёл в один рынок цены разных
+    матчей, «доходность» выходит неправдоподобной. Но отсев молчаливый, и
+    по одному числу вилок не понять, прячет он чужую ошибку БК (её как раз
+    ловить и надо) или нашу собственную. Поэтому показываем отброшенное
+    списком — каждую строку видно и можно проверить руками на сайтах БК.
+    """
+    seen = {a.match_key for a in shown}
+    capped = [a for a in find_arbs(prematch, max_profit=float("inf"))
+              if a.match_key not in seen]
+    print("-" * 72)
+    print(f"Отброшено потолком доходности ARB_MAX_PROFIT={ARB_MAX_PROFIT:g}%: "
+          f"{len(capped)}")
+    if not capped:
+        print("  (ничего — порог сейчас ничего не прячет)")
+        return
+    print("  Проверьте эти строки на сайтах БК: если кэфы совпадают, это "
+          "ошибка БК и её стоит показывать (поднимите ARB_MAX_PROFIT); если "
+          "нет — движок свёл разные матчи или рынки, и это баг.")
+    for a in capped[:_MAX_CAPPED]:
+        print(f"  {a.profit_pct:7.1f}%  {a.sport[:26]:26} "
+              f"{a.team1[:18]:18}-{a.team2[:18]:18} {a.market[:26]:26} "
+              f"{a.k1_max}@{a.k1_bookmaker} / {a.k2_max}@{a.k2_bookmaker}")
+    if len(capped) > _MAX_CAPPED:
+        print(f"  ... и ещё {len(capped) - _MAX_CAPPED}")
 
 
 def main() -> None:
@@ -127,8 +159,11 @@ def main() -> None:
         events_by_sport[root] += 1
         if len(books) >= 2:
             matched_by_sport[root] += 1
-    for a in find_arbs(prematch):
+    shown_arbs = find_arbs(prematch)
+    for a in shown_arbs:
         arbs_by_sport[a.sport.split("·")[0].strip()] += 1
+
+    _report_capped(prematch, shown_arbs)
 
     print("-" * 72)
     print("Разбивка по видам спорта (события / из них совпало у 2+ БК / "

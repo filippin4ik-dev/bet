@@ -535,7 +535,17 @@ def _time_clusters(odds: list[MarketOdds],
 
 
 def find_arbs(odds: Iterable[MarketOdds],
-              name_map: dict[str, str] | None = None) -> list[Arb]:
+              name_map: dict[str, str] | None = None,
+              max_profit: float | None = None) -> list[Arb]:
+    """max_profit — потолок доходности; по умолчанию ARB_MAX_PROFIT.
+
+    Задавать его отдельно нужно диагностике (app.diagnose_overlap): она
+    считает линию дважды и показывает, что именно потолок отбросил. Иначе
+    отсев виден только строкой в логе, и понять, прячет ли порог ошибку
+    сопоставления или настоящую щедрость БК, нельзя.
+    """
+    if max_profit is None:
+        max_profit = ARB_MAX_PROFIT
     odds = list(odds)
     if name_map is None:
         name_map = build_name_canon_map(odds)
@@ -610,7 +620,7 @@ def find_arbs(odds: Iterable[MarketOdds],
                 # Аномально высокая «доходность» — почти наверняка не
                 # вилка, а ошибка сопоставления (разные рынки/матчи у БК).
                 # Не показываем: ставка по ней приведёт к потере денег.
-                if profit_pct > ARB_MAX_PROFIT:
+                if profit_pct > max_profit:
                     if not warned:
                         log.info(
                             "Отброшена подозрительная вилка %.1f%% "
@@ -655,14 +665,19 @@ def find_arbs(odds: Iterable[MarketOdds],
 
 
 def find_arbs_1x2(odds: Iterable[MarketOdds],
-                  name_map: dict[str, str] | None = None) -> list[Arb3]:
+                  name_map: dict[str, str] | None = None,
+                  max_profit: float | None = None) -> list[Arb3]:
     """Ищет ТРЁХисходные вилки на рынке «Исход 1X2» (П1/X/П2).
 
     Отдельный движок от find_arbs: рынок с тремя взаимоисключающими
     исходами требует перебора троек кэфов (а не пар), поэтому логика
     группировки/сопоставления событий дублирует find_arbs, но подбор
     комбинаций и формула маржи — трёхсторонние.
+
+    max_profit — потолок доходности, см. find_arbs.
     """
+    if max_profit is None:
+        max_profit = ARB_MAX_PROFIT
     odds = list(odds)
     if name_map is None:
         name_map = build_name_canon_map(odds)
@@ -724,7 +739,7 @@ def find_arbs_1x2(odds: Iterable[MarketOdds],
             if margin >= 1:
                 continue
             profit_pct = (1 / margin - 1) * 100
-            if profit_pct > ARB_MAX_PROFIT:
+            if profit_pct > max_profit:
                 if not warned:
                     log.info(
                         "Отброшена подозрительная 1X2-вилка %.1f%% "
