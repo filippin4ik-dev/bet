@@ -4,7 +4,8 @@
 """
 import logging
 
-from ..config import BCGAME_ENABLED, LIGASTAVOK_ENABLED, MELBET_ENABLED
+from ..config import (BCGAME_ENABLED, BOOKMAKERS_ONLY, LIGASTAVOK_ENABLED,
+                      MELBET_ENABLED)
 from .base import BaseParser
 from .bcgame import BCGameParser
 from .betboom import BetBoomParser
@@ -17,10 +18,17 @@ from .winline import WinlineParser
 
 log = logging.getLogger("parsers")
 
-BOOKMAKERS = ["Winline", "BetBoom", "Fonbet", "LeonBet", "Betcity"] + \
-    (["Melbet"] if MELBET_ENABLED else []) + \
-    (["bc.game"] if BCGAME_ENABLED else []) + \
-    (["Liga Stavok"] if LIGASTAVOK_ENABLED else [])
+def _wanted(name: str) -> bool:
+    """Просили ли эту БК в BOOKMAKERS. Пустой список — берём все."""
+    return not BOOKMAKERS_ONLY or name.strip().lower() in BOOKMAKERS_ONLY
+
+
+BOOKMAKERS = [b for b in
+              ["Winline", "BetBoom", "Fonbet", "LeonBet", "Betcity"] +
+              (["Melbet"] if MELBET_ENABLED else []) +
+              (["bc.game"] if BCGAME_ENABLED else []) +
+              (["Liga Stavok"] if LIGASTAVOK_ENABLED else [])
+              if _wanted(b)]
 
 _ls_notice_shown = False
 _bc_notice_shown = False
@@ -55,4 +63,8 @@ def get_parsers() -> list[BaseParser]:
             "нужен резидентный прокси. Задайте LIGASTAVOK_PROXY (включится "
             "автоматически) или LIGASTAVOK_ENABLED=1 (см. README).")
         _ls_notice_shown = True
+    if BOOKMAKERS_ONLY:
+        parsers = [p for p in parsers if _wanted(p.name)]
+        log.info("Обход ограничен списком BOOKMAKERS: %s",
+                 ", ".join(p.name for p in parsers) or "(пусто!)")
     return parsers

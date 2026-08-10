@@ -254,6 +254,45 @@ def test_prefilter_never_rejects_a_pair_difflib_would_accept():
     print("OK: test_prefilter_never_rejects_a_pair_difflib_would_accept")
 
 
+def test_placeholder_team_names_do_not_make_an_event():
+    """«Хозяева»/«Гости» — не имена, а заглушка на ещё не объявленную пару.
+    У Fonbet таких «событий» под сотню, у Melbet больше, и все они сходятся
+    в ОДНУ пару: каждый такой матч одной БК сопоставлялся с каждым таким
+    матчем другой — разные матчи разных лиг с любыми кэфами. На живой линии
+    шести БК из этой каши набиралось 82 ложные вилки из 137."""
+    odds = [
+        mk("Fonbet", "total:2.5", 2.10, 2.05, outcome1="ТБ 2.5",
+           outcome2="ТМ 2.5", team1="Хозяева", team2="Гости"),
+        mk("Winline", "total:2.5", 2.10, 2.05, outcome1="ТБ 2.5",
+           outcome2="ТМ 2.5", team1="Хозяева", team2="Гости"),
+    ]
+    assert find_arbs(odds) == [], "матч без имён — не событие"
+    # обычные имена по-прежнему сшиваются
+    ok = [mk("Fonbet", "total:2.5", 2.10, 1.70, outcome1="ТБ 2.5",
+             outcome2="ТМ 2.5"),
+          mk("Winline", "total:2.5", 1.70, 2.05, outcome1="ТБ 2.5",
+             outcome2="ТМ 2.5")]
+    assert len(find_arbs(ok)) == 1
+    print("OK: test_placeholder_team_names_do_not_make_an_event")
+
+
+def test_1x2_market_is_not_treated_as_two_way():
+    """У исхода 1X2 пара П1/П2 — не весь рынок: ничья не покрыта. Считать
+    его двухисходным значит показать вилку, которой нет, — ставка по ней
+    теряет деньги на ничьей. Такой рынок разбирает find_arbs_1x2."""
+    def w(bk, k1, k2, k3):
+        return MarketOdds(
+            bookmaker=bk, sport="Футбол", team1="Спартак", team2="Зенит",
+            market="Исход", market_key="winner1x2", outcome1="П1",
+            outcome2="П2", outcome3="X", k1=k1, k2=k2, k3=k3,
+            kind=KIND_PREMATCH, start_ts=NOW, start_time="01.01 20:00")
+
+    # 1/1.5 + 1/3.6 = 0.944 < 1 — «вилка», если забыть про ничью
+    odds = [w("Fonbet", 1.50, 2.90, 3.80), w("Winline", 1.40, 3.60, 3.70)]
+    assert find_arbs(odds) == [], "трёхисходный рынок — не двухисходный"
+    print("OK: test_1x2_market_is_not_treated_as_two_way")
+
+
 if __name__ == "__main__":
     test_main_handicap_matches_across_key_forms()
     test_handicap_sides_stay_correct_across_key_forms()
@@ -268,5 +307,7 @@ if __name__ == "__main__":
     test_one_malformed_quote_does_not_wipe_out_every_arb()
     test_canon_fills_in_missing_key_segments()
     test_live_quotes_get_fuzzy_name_merging_too()
+    test_placeholder_team_names_do_not_make_an_event()
+    test_1x2_market_is_not_treated_as_two_way()
     test_prefilter_never_rejects_a_pair_difflib_would_accept()
     print("Все тесты прошли.")

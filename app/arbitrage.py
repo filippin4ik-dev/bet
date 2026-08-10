@@ -36,6 +36,18 @@ _NOISE = {"фк", "fc", "хк", "hc", "бк", "bc", "clubs", "клуб"}
 # Женские маркеры приводим к одному виду: «(ж)», «жен», «women», «w»
 _FEMALE = {"ж", "жен", "женщины", "w", "women"}
 
+# Заглушки вместо имён команд. БК ставит их, когда состав пары ещё не
+# объявлен, — и это НЕ имя: у Fonbet таких «событий» под сотню, у Melbet
+# ещё больше, и все они сходятся в одну пару «хозяева/гости». Тогда каждый
+# такой матч одной БК сопоставляется с каждым таким матчем другой, а это
+# разные матчи разных лиг: кэфы у них любые, и «вилки» из этой каши —
+# ложные. На живой линии шести БК так набиралось 82 вилки из 137.
+_PLACEHOLDER_TEAMS = {
+    "хозяева", "хозяин", "гости", "гость",
+    "1 команда", "2 команда", "1 команда я", "2 команда я",
+    "home", "away", "1 team", "2 team", "team1", "team2",
+}
+
 
 # Имена команд повторяются в сотнях тысяч котировок (одно событие — десятки
 # рынков у каждой БК), а нормализация не из дешёвых: на живой линии выходило
@@ -52,6 +64,16 @@ def norm_team(name: str) -> str:
             continue
         words.append("ж" if w in _FEMALE else w)
     return " ".join(sorted(words))  # порядок слов тоже не важен
+
+
+def _named(team1: str, team2: str) -> bool:
+    """Пара опознаётся по именам, а не заглушками «Хозяева»/«Гости».
+
+    Без имён событие не отличить от любого другого такого же, а вилка на
+    двух РАЗНЫХ матчах — ставка в никуда."""
+    t1, t2 = norm_team(team1), norm_team(team2)
+    return bool(t1) and bool(t2) and t1 != t2 \
+        and t1 not in _PLACEHOLDER_TEAMS and t2 not in _PLACEHOLDER_TEAMS
 
 
 def _team_pair_similarity(a: tuple[str, str], b: tuple[str, str]) -> float:
@@ -180,9 +202,9 @@ def build_name_canon_map(odds: list[MarketOdds]) -> dict[str, str]:
         # любое расхождение в написании стоило лайв-вилки целиком.
         if not o.start_ts:
             continue
-        t1, t2 = norm_team(o.team1), norm_team(o.team2)
-        if not t1 or not t2 or t1 == t2:
+        if not _named(o.team1, o.team2):
             continue
+        t1, t2 = norm_team(o.team1), norm_team(o.team2)
         root = o.sport.split("·")[0].strip().lower().replace("ё", "е")
         key = (root, frozenset((t1, t2)))
         tol = _start_tolerance(o.sport)
@@ -444,7 +466,8 @@ def _time_clusters(odds: list[MarketOdds],
     ts_by_event: dict[tuple, set] = defaultdict(set)
     tol_by_event: dict[tuple, float] = {}
     for o in odds:
-        if o.kind == KIND_PREMATCH and o.start_ts:
+        if o.kind == KIND_PREMATCH and o.start_ts \
+                and _named(o.team1, o.team2):
             teams = frozenset((_canon(name_map, norm_team(o.team1)),
                                _canon(name_map, norm_team(o.team2))))
             key = (o.kind, teams)
@@ -488,6 +511,14 @@ def find_arbs(odds: Iterable[MarketOdds],
             # игра на «без ничьей», хоть маржа 1/К1+1/К2 и меньше 1.
             continue
         if not (o.k1 and o.k2 and o.k1 > 1 and o.k2 > 1):
+            continue
+        if o.k3:
+            # трёхисходный рынок (исход 1X2): пара П1/П2 — НЕ весь рынок,
+            # ничья не покрыта. Считать его двухисходным значит показать
+            # вилку, которой нет: ставка по ней теряет деньги на ничьей.
+            # Такие рынки разбирает find_arbs_1x2, по всем трём исходам.
+            continue
+        if not _named(o.team1, o.team2):
             continue
         teams = frozenset((_canon(name_map, norm_team(o.team1)),
                            _canon(name_map, norm_team(o.team2))))
@@ -601,6 +632,8 @@ def find_arbs_1x2(odds: Iterable[MarketOdds],
             continue
         if not (o.k1 and o.k2 and o.k3
                 and o.k1 > 1 and o.k2 > 1 and o.k3 > 1):
+            continue
+        if not _named(o.team1, o.team2):
             continue
         teams = frozenset((_canon(name_map, norm_team(o.team1)),
                            _canon(name_map, norm_team(o.team2))))
