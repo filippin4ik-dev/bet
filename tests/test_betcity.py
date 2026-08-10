@@ -135,7 +135,10 @@ def test_handicap_market():
         "F1m": {"F1": 0, "F2": 0, "Kf_F1": _kf(1.86), "Kf_F2": _kf(1.96)},
     })
     odds = _by_key(_parse([m]))
-    o = odds["hcap:0"]
+    # scope пустой, но сегмент на месте — ключ обязан совпадать с тем, что
+    # пишут остальные БК, иначе фора матча не сшивается с ними (см.
+    # canon_market_key в app/parsers/html_utils.py)
+    o = odds["hcap::0"]
     assert (o.k1, o.k2) == (1.86, 1.96)
 
 
@@ -144,8 +147,8 @@ def test_handicap_signed_lines():
         "F1m": {"F1": -1, "F2": 1, "Kf_F1": _kf(2.1), "Kf_F2": _kf(1.69)},
     })
     odds = _by_key(_parse([m]))
-    assert "hcap:-1" in odds
-    assert odds["hcap:-1"].outcome2 == "Ф2 +1"
+    assert "hcap::-1" in odds
+    assert odds["hcap::-1"].outcome2 == "Ф2 +1"
 
 
 def test_handicap_inconsistent_lines_rejected():

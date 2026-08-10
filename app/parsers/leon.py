@@ -203,7 +203,9 @@ class LeonParser(BaseParser):
             except (TypeError, ValueError):
                 return None
             h1, h2 = fmt_hcap(h1_raw), fmt_hcap(h2_raw)
-            key = f"hcap:{scope}:{h1}" if scope else f"hcap:{h1}"
+            # scope пустой (фора всего матча) — сегмент всё равно на месте:
+            # «hcap::-1.5», как у остальных БК (см. canon_market_key)
+            key = f"hcap:{scope}:{h1}"
             return MarketOdds(
                 market=name, market_key=key,
                 outcome1=f"Ф1 {h1}", outcome2=f"Ф2 {h2}",
