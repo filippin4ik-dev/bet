@@ -1,8 +1,9 @@
-/* Страница входа: единственная задача — обменять пароль на cookie сессии.
- * После успеха возвращаемся туда, куда посетитель шёл (?next=…). */
+/* Страница входа: единственная задача — обменять логин и пароль на cookie
+ * сессии. После успеха возвращаемся туда, куда посетитель шёл (?next=…). */
 "use strict";
 
 const form = document.getElementById("gate-form");
+const username = document.getElementById("gate-username");
 const password = document.getElementById("gate-password");
 const submit = document.getElementById("gate-submit");
 const error = document.getElementById("gate-error");
@@ -23,10 +24,13 @@ form.addEventListener("submit", async (e) => {
     const resp = await fetch("/api/access/login", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ password: password.value }),
+      body: JSON.stringify({
+        username: username.value.trim(),
+        password: password.value,
+      }),
     });
     if (!resp.ok) {
-      let detail = "Неверный пароль";
+      let detail = "Неверный логин или пароль";
       try {
         detail = (await resp.json()).detail || detail;
       } catch (_) { /* тело не JSON — оставим текст по умолчанию */ }

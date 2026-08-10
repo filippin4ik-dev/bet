@@ -701,6 +701,24 @@ tbody tr.pinned.hot { box-shadow: inset 3px 0 0 var(--hot); background: var(--ho
 .autobet-btn:hover { background: color-mix(in srgb, var(--hot) 25%, transparent); }
 .autobet-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
+/* «Сохранить ставку» — запись вилки в профиль игрока. Кнопка стоит рядом
+   с «Открыть БК», но выглядит спокойнее: она ничего не ставит, а только
+   заносит в журнал уже сделанную ставку. */
+.save-bet-btn {
+  background: var(--info-soft);
+  color: var(--info);
+  border: 1px solid color-mix(in srgb, var(--info) 45%, transparent);
+  border-radius: var(--radius-sm);
+  padding: 11px 18px;
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.98rem;
+  font-weight: 700;
+  flex: 1;
+}
+.save-bet-btn:hover { background: color-mix(in srgb, var(--info) 25%, transparent); }
+.save-bet-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
 .autobet-result {
   margin-top: 10px;
   padding: 10px 12px;
@@ -867,6 +885,109 @@ code {
   padding: 0 4px;
   font-size: 0.9em;
 }
+
+/* ------------------------------------------------------ профиль игрока --- */
+
+/* Баланс в шапке сайта: имя игрока и деньги одной плашкой-ссылкой */
+.profile-chip { gap: 8px; }
+.profile-chip b { color: var(--accent); font-variant-numeric: tabular-nums; }
+
+.profile-page { display: flex; flex-direction: column; gap: 14px; margin-top: 14px; }
+
+.money-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 12px;
+}
+.money-card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-sm);
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.money-card.accent-card {
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+  background: var(--accent-soft);
+}
+.money-label {
+  color: var(--muted);
+  font-size: 0.74rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.money-value {
+  font-size: 1.5rem;
+  font-weight: 750;
+  font-variant-numeric: tabular-nums;
+}
+.money-value.profit { color: var(--accent); }
+.money-note { color: var(--muted); font-size: 0.78rem; }
+
+.profile-card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-sm);
+  padding: 16px 18px;
+}
+.profile-card h2 { font-size: 1.05rem; margin-bottom: 8px; }
+.profile-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.profile-note { color: var(--muted); font-size: 0.82rem; }
+.profile-hint {
+  color: var(--text-dim);
+  font-size: 0.84rem;
+  line-height: 1.55;
+  margin-bottom: 12px;
+}
+.profile-form { display: flex; flex-wrap: wrap; gap: 12px 16px; align-items: flex-end; }
+.profile-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 0.82rem;
+  flex: 1 1 220px;
+}
+.profile-form input { font-size: 0.95rem; }
+.profile-actions { flex: 0 0 auto; }
+.profile-form .primary-btn {
+  background: var(--accent);
+  color: var(--accent-ink);
+  border: 0;
+  border-radius: var(--radius-sm);
+  padding: 9px 18px;
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+.profile-form .primary-btn:hover { filter: brightness(1.08); }
+.profile-form .primary-btn:disabled { opacity: 0.6; cursor: default; }
+.profile-form .gate-error { flex: 1 1 100%; margin-top: 0; }
+
+/* Плечи сохранённой ставки: исход, кэф, БК и сумма — по строке на плечо */
+.bet-leg-line {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  flex-wrap: wrap;
+  font-size: 0.84rem;
+  line-height: 1.6;
+}
+.bet-leg-line .leg-stake { color: var(--text-dim); font-variant-numeric: tabular-nums; }
+.bet-del {
+  background: var(--panel-2);
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 4px 9px;
+  cursor: pointer;
+  font: inherit;
+}
+.bet-del:hover { color: var(--danger); border-color: var(--danger); }
 
 /* Спорт: вид спорта — основной строкой, турнир — подписью под ним */
 td.sport { max-width: 210px; }

@@ -181,7 +181,10 @@ def test_handicap_market():
         _runner("2 (0)", ["AWAY"], 1.9, handicap="-0"),
     ])
     odds = _by_key(_parse([m]))
-    o = odds["hcap:0"]
+    # scope пустой, но сегмент на месте — ключ обязан совпадать с тем, что
+    # пишут остальные БК, иначе фора матча не сшивается с ними (см.
+    # canon_market_key в app/parsers/html_utils.py)
+    o = odds["hcap::0"]
     assert (o.k1, o.k2) == (1.91, 1.9)
 
 
@@ -191,8 +194,8 @@ def test_handicap_signed_lines():
         _runner("2 (+0.75)", ["AWAY"], 1.37, handicap="0.75"),
     ])
     odds = _by_key(_parse([m]))
-    assert "hcap:-0.75" in odds
-    assert odds["hcap:-0.75"].outcome2 == "Ф2 +0.75"
+    assert "hcap::-0.75" in odds
+    assert odds["hcap::-0.75"].outcome2 == "Ф2 +0.75"
 
 
 def test_handicap_inconsistent_lines_rejected():

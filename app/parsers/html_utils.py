@@ -362,6 +362,49 @@ def neg_hcap(line: str) -> str:
     return "-" + line
 
 
+def canon_market_key(key: str) -> str:
+    """Единая форма ключа рынка: один и тот же рынок у разных БК — один ключ.
+
+    Форму ключа задаёт парсер, и до этой функции парсеры расходились в
+    записи рынка БЕЗ scope (то есть рынка всего матча — самого ходового):
+    Betcity и LeonBet писали фору как «hcap:-1.5», а Winline, BetBoom,
+    Fonbet, Melbet, bc.game и Лига Ставок — как «hcap::-1.5», с пустым
+    сегментом на месте scope. Ключи не совпадали, поэтому основная фора
+    матча НИКОГДА не сшивалась между этими двумя группами БК, и все вилки
+    по ней терялись молча: в интерфейсе рынок у обеих БК подписан
+    одинаково («Фора -1.5» — display_market обе формы читает), а в одну
+    группу движок их не сводил.
+
+    Здесь недостающий пустой scope достраивается, а линия приводится к
+    общему виду (fmt_hcap/fmt_total): «1.5» и «+1.5» — одна и та же фора,
+    «2.0» и «2» — один и тот же тотал.
+
+    Заодно ключ добивается до той формы, которую движок разбирает по
+    сегментам («hcap:<scope>:<линия>», «itotal:<сторона>:<scope>:<линия>»).
+    Это не косметика: на ключе неожиданной формы разбор падал с
+    ValueError — а падал он внутри общего пересчёта, то есть ОДНА кривая
+    котировка одной БК уносила разом ВСЕ вилки по всем БК, и так каждый
+    цикл, пока эта котировка жива. Лучше не понять один рынок, чем
+    потерять всю линию.
+    """
+    if key.startswith("hcap"):
+        parts = key.split(":")
+        while len(parts) < 3:          # hcap:<линия> → hcap::<линия>
+            parts.insert(1, "")
+        return ":".join(parts[:-1] + [fmt_hcap(parts[-1])])
+    if key.startswith("itotal"):
+        parts = key.split(":")
+        while len(parts) < 4:          # недостающий scope — перед линией
+            parts.insert(2, "")
+        return ":".join(parts[:-1] + [fmt_total(parts[-1])])
+    if key.startswith("total"):
+        parts = key.split(":")
+        if len(parts) >= 2:
+            return ":".join(parts[:-1] + [fmt_total(parts[-1])])
+        return key
+    return key
+
+
 def display_market(key: str, fallback: str) -> str:
     """Единое человекочитаемое имя рынка по его ключу.
 
@@ -521,6 +564,10 @@ def parse_totals(event, base: dict, coef_selector: str) -> list[MarketOdds]:
         coefs = [c.get_text(strip=True) for c in block.select(coef_selector)]
         over, under = pair(coefs)
         if pt and over and under:
+            # линия со страницы приходит как есть («2,5», «2.50») — в ключ
+            # она обязана попасть в общем формате, иначе тотал не сойдётся
+            # с той же линией другой БК
+            pt = fmt_total(pt)
             out.append(MarketOdds(
                 market=f"Тотал {pt}", market_key=f"total:{pt}",
                 outcome1=f"ТБ {pt}", outcome2=f"ТМ {pt}",
