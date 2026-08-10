@@ -258,6 +258,74 @@ def test_prematch_without_start_time_is_still_left_alone():
     print("OK: test_prematch_without_start_time_is_still_left_alone")
 
 
+# ---------- запасной разбор страницы: стороны тотала ----------
+
+def _totals_from_html(html):
+    """Тоталы с карточки события запасным (HTML) разбором Лиги Ставок."""
+    from bs4 import BeautifulSoup
+
+    from app.parsers.html_utils import parse_totals
+    base = dict(bookmaker="Лига Ставок", sport="Футбол", team1="Спартак",
+                team2="Зенит", kind=KIND_PREMATCH, start_time=None,
+                start_ts=NOW, url=None)
+    event = BeautifulSoup(html, "html.parser")
+    sel = ".bui-outcome__value, .outcome-value, .rate, [class*='coef']"
+    return parse_totals(event, base, sel)
+
+
+def test_total_sides_follow_the_label_not_the_layout_order():
+    """Запасной разбор страницы брал ТБ и ТМ по порядку в вёрстке. Порядок
+    у БК не закреплён, а перепутанные стороны хуже потерянного рынка: ключ
+    у них тот же, и движок сведёт ТБ одной БК с ТБ другой по ЧУЖОЙ цене —
+    то есть покажет вилку, которой нет, и не покажет ту, которая есть."""
+    straight = _totals_from_html("""
+      <div class="total" data-param="2,5">
+        <div><span>ТБ</span><span class="rate">1.85</span></div>
+        <div><span>ТМ</span><span class="rate">2.05</span></div>
+      </div>""")
+    reversed_ = _totals_from_html("""
+      <div class="total" data-param="2,5">
+        <div><span>ТМ</span><span class="rate">2.05</span></div>
+        <div><span>ТБ</span><span class="rate">1.85</span></div>
+      </div>""")
+    for got in (straight, reversed_):
+        assert len(got) == 1
+        assert got[0].market_key == "total:2.5"
+        assert (got[0].k1, got[0].k2) == (1.85, 2.05), (
+            "ТБ обязан попасть в k1, как бы БК ни разложила исходы")
+    print("OK: test_total_sides_follow_the_label_not_the_layout_order")
+
+
+def test_total_sides_read_the_label_from_attributes_too():
+    """Подпись исхода бывает не текстом, а атрибутом разметки."""
+    got = _totals_from_html("""
+      <div class="total" data-param="2.50">
+        <span class="rate" data-outcome="under">2.05</span>
+        <span class="rate" data-outcome="over">1.85</span>
+      </div>""")
+    assert len(got) == 1 and (got[0].k1, got[0].k2) == (1.85, 2.05)
+    print("OK: test_total_sides_read_the_label_from_attributes_too")
+
+
+def test_total_without_a_label_keeps_the_layout_order():
+    """Обратная граница: когда подписи нет вовсе, порядок вёрстки —
+    единственное, что есть, и рынок из-за этого не выбрасывается."""
+    got = _totals_from_html("""
+      <div class="total" data-param="2.5">
+        <span class="rate">1.85</span><span class="rate">2.05</span>
+      </div>""")
+    assert len(got) == 1 and (got[0].k1, got[0].k2) == (1.85, 2.05)
+    # «больше/меньше» в обеих подписях — это название рынка, а не разметка
+    # сторон: угадывать по нему нельзя, порядок вёрстки остаётся как есть
+    both = _totals_from_html("""
+      <div class="total" data-param="2.5">
+        <div><span>Больше/меньше</span><span class="rate">1.85</span></div>
+        <div><span>Больше/меньше</span><span class="rate">2.05</span></div>
+      </div>""")
+    assert len(both) == 1 and (both[0].k1, both[0].k2) == (1.85, 2.05)
+    print("OK: test_total_without_a_label_keeps_the_layout_order")
+
+
 # ---------- подпись рынка: одно и то же разными словами ----------
 
 def _scopes(*names):
@@ -410,6 +478,9 @@ if __name__ == "__main__":
     test_live_quotes_get_fuzzy_name_merging_too()
     test_live_quote_without_start_time_still_merges_names()
     test_prematch_without_start_time_is_still_left_alone()
+    test_total_sides_follow_the_label_not_the_layout_order()
+    test_total_sides_read_the_label_from_attributes_too()
+    test_total_without_a_label_keeps_the_layout_order()
     test_corner_market_is_the_same_whatever_it_is_called()
     test_cards_market_is_the_same_whatever_it_is_called()
     test_refined_market_is_not_merged_with_the_general_one()

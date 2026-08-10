@@ -611,6 +611,65 @@ def pair(coefs: list[str]) -> tuple[float | None, float | None]:
     return num(coefs[0]), num(coefs[1])
 
 
+# Разметка исхода тотала: «ТБ»/«Б»/«больше»/«over» против «ТМ»/«М»/
+# «меньше»/«under». Однобуквенные подписи отделены границами слова, иначе
+# «м» поймается в любом слове.
+_OVER_RE = re.compile(r"(?<![а-яa-z])(тб|б|больше|более|over|more)(?![а-яa-z])",
+                      re.IGNORECASE)
+_UNDER_RE = re.compile(r"(?<![а-яa-z])(тм|м|меньше|менее|under|less)(?![а-яa-z])",
+                       re.IGNORECASE)
+_HINT_ATTRS = ("class", "title", "aria-label", "data-outcome", "data-type",
+               "data-name", "data-selection", "data-outcome-name")
+
+
+def _outcome_hint(el) -> str:
+    """Слова вокруг кэфа, по которым виден исход: свои и родительские
+    атрибуты плюс текст родителя без самого кэфа."""
+    parts = []
+    for node in (el, el.parent):
+        attrs = getattr(node, "attrs", None)
+        if not attrs:
+            continue
+        for name in _HINT_ATTRS:
+            value = attrs.get(name)
+            if value:
+                parts.append(" ".join(value) if isinstance(value, list)
+                             else str(value))
+    parent = el.parent
+    if parent is not None:
+        own = el.get_text(strip=True)
+        text = parent.get_text(" ", strip=True)
+        parts.append(text.replace(own, " ", 1) if own else text)
+    return " ".join(parts)
+
+
+def _over_under(block, coef_selector: str) -> tuple[float | None, float | None]:
+    """Кэфы тотала как (больше, меньше).
+
+    Порядок ТБ/ТМ в вёрстке у БК не закреплён, а перепутанные местами
+    стороны — хуже потерянного рынка: ключ у них тот же, и движок сведёт
+    ТБ одной БК с ТБ другой по ЧУЖОЙ цене, выдав ложную вилку. Поэтому
+    сначала пробуем опознать стороны по подписи и берём порядок вёрстки
+    только тогда, когда подписи нет вовсе."""
+    cells = block.select(coef_selector)
+    if len(cells) != 2:
+        return None, None
+    first, second = (num(c.get_text(strip=True)) for c in cells)
+    hints = [_outcome_hint(c) for c in cells]
+    marks = [(bool(_OVER_RE.search(h)), bool(_UNDER_RE.search(h)))
+             for h in hints]
+    # сторону засчитываем, только если подпись говорит однозначно: и «Б», и
+    # «М» в одной подписи — не разметка исхода, а случайные слова
+    over_first, under_first = marks[0]
+    over_second, under_second = marks[1]
+    if over_first != under_first and over_second != under_second:
+        if over_first and under_second:
+            return first, second
+        if under_first and over_second:
+            return second, first
+    return first, second
+
+
 def parse_totals(event, base: dict, coef_selector: str) -> list[MarketOdds]:
     """Достаёт двухисходные тоталы (ТБ/ТМ) с карточки события.
 
@@ -624,8 +683,7 @@ def parse_totals(event, base: dict, coef_selector: str) -> list[MarketOdds]:
         if not pt:
             label = block.select_one(".total-value, .param, .handicap")
             pt = label.get_text(strip=True) if label else None
-        coefs = [c.get_text(strip=True) for c in block.select(coef_selector)]
-        over, under = pair(coefs)
+        over, under = _over_under(block, coef_selector)
         if pt and over and under:
             # линия со страницы приходит как есть («2,5», «2.50») — в ключ
             # она обязана попасть в общем формате, иначе тотал не сойдётся
