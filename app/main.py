@@ -17,6 +17,7 @@ from .access_api import router as access_router
 from .admin_api import require_admin
 from .admin_api import router as admin_router
 from .config import LIVE_ENABLED, SOUND_ALERT_PROFIT
+from .models import KIND_LIVE, KIND_PREMATCH
 from .profile_api import router as profile_router
 from .runtime import balance_loop, live_scanner, scanner
 from .scanner import Scanner

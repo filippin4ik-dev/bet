@@ -201,6 +201,7 @@ def _make_driver(proxy: str | None = None):
     seen: set = set()
     attempts = [a for a in attempts if not (a in seen or seen.add(a))]
 
+    from selenium import webdriver
     from selenium.webdriver.chrome.service import Service
     last_exc = None
     for driver_path in attempts:
