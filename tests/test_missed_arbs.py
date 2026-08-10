@@ -13,7 +13,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.arbitrage import (build_name_canon_map, find_arbs,  # noqa: E402
-                           norm_team)
+                           find_arbs_1x2, norm_team)
 from app.models import KIND_LIVE, KIND_PREMATCH, MarketOdds  # noqa: E402
 from app.parsers.html_utils import (canon_market_key,  # noqa: E402
                                     market_scope)
@@ -258,6 +258,45 @@ def test_prematch_without_start_time_is_still_left_alone():
     print("OK: test_prematch_without_start_time_is_still_left_alone")
 
 
+def test_markets_without_a_line_survive_an_empty_scope_segment():
+    """У рынков без линии (исход, «обе забьют», чет/нечет) scope либо есть,
+    либо сегмента нет вовсе — но пустой хвост «winner1x2:» канон не убирал,
+    и рынок всего матча развело бы с тем же рынком соседней БК. Ровно та же
+    потеря, что уже стоила всех вилок по основной форе."""
+    for a, b in (("winner1x2", "winner1x2:"), ("winner", "winner:"),
+                 ("bothscore", "bothscore:"), ("oddeven", "oddeven:"),
+                 ("winner1x2:half1", "winner1x2::half1")):
+        assert canon_market_key(a) == canon_market_key(b), f"{a} vs {b}"
+    # рынки с разным scope канон по-прежнему не сливает
+    assert canon_market_key("winner:corners") != canon_market_key("winner")
+    print("OK: test_markets_without_a_line_survive_an_empty_scope_segment")
+
+
+def test_1x2_arb_is_found_across_key_forms():
+    """Движок 1X2 группировал по СЫРОМУ ключу, без канона — в отличие от
+    двухисходного, который канон зовёт. Форма ключа у БК разъезжается (так
+    и было с форой), и тогда исход матча не сшивался бы вовсе."""
+    def w1x2(bk, key, k1, k2, k3):
+        return MarketOdds(
+            bookmaker=bk, sport="Футбол", team1="Спартак", team2="Зенит",
+            market="Исход", market_key=key, outcome1="П1", outcome2="П2",
+            outcome3="X", k1=k1, k2=k2, k3=k3, kind=KIND_PREMATCH,
+            start_ts=NOW, start_time="01.01 20:00")
+
+    # у каждой БК роспись нормальная (маржа больше единицы), вилка
+    # складывается только из лучших исходов ОБЕИХ БК
+    same = find_arbs_1x2([w1x2("Winline", "winner1x2", 3.70, 2.10, 3.40),
+                          w1x2("Fonbet", "winner1x2", 2.60, 3.00, 3.50)])
+    apart = find_arbs_1x2([w1x2("Winline", "winner1x2", 3.70, 2.10, 3.40),
+                           w1x2("Fonbet", "winner1x2:", 2.60, 3.00, 3.50)])
+    assert same, "проверка бессмысленна, если вилки нет и при одном ключе"
+    assert len(apart) == len(same), (
+        "форма ключа не должна решать, найдётся вилка по исходу или нет")
+    assert len({apart[0].k1_bookmaker, apart[0].kx_bookmaker,
+                apart[0].k2_bookmaker}) == 2
+    print("OK: test_1x2_arb_is_found_across_key_forms")
+
+
 def test_scoring_wordings_land_where_they_belong():
     """BetBoom выбрасывала ЛЮБОЙ рынок со словом «результативность» — под
     тот же фильтр, что отрезки по минутам и командные рынки. Но «Тотал
@@ -499,6 +538,8 @@ if __name__ == "__main__":
     test_live_quotes_get_fuzzy_name_merging_too()
     test_live_quote_without_start_time_still_merges_names()
     test_prematch_without_start_time_is_still_left_alone()
+    test_markets_without_a_line_survive_an_empty_scope_segment()
+    test_1x2_arb_is_found_across_key_forms()
     test_scoring_wordings_land_where_they_belong()
     test_total_sides_follow_the_label_not_the_layout_order()
     test_total_sides_read_the_label_from_attributes_too()

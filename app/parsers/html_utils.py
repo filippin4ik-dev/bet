@@ -444,6 +444,13 @@ def canon_market_key(key: str) -> str:
         # пустой сегмент здесь не достраивается, а убирается
         parts = _key_parts(key, 2)     # total[:<scope>]:<линия>
         return ":".join(parts[:-1] + [fmt_total(parts[-1])])
+    if key.startswith(("winner", "bothscore", "oddeven")):
+        # рынки без линии: scope либо есть, либо сегмента нет вовсе. Пустой
+        # хвост («winner1x2:») развёл бы рынок всего матча с тем же рынком
+        # у соседней БК — ровно та же потеря, что была на форе
+        kind, _, scope = key.partition(":")
+        scope = ":".join(s for s in scope.split(":") if s)
+        return f"{kind}:{scope}" if scope else kind
     return key
 
 

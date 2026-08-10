@@ -639,7 +639,7 @@ def find_arbs_1x2(odds: Iterable[MarketOdds],
         cluster = 0
         if o.kind == KIND_PREMATCH and o.start_ts:
             cluster = time_clusters.get((o.kind, teams), {}).get(o.start_ts, 0)
-        key = (o.kind, teams, cluster, o.market_key)
+        key = (o.kind, teams, cluster, canon_market_key(o.market_key))
         g = groups[key]
         g["sample"] = g["sample"] or o
         g["books"].add(o.bookmaker)
