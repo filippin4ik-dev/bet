@@ -9,14 +9,17 @@ const LIVE_POLL_INTERVAL_MS = 5_000;  // лайв обновляем чаще
 const els = {
   body: document.getElementById("arbs-body"),
   body1x2: document.getElementById("arbs1x2-body"),
+  rejectedBody: document.getElementById("rejected-body"),
   matchesBody: document.getElementById("matches-body"),
   arbsTable: document.getElementById("arbs-table"),
   arbs1x2Table: document.getElementById("arbs1x2-table"),
+  rejectedTable: document.getElementById("rejected-table"),
   matchesTable: document.getElementById("matches-table"),
   // карточки-обёртки таблиц: скрывать надо их, иначе от спрятанной таблицы
   // остаётся пустая рамка
   arbsCard: document.getElementById("arbs-card"),
   arbs1x2Card: document.getElementById("arbs1x2-card"),
+  rejectedCard: document.getElementById("rejected-card"),
   matchesCard: document.getElementById("matches-card"),
   matchDetail: document.getElementById("match-detail"),
   detailTitle: document.getElementById("detail-title"),
@@ -123,7 +126,7 @@ const bkChip = (bk) => `<span class="bk-chip ${bkClass(bk)}">${escapeHtml(bk)}</
 /* ---------- состояние (сохраняется в localStorage) ---------- */
 
 const state = {
-  view: "arbs",                 // arbs | live | arbs1x2 | live1x2 | matches | live-matches
+  view: "arbs",                 // arbs | live | arbs1x2 | live1x2 | rejected | matches | live-matches
   search: "",
   sport: "",
   bookmaker: "",
@@ -133,14 +136,19 @@ const state = {
     live: { key: "profit_pct", dir: -1 },
     arbs1x2: { key: "profit_pct", dir: -1 },
     live1x2: { key: "profit_pct", dir: -1 },
+    rejected: { key: "profit_pct", dir: -1 },
     matches: { key: "start_ts", dir: 1 },
     "live-matches": { key: "sport", dir: 1 },
   },
 };
 
+const VIEWS = ["arbs", "live", "arbs1x2", "live1x2", "rejected", "matches",
+               "live-matches"];
+
 const isArbView = (v) => v === "arbs" || v === "live";
 const isArb1x2View = (v) => v === "arbs1x2" || v === "live1x2";
 const isMatchesView = (v) => v === "matches" || v === "live-matches";
+const isRejectedView = (v) => v === "rejected";
 // лайв-режимы опрашиваются чаще и берут данные из /api/live/*
 const isLiveView = (v) => v === "live" || v === "live-matches" || v === "live1x2";
 
@@ -150,7 +158,7 @@ function loadState() {
     saved = JSON.parse(localStorage.getItem("arb-scanner-ui") || "{}") || {};
   } catch (_) { /* повреждённое хранилище — игнорируем */ }
   Object.assign(state, saved, { sort: { ...state.sort, ...(saved.sort || {}) } });
-  if (!["arbs", "live", "arbs1x2", "live1x2", "matches", "live-matches"].includes(state.view)) state.view = "arbs";
+  if (!VIEWS.includes(state.view)) state.view = "arbs";
   state.openMatch = null; // страница котировок не восстанавливается
   els.search.value = state.search;
   const minProfit = localStorage.getItem("arb-scanner-minProfit");
@@ -169,6 +177,9 @@ function saveState() {
 
 let lastArbs = [];
 let lastArbs1x2 = [];
+// Отсеянные кандидаты (двухисходные и 1X2 в одном списке): вкладка одна,
+// а разбирать такую строку руками приходится одинаково.
+let lastRejected = [];
 let lastMatches = [];
 let lastDetail = null;
 // Все БК, которые сейчас опрашивает сканер (из /api/arbs). Список фильтра
@@ -179,11 +190,13 @@ let lastBkNames = [];
 // Строки текущего представления (для фильтров/сортировки/индикаторов)
 function currentRows() {
   if (isArb1x2View(state.view)) return lastArbs1x2;
+  if (isRejectedView(state.view)) return lastRejected;
   if (isMatchesView(state.view)) return lastMatches;
   return lastArbs;
 }
 function currentTable() {
   if (isArb1x2View(state.view)) return els.arbs1x2Table;
+  if (isRejectedView(state.view)) return els.rejectedTable;
   if (isMatchesView(state.view)) return els.matchesTable;
   return els.arbsTable;
 }
@@ -651,6 +664,62 @@ function renderArbs1x2() {
   }).join("");
 }
 
+/* ---------- отсеянные кандидаты ---------- */
+
+/* Плечи вилки: у двухисходной их два, у «Исход 1X2» — три (с ничьей).
+ * На вкладке отсеянных оба вида лежат в одной таблице: разбирать такую
+ * строку руками приходится одинаково, а колонок и так много. */
+function arbLegs(a) {
+  const legs = [{ out: a.outcome1, k: a.k1_max, bk: a.k1_bookmaker, url: a.k1_url }];
+  if (a.kx_max != null) {
+    legs.push({ out: a.outcomex || "X", k: a.kx_max, bk: a.kx_bookmaker, url: a.kx_url });
+  }
+  legs.push({ out: a.outcome2, k: a.k2_max, bk: a.k2_bookmaker, url: a.k2_url });
+  return legs;
+}
+
+function legHtml(l) {
+  const body = `<span class="out">${escapeHtml(l.out)}</span>` +
+    `<span class="coef">${Number(l.k).toFixed(2)}</span> ${bkChip(l.bk)}`;
+  // кэф — ссылка на страницу события у этой БК: проверить отсев можно
+  // только на самих сайтах, и искать матч там руками незачем
+  return l.url
+    ? `<a class="leg" href="${escapeHtml(l.url)}" target="_blank" rel="noopener">${body}</a>`
+    : `<span class="leg">${body}</span>`;
+}
+
+/* Короткая подпись причины; подробное объяснение приходит с сервера
+ * (reject_reason) и показывается второй строкой. */
+const REJECT_LABEL = {
+  combat_rounds: "Разные правила расчёта раундов",
+  max_profit: "Подозрительно высокая доходность",
+};
+
+function renderRejected() {
+  const rows = applySort(applyFilters(lastRejected));
+  els.arbCount.innerHTML = `Отсеяно <b>${lastRejected.length}</b>`;
+  renderMeta(rows.length, lastRejected.length);
+
+  if (!rows.length) {
+    els.rejectedBody.innerHTML =
+      '<tr><td colspan="7" class="empty">Отсеянных кандидатов нет — в этом обходе движок ничего не прятал.</td></tr>';
+    return;
+  }
+
+  els.rejectedBody.innerHTML = rows.map((a) => `<tr>
+      <td data-label="Начало">${startCell(a)}</td>
+      <td data-label="Спорт" class="sport">${sportCell(a.sport)}</td>
+      <td data-label="Матч" class="match-name">${escapeHtml(a.match)}</td>
+      <td data-label="Рынок">${escapeHtml(a.market)}</td>
+      <td data-label="Плечи" class="legs">${arbLegs(a).map(legHtml).join("")}</td>
+      <td data-label="Доходность"><span class="profit">${a.profit_pct.toFixed(2)} %</span></td>
+      <td data-label="Почему не показана">
+        <span class="reject-code">${escapeHtml(REJECT_LABEL[a.reject_code] || a.reject_code || "—")}</span>
+        <span class="reject-why">${escapeHtml(a.reject_reason || "")}</span>
+      </td>
+    </tr>`).join("");
+}
+
 /* ---------- модалка быстрой ставки ---------- */
 
 /* Копирует сумму плеча в буфер: кнопка коротко подтверждает результат, а
@@ -1038,6 +1107,7 @@ function updateVisibility() {
   els.filtersToggle.hidden = detailOpen;
   els.arbsCard.hidden = !isArbView(state.view);
   els.arbs1x2Card.hidden = !isArb1x2View(state.view);
+  els.rejectedCard.hidden = !isRejectedView(state.view);
   els.matchesCard.hidden = !isMatchesView(state.view) || detailOpen;
   els.matchDetail.hidden = !detailOpen;
 }
@@ -1051,6 +1121,8 @@ function rerender() {
     else renderMatches();
   } else if (isArb1x2View(state.view)) {
     renderArbs1x2();
+  } else if (isRejectedView(state.view)) {
+    renderRejected();
   } else {
     renderArbs();
   }
@@ -1095,9 +1167,11 @@ async function poll() {
 
     lastArbs = data.arbs;
     lastArbs1x2 = data.arbs_1x2 || [];
-    els.arbCount.innerHTML = isArb1x2View(state.view)
-      ? `Вилок 1X2 <b>${lastArbs1x2.length}</b>`
-      : `Вилок <b>${lastArbs.length}</b>`;
+    els.arbCount.innerHTML = isRejectedView(state.view)
+      ? `Отсеяно <b>${lastRejected.length}</b>`
+      : isArb1x2View(state.view)
+        ? `Вилок 1X2 <b>${lastArbs1x2.length}</b>`
+        : `Вилок <b>${lastArbs.length}</b>`;
     refreshBetModal();
     refreshBet3Modal();
 
@@ -1111,6 +1185,18 @@ async function poll() {
     }
   } catch (err) {
     els.lastScan.textContent = "Нет связи с сервером…";
+  }
+
+  if (isRejectedView(state.view)) {
+    // Отсеянные приходят отдельной ручкой: список нужен одной вкладке, а
+    // /api/arbs тянут все опросы интерфейса каждые несколько секунд
+    try {
+      const minProfit = parseFloat(els.minProfit.value) || 0;
+      const resp = await fetch(`/api/rejected?min_profit=${minProfit}`);
+      const data = await resp.json();
+      lastRejected = [...(data.rejected || []), ...(data.rejected_1x2 || [])]
+        .sort((a, b) => b.profit_pct - a.profit_pct);
+    } catch (err) { /* статус уже показан выше */ }
   }
 
   if (isMatchesView(state.view)) {

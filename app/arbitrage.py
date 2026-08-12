@@ -20,11 +20,13 @@ import re
 from collections import defaultdict
 from typing import Iterable
 
-from .config import (ARB_MAX_PROFIT, BANKS, FUZZY_NAME_MIN_SINGLE_RATIO,
+from .config import (ARB_MAX_PROFIT, ARB_REJECTED_MAX, BANKS,
+                     COMBAT_ROUNDS_DEFAULT_RULE, COMBAT_ROUNDS_RULE_LABELS,
+                     COMBAT_ROUNDS_RULES, FUZZY_NAME_MIN_SINGLE_RATIO,
                      FUZZY_NAME_SIM_THRESHOLD, START_TS_TOLERANCE,
                      START_TS_TOLERANCE_COMBAT, START_TS_TOLERANCE_RAPID)
 from .models import Arb, Arb3, KIND_LIVE, KIND_PREMATCH, MarketOdds
-from .parsers.html_utils import (canon_market_key, display_market,
+from .parsers.html_utils import (canon_market_key, display_market, key_scope,
                                  neg_hcap as _neg_hcap)
 
 log = logging.getLogger("arbitrage")
@@ -475,6 +477,79 @@ def _start_tolerance(sport: str) -> float:
     return START_TS_TOLERANCE
 
 
+# ---------- отсев кандидатов: почему вилка НЕ показана ----------
+#
+# Отсев раньше был молчаливым: кандидат просто не попадал в список, и
+# понять, спрятал движок чужую ошибку БК или свою собственную, можно было
+# только по строчке в логе. Теперь у каждой причины есть код, а сами
+# отсеянные кандидаты движок отдаёт вызывающему (параметр rejected) —
+# сканер держит их для вкладки «Отсеянные», где строку видно целиком и её
+# можно проверить руками на сайтах БК.
+REJECT_MAX_PROFIT = "max_profit"
+REJECT_COMBAT_ROUNDS = "combat_rounds"
+
+# Виды рынков, единица счёта которых в единоборствах — РАУНД (тотал
+# раундов, фора по раундам, чет/нечет раундов). Победитель боя от правил
+# подсчёта раундов не зависит и в список не входит.
+_ROUND_COUNT_MARKETS = ("total", "itotal", "hcap", "oddeven")
+
+
+def _rounds_rule(bookmaker: str) -> str:
+    """По какому правилу БК засчитывает раунд (см. COMBAT_ROUNDS_RULES)."""
+    return COMBAT_ROUNDS_RULES.get(bookmaker.strip().lower(),
+                                   COMBAT_ROUNDS_DEFAULT_RULE)
+
+
+def _rule_label(rule: str) -> str:
+    return COMBAT_ROUNDS_RULE_LABELS.get(rule, rule)
+
+
+def _counts_rounds(sport: str, market_key: str) -> bool:
+    """Рынок считает РАУНДЫ боя: тотал/фора/чет-нечет всего боя в
+    единоборствах. Рынки с уточнением (scope) — «тотал ударов», «исход
+    2-го раунда» — считают не раунды, их правило не касается."""
+    root = sport.split("·")[0].strip().lower().replace("ё", "е")
+    if root not in _COMBAT_ROOTS:
+        return False
+    key = canon_market_key(market_key)
+    return key.startswith(_ROUND_COUNT_MARKETS) and not key_scope(key)
+
+
+def _reject_reason(sample: MarketOdds, bk1: str, bk2: str, profit_pct: float,
+                   max_profit: float) -> tuple[str, str] | None:
+    """Почему этот кандидат нельзя показывать вилкой: (код, объяснение).
+
+    None — с кандидатом всё в порядке, это настоящая вилка.
+    """
+    if _counts_rounds(sample.sport, sample.market_key):
+        r1, r2 = _rounds_rule(bk1), _rounds_rule(bk2)
+        if r1 != r2:
+            # Одинаковая на вид линия «Тотал 2.5» у этих БК означает РАЗНЫЕ
+            # события: бой, остановленный в середине раунда, у одной БК
+            # считается как N раундов, у другой — как N+1. ТБ у одной и ТМ
+            # у другой могут проиграть ОБА — это не вилка, а минус.
+            return (REJECT_COMBAT_ROUNDS,
+                    f"{bk1} и {bk2} считают раунды по-разному "
+                    f"({bk1}: {_rule_label(r1)}; {bk2}: {_rule_label(r2)}) — "
+                    f"при остановке боя в середине раунда обе ставки могут "
+                    f"проиграть")
+    if profit_pct > max_profit:
+        return (REJECT_MAX_PROFIT,
+                f"доходность выше потолка ARB_MAX_PROFIT={max_profit:g}% — "
+                f"обычно это ошибка сопоставления (разные матчи или рынки "
+                f"у БК), но бывает и настоящая ошибка букмекера")
+    return None
+
+
+def _has_room(rejected: list | None) -> bool:
+    """Есть ли ещё место в списке отсеянных (см. ARB_REJECTED_MAX).
+
+    Список нужен для ручного разбора, а не как архив: одна ошибка
+    сопоставления даёт десятки строк, и без потолка он рос бы вместе с
+    линией. Всё, что сверх потолка, остаётся только в логе."""
+    return rejected is not None and len(rejected) < ARB_REJECTED_MAX
+
+
 def _ambiguous_pairs(ts_by_book: dict[tuple, set],
                      combat: set[tuple]) -> set[tuple]:
     """События, где пара соперников встречается сегодня НЕ ОДИН раз.
@@ -566,13 +641,21 @@ def _time_clusters(odds: list[MarketOdds],
 
 def find_arbs(odds: Iterable[MarketOdds],
               name_map: dict[str, str] | None = None,
-              max_profit: float | None = None) -> list[Arb]:
+              max_profit: float | None = None,
+              rejected: list[Arb] | None = None) -> list[Arb]:
     """max_profit — потолок доходности; по умолчанию ARB_MAX_PROFIT.
 
     Задавать его отдельно нужно диагностике (app.diagnose_overlap): она
     считает линию дважды и показывает, что именно потолок отбросил. Иначе
     отсев виден только строкой в логе, и понять, прячет ли порог ошибку
     сопоставления или настоящую щедрость БК, нельзя.
+
+    rejected — необязательный список, куда складываются ОТСЕЯННЫЕ
+    кандидаты (арифметически вилка есть, но показывать её нельзя — см.
+    _reject_reason): у каждого проставлены reject_code и reject_reason. По
+    нему живёт вкладка «Отсеянные»: причина отсева видна словами, и строку
+    можно проверить руками на сайтах БК. Без списка поведение прежнее —
+    такие кандидаты просто пропускаются.
     """
     if max_profit is None:
         max_profit = ARB_MAX_PROFIT
@@ -647,18 +730,20 @@ def find_arbs(odds: Iterable[MarketOdds],
                 if margin >= 1:
                     continue
                 profit_pct = (1 / margin - 1) * 100
-                # Аномально высокая «доходность» — почти наверняка не
-                # вилка, а ошибка сопоставления (разные рынки/матчи у БК).
-                # Не показываем: ставка по ней приведёт к потере денег.
-                if profit_pct > max_profit:
-                    if not warned:
-                        log.info(
-                            "Отброшена подозрительная вилка %.1f%% "
-                            "(%s — %s, %s: %s@%s / %s@%s) — похоже на "
-                            "ошибку сопоставления",
-                            profit_pct, s.team1, s.team2, s.market,
-                            o1.odds, o1.bookmaker, o2.odds, o2.bookmaker)
-                        warned = True
+                # Кандидат может быть не вилкой, а ошибкой сопоставления
+                # (аномальная доходность) или ставкой на два РАЗНЫХ по
+                # правилам расчёта рынка (счёт раундов в единоборствах).
+                # В основной список такое не показываем: ставка по нему
+                # приведёт к потере денег.
+                reason = _reject_reason(s, o1.bookmaker, o2.bookmaker,
+                                        profit_pct, max_profit)
+                if reason and not warned:
+                    log.info("Отсеяна вилка %.1f%% (%s — %s, %s: %s@%s / "
+                             "%s@%s): %s", profit_pct, s.team1, s.team2,
+                             s.market, o1.odds, o1.bookmaker, o2.odds,
+                             o2.bookmaker, reason[1])
+                    warned = True
+                if reason and not _has_room(rejected):
                     continue
                 # порядок исходов: для победителя выравниваем к
                 # team1/team2 образца
@@ -672,7 +757,7 @@ def find_arbs(odds: Iterable[MarketOdds],
                     label1, label2 = s.outcome1, s.outcome2
                 else:
                     label1, label2 = "П1", "П2"
-                arbs.append(Arb(
+                arb = Arb(
                     # пара БК — часть ключа: у одного рынка может быть
                     # несколько вилок одновременно (разные пары БК)
                     match_key=(f"{kind}|{'|'.join(sorted(teams))}|{cluster}|"
@@ -688,7 +773,12 @@ def find_arbs(odds: Iterable[MarketOdds],
                     kind=kind, start_time=s.start_time, start_ts=s.start_ts,
                     stakes={str(b): calc_stakes(first.odds, second.odds, b)
                             for b in BANKS},
-                ))
+                )
+                if reason:
+                    arb.reject_code, arb.reject_reason = reason
+                    rejected.append(arb)
+                    continue
+                arbs.append(arb)
 
     arbs.sort(key=lambda a: a.profit_pct, reverse=True)
     return arbs
@@ -696,7 +786,8 @@ def find_arbs(odds: Iterable[MarketOdds],
 
 def find_arbs_1x2(odds: Iterable[MarketOdds],
                   name_map: dict[str, str] | None = None,
-                  max_profit: float | None = None) -> list[Arb3]:
+                  max_profit: float | None = None,
+                  rejected: list[Arb3] | None = None) -> list[Arb3]:
     """Ищет ТРЁХисходные вилки на рынке «Исход 1X2» (П1/X/П2).
 
     Отдельный движок от find_arbs: рынок с тремя взаимоисключающими
@@ -704,7 +795,8 @@ def find_arbs_1x2(odds: Iterable[MarketOdds],
     группировки/сопоставления событий дублирует find_arbs, но подбор
     комбинаций и формула маржи — трёхсторонние.
 
-    max_profit — потолок доходности, см. find_arbs.
+    max_profit — потолок доходности, rejected — список отсеянных
+    кандидатов; и то и другое работает как в find_arbs.
     """
     if max_profit is None:
         max_profit = ARB_MAX_PROFIT
@@ -769,15 +861,15 @@ def find_arbs_1x2(odds: Iterable[MarketOdds],
             if margin >= 1:
                 continue
             profit_pct = (1 / margin - 1) * 100
-            if profit_pct > max_profit:
-                if not warned:
-                    log.info(
-                        "Отброшена подозрительная 1X2-вилка %.1f%% "
-                        "(%s — %s) — похоже на ошибку сопоставления",
-                        profit_pct, s.team1, s.team2)
-                    warned = True
+            reason = _reject_reason(s, c1.bookmaker, c2.bookmaker,
+                                    profit_pct, max_profit)
+            if reason and not warned:
+                log.info("Отсеяна 1X2-вилка %.1f%% (%s — %s): %s",
+                         profit_pct, s.team1, s.team2, reason[1])
+                warned = True
+            if reason and not _has_room(rejected):
                 continue
-            arbs.append(Arb3(
+            arb = Arb3(
                 match_key=(f"{kind}|{'|'.join(sorted(teams))}|{cluster}|"
                            f"{market_group}|"
                            f"{c1.bookmaker}|{cx.bookmaker}|{c2.bookmaker}"),
@@ -794,7 +886,12 @@ def find_arbs_1x2(odds: Iterable[MarketOdds],
                 kind=kind, start_time=s.start_time, start_ts=s.start_ts,
                 stakes={str(b): calc_stakes3(c1.odds, cx.odds, c2.odds, b)
                         for b in BANKS},
-            ))
+            )
+            if reason:
+                arb.reject_code, arb.reject_reason = reason
+                rejected.append(arb)
+                continue
+            arbs.append(arb)
 
     arbs.sort(key=lambda a: a.profit_pct, reverse=True)
     return arbs

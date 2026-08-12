@@ -595,6 +595,26 @@ def test_new_arbs_saved_to_history_once():
     assert len(db.get_history(1000)) == before + 1
 
 
+def test_rejected_candidates_reach_the_snapshot():
+    """Отсеянные кандидаты не пропадают вместе с причиной: сканер держит
+    их отдельным списком для вкладки «Отсеянные». Здесь — тотал раундов
+    боя у двух БК, которые считают раунды по РАЗНЫМ правилам: вилкой это
+    показывать нельзя, а разобрать руками нужно."""
+    sc = Scanner(mode=KIND_PREMATCH,
+                 parsers=[_Fake("BetBoom"), _Fake("Fonbet")])
+    for bk, k1, k2 in (("BetBoom", 2.10, 1.80), ("Fonbet", 1.80, 2.10)):
+        sc._store_odds(bk, [MarketOdds(
+            bookmaker=bk, sport="Единоборства · UFC 300", team1="Джонс",
+            team2="Миочич", market="Тотал 2.5", market_key="total:2.5",
+            outcome1="ТБ 2.5", outcome2="ТМ 2.5", k1=k1, k2=k2,
+            start_ts=time.time() + 3600, start_time="01.01 20:00")])
+    sc._recalc()
+    assert sc.snapshot()["arbs"] == [], "раунды считаются по-разному"
+    rows = sc.rejected_snapshot()["rejected"]
+    assert len(rows) == 1 and rows[0]["reject_code"] == "combat_rounds"
+    assert rows[0]["reject_reason"]
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
