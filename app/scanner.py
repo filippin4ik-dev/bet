@@ -39,6 +39,7 @@ from .models import Arb, Arb3, KIND_LIVE, KIND_PREMATCH, MarketOdds
 from .parsers import get_parsers
 from .parsers.base import BaseParser
 from .parsers.html_utils import display_market
+from .unmatched import find_unmatched_arbs
 
 log = logging.getLogger("scanner")
 
@@ -538,13 +539,21 @@ class Scanner:
             books = set(self._odds_by_bk)
 
         name_map = self._name_map(all_odds, books, refresh=True)
+        # Кластеры времени старта нужны обоим движкам и считаются по одной
+        # и той же линии — считаем их здесь один раз (раньше каждый движок
+        # считал свои, то есть линия проходилась лишним разом).
+        splits: list = []
+        clusters = _time_clusters(all_odds, name_map, splits=splits)
         # отсеянные кандидаты собираются тем же проходом: считать линию
         # второй раз ради вкладки «Отсеянные» значило бы удвоить самую
         # дорогую операцию сканера
         rejected: list[Arb] = []
         rejected3: list[Arb3] = []
-        arbs = find_arbs(all_odds, name_map, rejected=rejected)
-        arbs3 = find_arbs_1x2(all_odds, name_map, rejected=rejected3)
+        arbs = find_arbs(all_odds, name_map, rejected=rejected,
+                         time_clusters=clusters)
+        arbs3 = find_arbs_1x2(all_odds, name_map, rejected=rejected3,
+                              time_clusters=clusters)
+        self._add_unmatched(all_odds, name_map, splits, rejected, rejected3)
         with self._lock:
             # таймер жизни вилки: сохраняем момент первого обнаружения,
             # исчезнувшие вилки забываем (появятся снова — таймер с нуля)
@@ -566,6 +575,31 @@ class Scanner:
             self._events_checked = len({o.event_key for o in all_odds})
             self._quotes_checked = len(all_odds)
         return arbs, arbs3
+
+    def _add_unmatched(self, all_odds: list[MarketOdds],
+                       name_map: dict[str, str], splits: list,
+                       rejected: list[Arb], rejected3: list[Arb3]) -> None:
+        """Дописывает к отсеянным вилки, до перебора кэфов не дошедшие.
+
+        Событие не сшилось между БК (разные написания имён, разное время
+        старта) — значит его кэфы вообще не встретились, и обычный
+        пересчёт про такую вилку не знает. Проверка идёт по кандидатам,
+        которые он попутно собрал; она дешёвая (котировки двух событий),
+        но если мешает — выключается ARB_UNMATCHED_ENABLED=0.
+        """
+        if not config.ARB_UNMATCHED_ENABLED:
+            return
+        try:
+            un, un3 = find_unmatched_arbs(all_odds, name_map, splits)
+        except Exception:  # noqa: BLE001
+            # проход вспомогательный: его поломка не должна уносить с собой
+            # сам список вилок
+            log.exception("[%s] ошибка поиска несшитых вилок", self.mode)
+            return
+        room = max(0, config.ARB_REJECTED_MAX - len(rejected))
+        rejected.extend(un[:room])
+        room3 = max(0, config.ARB_REJECTED_MAX - len(rejected3))
+        rejected3.extend(un3[:room3])
 
     def _save_new(self, arbs: list[Arb], arbs3: list[Arb3]) -> None:
         """Пишет в историю только вилки, которых не было в прошлый раз.

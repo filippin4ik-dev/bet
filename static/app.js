@@ -693,6 +693,8 @@ function legHtml(l) {
 const REJECT_LABEL = {
   combat_rounds: "Разные правила расчёта раундов",
   max_profit: "Подозрительно высокая доходность",
+  unmatched_name: "Событие не склеилось: названия",
+  unmatched_time: "Событие не склеилось: время начала",
 };
 
 function renderRejected() {
