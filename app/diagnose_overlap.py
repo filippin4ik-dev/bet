@@ -17,6 +17,10 @@
    сопоставления именно для него, а не общая нехватка вилок.
 4. Среди событий с 2+ БК — сколько из них имеют хотя бы 1 общий
    двухисходный рынок (без этого вилка невозможна даже при совпавшем матче).
+4a. Покрытие рынка «Исход 1X2» по каждой БК и сколько событий имеют его
+   сразу у 2–3 БК: только по таким событиям вообще возможна ТРОЙКА
+   (П1/X/П2 у разных контор). Там же — сколько троек нашлось и у скольких
+   из них все три плеча в РАЗНЫХ БК.
 5. «Разошлись по времени старта»: события с ОДИНАКОВЫМИ (после нормализации,
    без учёта порядка) именами команд у РАЗНЫХ БК, которые НЕ склеились,
    потому что их start_ts отличается больше, чем боевой допуск сканера для
@@ -46,7 +50,8 @@ from collections import defaultdict
 from itertools import combinations
 
 from .arbitrage import (_market_group, _start_tolerance,
-                        _team_pair_similarity, find_arbs, norm_team)
+                        _team_pair_similarity, find_arbs, find_arbs_1x2,
+                        norm_team)
 from .config import (ARB_MAX_PROFIT, FUZZY_NAME_SIM_THRESHOLD,
                      START_TS_TOLERANCE)
 from .models import KIND_PREMATCH
@@ -96,6 +101,63 @@ def _report_capped(prematch: list, shown: list) -> None:
               f"{a.k1_max}@{a.k1_bookmaker} / {a.k2_max}@{a.k2_bookmaker}")
     if len(capped) > _MAX_CAPPED:
         print(f"  ... и ещё {len(capped) - _MAX_CAPPED}")
+
+
+def _report_1x2(prematch: list) -> None:
+    """Покрытие рынка «Исход 1X2» и сколько по нему нашлось троек.
+
+    Трёхисходная вилка требует, чтобы 1X2 был у нескольких БК на ОДНОМ
+    событии, — а движок перебирает все комбинации троек (кэф П1 у одной
+    БК × X у другой × П2 у третьей). Если троек мало, причина видна
+    отсюда: либо БК не отдаёт этот рынок вовсе (тогда её строка почти
+    пустая), либо событие не сшилось (тогда 1X2 есть у многих БК по
+    отдельности, а событий с двумя БК мало).
+    """
+    groups = Scanner._event_groups(prematch)
+    books_1x2: dict[str, set[str]] = {}
+    books_all: dict[str, set[str]] = {}
+    for event_id, odds in groups.items():
+        books_all[event_id] = {o.bookmaker for o in odds}
+        got = {o.bookmaker for o in odds
+               if o.market_key.startswith("winner1x2")}
+        if got:
+            books_1x2[event_id] = got
+
+    print("-" * 72)
+    print("Рынок «Исход 1X2» (по нему ищутся ТРОЙКИ П1/X/П2):")
+    events_by_bk: dict[str, int] = defaultdict(int)
+    with_1x2_by_bk: dict[str, int] = defaultdict(int)
+    for event_id, books in books_all.items():
+        for bk in books:
+            events_by_bk[bk] += 1
+    for books in books_1x2.values():
+        for bk in books:
+            with_1x2_by_bk[bk] += 1
+    print(f"  {'БК':<12}{'событий':>9}{'из них с 1X2':>14}{'  доля':>8}")
+    for bk, total in sorted(events_by_bk.items(), key=lambda x: -x[1]):
+        got = with_1x2_by_bk.get(bk, 0)
+        pct = 100 * got / total if total else 0.0
+        print(f"  {bk:<12}{total:>9}{got:>14}{pct:>7.0f}%")
+
+    two = sum(1 for b in books_1x2.values() if len(b) >= 2)
+    three = sum(1 for b in books_1x2.values() if len(b) >= 3)
+    print(f"  Событий с 1X2 хотя бы у 2 БК (тройка возможна): {two}")
+    print(f"  Событий с 1X2 сразу у 3+ БК: {three}")
+    trios = defaultdict(int)
+    for books in books_1x2.values():
+        if len(books) >= 3:
+            trios[", ".join(sorted(books))] += 1
+    for combo, cnt in sorted(trios.items(), key=lambda x: -x[1])[:10]:
+        print(f"    {combo}: {cnt}")
+
+    arbs3 = find_arbs_1x2(prematch)
+    from_three = sum(1 for a in arbs3 if len(
+        {a.k1_bookmaker, a.kx_bookmaker, a.k2_bookmaker}) == 3)
+    print(f"  Найдено 1X2-вилок: {len(arbs3)}, из них плечи в ТРЁХ разных "
+          f"БК: {from_three}")
+    if not arbs3 and two:
+        print("  (вилок нет при живом покрытии — это нормально: 1X2 самый "
+              "ходовой рынок, БК держат его кэфы близко друг к другу)")
 
 
 def main() -> None:
@@ -164,6 +226,7 @@ def main() -> None:
         arbs_by_sport[a.sport.split("·")[0].strip()] += 1
 
     _report_capped(prematch, shown_arbs)
+    _report_1x2(prematch)
 
     print("-" * 72)
     print("Разбивка по видам спорта (события / из них совпало у 2+ БК / "

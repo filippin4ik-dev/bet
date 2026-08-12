@@ -20,7 +20,8 @@ import re
 from collections import defaultdict
 from typing import Iterable
 
-from .config import (ARB_MAX_PROFIT, ARB_REJECTED_MAX, BANKS,
+from .config import (ARB_MAX_PROFIT, ARB_REJECTED_MAX,
+                     ARB_UNMATCHED_CANDIDATES_MAX, BANKS,
                      COMBAT_ROUNDS_DEFAULT_RULE, COMBAT_ROUNDS_RULE_LABELS,
                      COMBAT_ROUNDS_RULES, FUZZY_NAME_MIN_SINGLE_RATIO,
                      FUZZY_NAME_SIM_THRESHOLD, START_TS_TOLERANCE,
@@ -66,6 +67,14 @@ def norm_team(name: str) -> str:
             continue
         words.append("ж" if w in _FEMALE else w)
     return " ".join(sorted(words))  # порядок слов тоже не важен
+
+
+@functools.lru_cache(maxsize=20_000)
+def sport_root(sport: str) -> str:
+    """Корневой вид спорта из подписи котировки: «Футбол · Россия. РПЛ» →
+    «футбол». Разные виды спорта не сопоставляются между собой, а лига в
+    названии у каждой БК своя."""
+    return sport.split("·")[0].strip().lower().replace("ё", "е")
 
 
 def _named(team1: str, team2: str) -> bool:
@@ -159,6 +168,31 @@ def _may_match(a: tuple[int, int], b: tuple[int, int]) -> bool:
     return 2 * fit >= FUZZY_NAME_MIN_SINGLE_RATIO * (la + lb)
 
 
+class TimeSplit:
+    """Одно событие, разошедшееся у разных БК по времени старта.
+
+    Допуск времени — защита от склейки первого и ответного матчей одной
+    пары (см. _time_clusters). Но у той же защиты есть цена: если одна БК
+    ошиблась со временем, её кэфы выпадают из события молча. Запись
+    сохраняет обе стороны разрыва, чтобы это можно было увидеть.
+    """
+
+    __slots__ = ("teams", "ts_a", "ts_b", "books_a", "books_b", "tol",
+                 "sport")
+
+    def __init__(self, teams: frozenset, ts_a: float, ts_b: float,
+                 books_a: set[str], books_b: set[str], tol: float,
+                 sport: str) -> None:
+        self.teams = teams
+        self.ts_a, self.ts_b = ts_a, ts_b
+        self.books_a, self.books_b = books_a, books_b
+        self.tol, self.sport = tol, sport
+
+    @property
+    def gap(self) -> float:
+        return abs(self.ts_b - self.ts_a)
+
+
 def build_name_canon_map(odds: list[MarketOdds]) -> dict[str, str]:
     """Строит соответствие «сырое нормализованное имя команды» → каноническое,
     сливая РАЗНЫЕ написания одной и той же команды/игрока между БК
@@ -192,6 +226,11 @@ def build_name_canon_map(odds: list[MarketOdds]) -> dict[str, str]:
     другая и безопасная: одинаковые написания разных БК схлопываются в ОДНУ
     запись (сравнивать «Црвена Звезда» с «Црвена Зведза» пять раз, по разу
     на БК, незачем).
+
+    Пары, которые сюда НЕ прошли (похожи, но ниже порога), не пропадают
+    совсем: их отдельно, по общим словам в названиях, ищет
+    app/unmatched.py — и показывает на вкладке «Отсеянные», если из-за
+    несклейки теряется вилка.
     """
     # одна запись на (корень вида спорта, пара имён): какие БК её дают и в
     # какое окно времени укладываются их времена старта
@@ -216,7 +255,7 @@ def build_name_canon_map(odds: list[MarketOdds]) -> dict[str, str]:
         if not _named(o.team1, o.team2):
             continue
         t1, t2 = norm_team(o.team1), norm_team(o.team2)
-        root = o.sport.split("·")[0].strip().lower().replace("ё", "е")
+        root = sport_root(o.sport)
         key = (root, frozenset((t1, t2)))
         tol = _start_tolerance(o.sport)
         ev = events.get(key)
@@ -299,9 +338,12 @@ def _merge_if_alike(dsu: _UnionFind, a: tuple, b: tuple) -> None:
     else:
         avg, ra, rb = swapped, r01, r10
         match0, match1 = pair_b[1], pair_b[0]
-    if avg < FUZZY_NAME_SIM_THRESHOLD:
-        return
-    if ra < FUZZY_NAME_MIN_SINGLE_RATIO or rb < FUZZY_NAME_MIN_SINGLE_RATIO:
+    if avg < FUZZY_NAME_SIM_THRESHOLD \
+            or min(ra, rb) < FUZZY_NAME_MIN_SINGLE_RATIO:
+        # Похоже, но не настолько, чтобы решать за человека: ошибочное
+        # слияние сводит в «вилку» цены РАЗНЫХ матчей. Такие пары
+        # разбирает app/unmatched.py — показывает их человеку, если из-за
+        # несклейки теряется вилка.
         return
     if pair_a[0] != match0:
         dsu.union(pair_a[0], match0)
@@ -469,7 +511,7 @@ def _start_tolerance(sport: str) -> float:
 
     Вызывается по каждой котировке (миллионы раз за пересчёт) при считанных
     сотнях разных значений — поэтому с кэшем."""
-    root = sport.split("·")[0].strip().lower().replace("ё", "е")
+    root = sport_root(sport)
     if root in _COMBAT_ROOTS:
         return START_TS_TOLERANCE_COMBAT
     if _RAPID_FIXTURE_RE.search(sport):
@@ -487,6 +529,11 @@ def _start_tolerance(sport: str) -> float:
 # можно проверить руками на сайтах БК.
 REJECT_MAX_PROFIT = "max_profit"
 REJECT_COMBAT_ROUNDS = "combat_rounds"
+# Кандидаты, до перебора кэфов вообще не дошедшие: событие не сшилось между
+# БК (разное написание имён или разное время старта). Их находит отдельный
+# проход — app/unmatched.py.
+REJECT_UNMATCHED_NAME = "unmatched_name"
+REJECT_UNMATCHED_TIME = "unmatched_time"
 
 # Виды рынков, единица счёта которых в единоборствах — РАУНД (тотал
 # раундов, фора по раундам, чет/нечет раундов). Победитель боя от правил
@@ -508,8 +555,7 @@ def _counts_rounds(sport: str, market_key: str) -> bool:
     """Рынок считает РАУНДЫ боя: тотал/фора/чет-нечет всего боя в
     единоборствах. Рынки с уточнением (scope) — «тотал ударов», «исход
     2-го раунда» — считают не раунды, их правило не касается."""
-    root = sport.split("·")[0].strip().lower().replace("ё", "е")
-    if root not in _COMBAT_ROOTS:
+    if sport_root(sport) not in _COMBAT_ROOTS:
         return False
     key = canon_market_key(market_key)
     return key.startswith(_ROUND_COUNT_MARKETS) and not key_scope(key)
@@ -582,7 +628,8 @@ def _ambiguous_pairs(ts_by_book: dict[tuple, set],
 
 
 def _time_clusters(odds: list[MarketOdds],
-                   name_map: dict[str, str] | None = None) -> dict[tuple, dict]:
+                   name_map: dict[str, str] | None = None,
+                   splits: list[TimeSplit] | None = None) -> dict[tuple, dict]:
     """Кластеры времени старта по каждому событию (kind, пара команд).
 
     Одна и та же пара команд может играть НЕСКОЛЬКО матчей (первый и
@@ -602,9 +649,17 @@ def _time_clusters(odds: list[MarketOdds],
     name_map (build_name_canon_map) сливает разные написания имени одной
     команды между БК ДО группировки по паре команд — иначе такие пары
     вообще не встретились бы в одном ключе события.
+
+    splits — необязательный список, куда складываются события, которые
+    допуск РАЗВЁЛ по разным кластерам, причём в разных кластерах оказались
+    разные БК (см. TimeSplit). Обычно это защита от склейки первого и
+    ответного матчей, но иногда — просто ошибка времени у одной БК, и
+    тогда её кэфы молча выпадают из события. Вкладка «Отсеянные»
+    показывает такие случаи, если из-за них теряется вилка.
     """
     ts_by_event: dict[tuple, set] = defaultdict(set)
     tol_by_event: dict[tuple, float] = {}
+    sport_by_event: dict[tuple, str] = {}
     combat: set[tuple] = set()
     # (событие, БК) -> времена старта у ЭТОЙ БК: по ним видно, что пара
     # встречается сегодня не один раз (см. _ambiguous ниже)
@@ -617,6 +672,7 @@ def _time_clusters(odds: list[MarketOdds],
             key = (o.kind, teams)
             ts_by_event[key].add(o.start_ts)
             ts_by_book[(key, o.bookmaker)].add(o.start_ts)
+            sport_by_event.setdefault(key, o.sport)
             tol = _start_tolerance(o.sport)
             if tol == START_TS_TOLERANCE_COMBAT:
                 combat.add(key)
@@ -636,13 +692,48 @@ def _time_clusters(odds: list[MarketOdds],
             mapping[ts] = cluster
             prev = ts
         clusters[key] = mapping
+        if splits is not None and cluster:
+            _record_splits(splits, key, mapping, ts_by_book, tol,
+                           sport_by_event.get(key, ""))
     return clusters
+
+
+def _record_splits(splits: list[TimeSplit], key: tuple, mapping: dict,
+                   ts_by_book: dict[tuple, set], tol: float,
+                   sport: str) -> None:
+    """Запоминает соседние кластеры одного события, в которых стоят РАЗНЫЕ
+    БК (см. TimeSplit).
+
+    Только соседние: разрыв между крайними кластерами — это уже заведомо
+    разные матчи (первый и ответный через неделю), а спорным бывает
+    ближайший. Кластер, где стоит та же БК, что и в соседнем, пропускаем:
+    контора, выставившая пару дважды, лучше всех знает, что матчей два.
+    """
+    books_by_cluster: dict[int, set[str]] = defaultdict(set)
+    ts_by_cluster: dict[int, list[float]] = defaultdict(list)
+    for (ev_key, bk), ts_set in ts_by_book.items():
+        if ev_key != key:
+            continue
+        for ts in ts_set:
+            books_by_cluster[mapping[ts]].add(bk)
+    for ts, cl in mapping.items():
+        ts_by_cluster[cl].append(ts)
+    for cl in range(max(mapping.values())):
+        books_a, books_b = books_by_cluster[cl], books_by_cluster[cl + 1]
+        if not books_a.isdisjoint(books_b):
+            continue
+        if len(splits) >= ARB_UNMATCHED_CANDIDATES_MAX:
+            return
+        splits.append(TimeSplit(
+            key[1], max(ts_by_cluster[cl]), min(ts_by_cluster[cl + 1]),
+            books_a, books_b, tol, sport))
 
 
 def find_arbs(odds: Iterable[MarketOdds],
               name_map: dict[str, str] | None = None,
               max_profit: float | None = None,
-              rejected: list[Arb] | None = None) -> list[Arb]:
+              rejected: list[Arb] | None = None,
+              time_clusters: dict[tuple, dict] | None = None) -> list[Arb]:
     """max_profit — потолок доходности; по умолчанию ARB_MAX_PROFIT.
 
     Задавать его отдельно нужно диагностике (app.diagnose_overlap): она
@@ -656,13 +747,20 @@ def find_arbs(odds: Iterable[MarketOdds],
     нему живёт вкладка «Отсеянные»: причина отсева видна словами, и строку
     можно проверить руками на сайтах БК. Без списка поведение прежнее —
     такие кандидаты просто пропускаются.
+
+    time_clusters — готовые кластеры времени старта (_time_clusters). Оба
+    движка считают их по одной и той же линии, поэтому сканер считает их
+    один раз и передаёт сюда. Пустой словарь означает «не разбивать
+    событие по времени вовсе» — так проверяются пары, которые как раз и
+    развёл допуск времени (app/unmatched.py).
     """
     if max_profit is None:
         max_profit = ARB_MAX_PROFIT
     odds = list(odds)
     if name_map is None:
         name_map = build_name_canon_map(odds)
-    time_clusters = _time_clusters(odds, name_map)
+    if time_clusters is None:
+        time_clusters = _time_clusters(odds, name_map)
 
     # market_group одинаков у одного рынка одного события независимо от БК
     # и порядка команд: kind | пара_команд | кластер_времени | вид_рынка
@@ -787,7 +885,9 @@ def find_arbs(odds: Iterable[MarketOdds],
 def find_arbs_1x2(odds: Iterable[MarketOdds],
                   name_map: dict[str, str] | None = None,
                   max_profit: float | None = None,
-                  rejected: list[Arb3] | None = None) -> list[Arb3]:
+                  rejected: list[Arb3] | None = None,
+                  time_clusters: dict[tuple, dict] | None = None
+                  ) -> list[Arb3]:
     """Ищет ТРЁХисходные вилки на рынке «Исход 1X2» (П1/X/П2).
 
     Отдельный движок от find_arbs: рынок с тремя взаимоисключающими
@@ -796,14 +896,16 @@ def find_arbs_1x2(odds: Iterable[MarketOdds],
     комбинаций и формула маржи — трёхсторонние.
 
     max_profit — потолок доходности, rejected — список отсеянных
-    кандидатов; и то и другое работает как в find_arbs.
+    кандидатов, time_clusters — готовые кластеры времени старта; всё
+    работает как в find_arbs.
     """
     if max_profit is None:
         max_profit = ARB_MAX_PROFIT
     odds = list(odds)
     if name_map is None:
         name_map = build_name_canon_map(odds)
-    time_clusters = _time_clusters(odds, name_map)
+    if time_clusters is None:
+        time_clusters = _time_clusters(odds, name_map)
 
     groups: dict[tuple, dict] = defaultdict(lambda: {
         "outcomes": {}, "sample": None, "books": set(),

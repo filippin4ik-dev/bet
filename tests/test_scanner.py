@@ -615,6 +615,29 @@ def test_rejected_candidates_reach_the_snapshot():
     assert rows[0]["reject_reason"]
 
 
+def test_unmatched_candidates_reach_the_snapshot():
+    """Вилка, потерянная на СШИВКЕ события (у БК разные написания имён),
+    до перебора кэфов не доходит вовсе — её ищет отдельный проход, и его
+    результат должен попадать в ту же вкладку «Отсеянные»."""
+    sc = Scanner(mode=KIND_PREMATCH,
+                 parsers=[_Fake("Fonbet"), _Fake("Winline")])
+    start = time.time() + 3600
+    for bk, t1, t2, k1, k2 in (
+            ("Fonbet", "Сувон Самсунг", "Кимчхон Сангму", 2.30, 1.70),
+            ("Winline", "Сувон", "Кимчхон Санму", 1.80, 2.25)):
+        sc._store_odds(bk, [MarketOdds(
+            bookmaker=bk, sport="Футбол · Корея. К-Лига", team1=t1, team2=t2,
+            market="Тотал 2.5", market_key="total:2.5", outcome1="ТБ 2.5",
+            outcome2="ТМ 2.5", k1=k1, k2=k2, start_ts=start,
+            start_time="01.01 14:00")])
+    sc._recalc()
+    assert sc.snapshot()["arbs"] == [], "события не склеились между собой"
+    rows = sc.rejected_snapshot()["rejected"]
+    assert len(rows) == 1, rows
+    assert rows[0]["reject_code"] == "unmatched_name"
+    assert "Сувон Самсунг" in rows[0]["reject_reason"]
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
