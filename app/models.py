@@ -113,6 +113,13 @@ class Arb:
     # первого обнаружения по match_key, пока вилка жива между обновлениями;
     # пропала и появилась снова — таймер начинается заново.
     first_seen: float | None = None
+    # Почему вилка НЕ показана в основном списке (см.
+    # arbitrage._reject_reason):
+    # код причины и её человекочитаемое объяснение. У показанных вилок оба
+    # поля пустые — заполняются только у отсеянных кандидатов, которые
+    # уходят на вкладку «Отсеянные» для ручного разбора.
+    reject_code: str | None = None
+    reject_reason: str | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -137,6 +144,8 @@ class Arb:
             "profit_pct": round(self.profit_pct, 2),
             "stakes": self.stakes,
             "first_seen": self.first_seen,
+            "reject_code": self.reject_code,
+            "reject_reason": self.reject_reason,
         }
 
 
@@ -173,6 +182,8 @@ class Arb3:
     kx_url: str | None = None
     k2_url: str | None = None
     first_seen: float | None = None
+    reject_code: str | None = None
+    reject_reason: str | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -201,4 +212,6 @@ class Arb3:
             "profit_pct": round(self.profit_pct, 2),
             "stakes": self.stakes,
             "first_seen": self.first_seen,
+            "reject_code": self.reject_code,
+            "reject_reason": self.reject_reason,
         }
