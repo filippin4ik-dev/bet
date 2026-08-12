@@ -475,6 +475,23 @@ def _key_parts(key: str, want: int) -> list[str]:
     return [head] + rest + [line]
 
 
+def key_scope(key: str) -> str:
+    """Scope (предмет/часть матча) из ключа рынка; "" — рынок всего матча.
+
+    Место scope в ключе зависит от вида рынка: у тотала и форы это второй
+    сегмент, но только если сегментов хватает на линию («total:2.5» — это
+    тотал матча, а «total:corners:9.5» — угловых), у индивидуального тотала
+    — третий (после стороны команды), у рынков без линии — просто второй.
+    """
+    parts = key.split(":")
+    kind = parts[0]
+    if kind == "itotal":
+        return parts[2] if len(parts) >= 4 else ""
+    if kind in ("total", "hcap"):
+        return parts[1] if len(parts) >= 3 else ""
+    return parts[1] if len(parts) >= 2 else ""
+
+
 def display_market(key: str, fallback: str) -> str:
     """Единое человекочитаемое имя рынка по его ключу.
 
@@ -483,29 +500,18 @@ def display_market(key: str, fallback: str) -> str:
     «Тотал 32.5 (ауты)», «Фора -1.5 (1-я карта)»."""
     parts = key.split(":")
     kind = parts[0]
+    lbl = scope_label(key_scope(key))
     if kind == "total":
-        scope = parts[1] if len(parts) >= 3 else ""
-        lbl = scope_label(scope)
         return f"Тотал {parts[-1]}" + (f" ({lbl})" if lbl else "")
     if kind == "hcap":
-        scope = parts[1] if len(parts) >= 3 else ""
-        lbl = scope_label(scope)
         return f"Фора {parts[-1]}" + (f" ({lbl})" if lbl else "")
     if kind == "winner":
-        scope = parts[1] if len(parts) >= 2 else ""
-        lbl = scope_label(scope)
         return "Победитель" + (f" ({lbl})" if lbl else "")
     if kind == "winner1x2":
-        scope = parts[1] if len(parts) >= 2 else ""
-        lbl = scope_label(scope)
         return "Исход (1X2)" + (f" ({lbl})" if lbl else "")
     if kind == "bothscore":
-        scope = parts[1] if len(parts) >= 2 else ""
-        lbl = scope_label(scope)
         return "Обе забьют" + (f" ({lbl})" if lbl else "")
     if kind == "oddeven":
-        scope = parts[1] if len(parts) >= 2 else ""
-        lbl = scope_label(scope)
         return "Чет/Нечет" + (f" ({lbl})" if lbl else "")
     # itotal: имя команды есть только в подписи парсера — показываем её
     return fallback
