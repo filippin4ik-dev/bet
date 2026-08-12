@@ -1011,6 +1011,46 @@ thead th.num-head { text-align: right; }
 .profit-cell { color: var(--accent); font-weight: 650; }
 tr.hot .profit-cell { color: var(--hot); }
 
+/* ---- вкладка «Отсеянные»: кандидат, который не показан вилкой ---- */
+
+.reject-note {
+  margin: 0;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 0.83rem;
+  line-height: 1.55;
+}
+/* Плечи в одной ячейке (у 1X2 их три) — каждое своей строкой, иначе
+   кэфы разных исходов сливаются в кашу из цифр. */
+.legs .leg {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 1px 0;
+  color: inherit;
+  text-decoration: none;
+  white-space: nowrap;
+}
+.legs a.leg:hover { text-decoration: underline; }
+.legs .out { margin-right: 0; min-width: 58px; text-align: center; }
+.reject-code {
+  display: block;
+  font-weight: 650;
+  color: var(--hot);
+}
+/* Само объяснение — мелким: его читают один раз, когда решают, идти ли
+   проверять строку руками на сайтах БК. */
+.reject-why {
+  display: block;
+  max-width: 420px;
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1.4;
+  white-space: normal;
+}
+
 /* Плотнее строки на средних экранах: 12–13 столбцов вилки должны влезать
    в ноутбучные 1280–1440 без горизонтальной прокрутки. Ограничения ширины
    столбцов — только для «настоящих» таблиц: ниже 860px строка становится

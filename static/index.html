@@ -45,6 +45,8 @@
       <button type="button" data-view="live">🔴 Лайв-вилки</button>
       <button type="button" data-view="arbs1x2">⚔ Вилки 1X2</button>
       <button type="button" data-view="live1x2">🔴 Лайв 1X2</button>
+      <button type="button" data-view="rejected"
+              title="Кандидаты, которые движок не показал вилками, и причина у каждого">🚫 Отсеянные</button>
       <button type="button" data-view="matches">📋 Матчи</button>
       <button type="button" data-view="live-matches">📺 Лайв-матчи</button>
     </div>
@@ -144,6 +146,37 @@
         </thead>
         <tbody id="arbs1x2-body">
           <tr><td colspan="13" class="empty">Загрузка данных…</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- Отсеянные: арифметически вилка есть, но показывать её нельзя.
+         Причина у каждой строки своя, и половина из них — не защита, а
+         подозрение: разобрать их руками (открыть обе БК и сверить рынок)
+         быстрее всего человеку. -->
+    <div class="table-card" id="rejected-card" hidden>
+      <p class="reject-note">
+        Здесь кандидаты, которые движок <b>не показал вилками</b>: у каждого
+        написано, почему. Часть отсеяна по делу (у БК разные правила расчёта
+        — ставка по такой «вилке» может проиграть обеими ногами), часть —
+        под подозрением на ошибку сопоставления. Откройте обе БК по ссылкам
+        на кэфах и сверьте рынок: если отсев неверный, покажите строку — её
+        разберём и починим.
+      </p>
+      <table id="rejected-table">
+        <thead>
+          <tr>
+            <th class="sortable" data-sort="start_ts">Начало</th>
+            <th class="sortable" data-sort="sport">Спорт</th>
+            <th class="sortable" data-sort="match">Матч</th>
+            <th class="sortable" data-sort="market">Рынок</th>
+            <th>Плечи (кэф и БК)</th>
+            <th class="sortable" data-sort="profit_pct">Доходность</th>
+            <th class="sortable" data-sort="reject_code">Почему не показана</th>
+          </tr>
+        </thead>
+        <tbody id="rejected-body">
+          <tr><td colspan="7" class="empty">Загрузка данных…</td></tr>
         </tbody>
       </table>
     </div>
