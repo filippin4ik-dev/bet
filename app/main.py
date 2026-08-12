@@ -191,6 +191,36 @@ def get_arbs(
     return snap
 
 
+@app.get("/api/rejected")
+def get_rejected(
+    min_profit: float = Query(0.0, ge=0, description="Мин. доходность, %"),
+):
+    """Кандидаты, которые движок ОТСЕЯЛ, и причина отсева у каждого.
+
+    Одним списком по обоим сканерам: прематч и лайв различаются полем
+    kind, а вкладка «Отсеянные» на сайте одна — разбирать такие строки
+    руками приходится в любом режиме. Порядок — по убыванию доходности:
+    чем «жирнее» отсеянный кандидат, тем интереснее понять, ошибка это
+    сопоставления или честная разница в правилах расчёта у БК.
+    """
+    snap = scanner.rejected_snapshot()
+    live = live_scanner.rejected_snapshot()
+    rejected = [a for a in snap["rejected"] + live["rejected"]
+                if a["profit_pct"] >= min_profit]
+    rejected3 = [a for a in snap["rejected_1x2"] + live["rejected_1x2"]
+                 if a["profit_pct"] >= min_profit]
+    for rows in (rejected, rejected3):
+        rows.sort(key=lambda a: a["profit_pct"], reverse=True)
+    status = scanner.snapshot()
+    return {
+        "scanning": status["scanning"],
+        "last_scan": status["last_scan"],
+        "bookmakers": status["bookmakers"],
+        "rejected": rejected,
+        "rejected_1x2": rejected3,
+    }
+
+
 @app.get("/api/odds")
 def get_odds():
     """Все найденные прематч-матчи/котировки (по всем БК)."""

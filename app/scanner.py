@@ -68,6 +68,13 @@ class Scanner:
         # трёхисходные вилки (рынок «Исход 1X2»: П1/X/П2) — отдельный список,
         # т.к. у Arb3 другая форма (3 плеча вместо 2)
         self._arbs3: list[Arb3] = []
+        # кандидаты, которые движок ОТСЕЯЛ (у каждого проставлена причина —
+        # см. arbitrage._reject_reason). Живут для вкладки «Отсеянные»:
+        # отсев бывает и полезным (правила расчёта у БК разные), и признаком
+        # нашей же ошибки сопоставления — со стороны это не различить, пока
+        # строку не видно целиком.
+        self._rejected: list[Arb] = []
+        self._rejected3: list[Arb3] = []
         # котировки по каждой БК (живут между циклами) + время их получения
         self._odds_by_bk: dict[str, list[MarketOdds]] = {}
         self._fetched_at: dict[str, float] = {}
@@ -171,6 +178,30 @@ class Scanner:
                 "arbs": [a.to_dict() for a in self._arbs],
                 "arbs_1x2": [a.to_dict() for a in self._arbs3],
             }
+
+    def rejected_snapshot(self) -> dict:
+        """Отсеянные кандидаты в вилки — по убыванию доходности.
+
+        Отдельная ручка, а не поле snapshot(): список нужен одной вкладке,
+        а snapshot() тянут все опросы интерфейса каждые несколько секунд."""
+        with self._lock:
+            rejected = [self._reject_row(a) for a in self._rejected]
+            rejected3 = [self._reject_row(a) for a in self._rejected3]
+        rejected.sort(key=lambda a: a["profit_pct"], reverse=True)
+        rejected3.sort(key=lambda a: a["profit_pct"], reverse=True)
+        return {"rejected": rejected, "rejected_1x2": rejected3}
+
+    @staticmethod
+    def _reject_row(arb) -> dict:
+        """Отсеянный кандидат для интерфейса — без сумм ставок.
+
+        Суммы тут не к месту вдвойне: ставить по такой строке как раз и не
+        надо (её сначала проверяют руками), а весит расклад по трём банкам
+        больше самой строки — на сотнях отсеянных это лишние сотни
+        килобайт в каждом опросе вкладки."""
+        row = arb.to_dict()
+        row.pop("stakes", None)
+        return row
 
     def odds_snapshot(self) -> list[dict]:
         """Все котировки, находящиеся сейчас в памяти (все найденные матчи)."""
@@ -507,8 +538,13 @@ class Scanner:
             books = set(self._odds_by_bk)
 
         name_map = self._name_map(all_odds, books, refresh=True)
-        arbs = find_arbs(all_odds, name_map)
-        arbs3 = find_arbs_1x2(all_odds, name_map)
+        # отсеянные кандидаты собираются тем же проходом: считать линию
+        # второй раз ради вкладки «Отсеянные» значило бы удвоить самую
+        # дорогую операцию сканера
+        rejected: list[Arb] = []
+        rejected3: list[Arb3] = []
+        arbs = find_arbs(all_odds, name_map, rejected=rejected)
+        arbs3 = find_arbs_1x2(all_odds, name_map, rejected=rejected3)
         with self._lock:
             # таймер жизни вилки: сохраняем момент первого обнаружения,
             # исчезнувшие вилки забываем (появятся снова — таймер с нуля)
@@ -524,6 +560,8 @@ class Scanner:
                 self._first_seen3[a.match_key] = a.first_seen
             self._arbs = arbs
             self._arbs3 = arbs3
+            self._rejected = rejected
+            self._rejected3 = rejected3
             self._last_scan = now
             self._events_checked = len({o.event_key for o in all_odds})
             self._quotes_checked = len(all_odds)
@@ -718,6 +756,8 @@ class Scanner:
             self._restart_bks.clear()
             self._arbs = []
             self._arbs3 = []
+            self._rejected = []
+            self._rejected3 = []
             self._events_checked = 0
             self._quotes_checked = 0
             self._running = False
@@ -847,10 +887,13 @@ class Scanner:
             try:
                 arbs, arbs3 = self._recalc()
                 self._save_new(arbs, arbs3)
+                with self._lock:
+                    dropped = len(self._rejected) + len(self._rejected3)
                 log.log(logging.DEBUG if self.live else logging.INFO,
                         "[%s] пересчёт вилок за %.1f c: %d вилок "
-                        "(+%d на 1X2)%s", self.mode,
+                        "(+%d на 1X2), отсеяно %d%s", self.mode,
                         time.monotonic() - started, len(arbs), len(arbs3),
+                        dropped,
                         f", лучшая {arbs[0].profit_pct:.2f}%" if arbs else "")
             except Exception:  # noqa: BLE001
                 log.exception("[%s] ошибка пересчёта вилок", self.mode)
