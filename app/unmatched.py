@@ -228,8 +228,10 @@ def _near_miss(a: _Event, b: _Event,
         return None
     # порядок команд у БК бывает разный, поэтому считаем обе ориентации:
     # лучшая даёт и похожесть, и то, какое имя какому соответствует
-    straight = (_ratio(a.pair[0], b.pair[0]) + _ratio(a.pair[1], b.pair[1])) / 2
-    swapped = (_ratio(a.pair[0], b.pair[1]) + _ratio(a.pair[1], b.pair[0])) / 2
+    straight = (_ratio(a.pair[0], b.pair[0])
+                + _ratio(a.pair[1], b.pair[1])) / 2
+    swapped = (_ratio(a.pair[0], b.pair[1])
+               + _ratio(a.pair[1], b.pair[0])) / 2
     sim = max(straight, swapped)
     if sim < FUZZY_NAME_NEAR_MISS_MIN:
         return None
