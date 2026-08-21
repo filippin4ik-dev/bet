@@ -269,8 +269,8 @@ class BCGameParser(BaseParser):
                 return None
 
         low = name.lower().replace("ё", "е")
-        has_c1 = "{$competitor1}" in name or "{%player}" in name
-        has_c2 = "{$competitor2}" in name
+        has_c1 = _C1_NAME in name or "{%player}" in name
+        has_c2 = _C2_NAME in name
         scope = self._scope(name, spec)
 
         # --- Исход 1X2 (П1 / ничья / П2) ---
