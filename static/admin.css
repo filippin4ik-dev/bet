@@ -262,11 +262,21 @@ main#admin-view { max-width: 1080px; margin: 0 auto; }
 
 /* ---- валюта и курс ---- */
 
+/* Общей форме хватает 420 px, а трём плиткам валют — нет: третья
+   уезжала на вторую строку и выбор выглядел как две группы. */
+#panel-currency .admin-form { max-width: 620px; }
+
 /* Валюты — крупные «плитки» вместо строчки радиокнопок: их всего три,
    и выбор валюты меняет все суммы на сайте, поэтому промахнуться мимо
    мелкой кнопки тут дороже, чем в остальных формах. */
-#currency-choice { gap: 8px; flex-wrap: wrap; }
+#currency-choice {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 8px;
+}
+#currency-choice legend { grid-column: 1 / -1; }
 #currency-choice .admin-choice__option {
+  display: flex;
   border: 1px solid var(--border);
   border-radius: var(--radius-xs);
   padding: 8px 14px;

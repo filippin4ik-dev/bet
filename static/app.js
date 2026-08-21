@@ -1274,7 +1274,8 @@ function openMatch(id) {
   els.detailTitle.textContent = "Загрузка…";
   els.detailMeta.textContent = "";
   els.tableMeta.textContent = "";
-  els.detailBody.innerHTML = '<tr><td colspan="4" class="empty">Загрузка котировок…</td></tr>';
+  els.detailBody.innerHTML =
+    '<tr><td colspan="4" class="empty loading">Загрузка котировок…</td></tr>';
   pollDetail().then(rerender);
 }
 

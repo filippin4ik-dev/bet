@@ -421,6 +421,28 @@ td.empty {
   font-size: 0.92rem;
 }
 
+/* Первая загрузка: полный обход БК занимает десятки секунд, и застывшая
+   надпись выглядит как зависший сайт. Кружок показывает, что данные ещё
+   едут — ждать стоит, а не перезагружать страницу. */
+td.empty.loading::before {
+  content: "";
+  display: inline-block;
+  width: 13px;
+  height: 13px;
+  margin-right: 9px;
+  vertical-align: -2px;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.9s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+/* Уважаем системную настройку «меньше анимации»: крутящийся элемент
+   мешает людям, которым от движения на экране становится плохо. */
+@media (prefers-reduced-motion: reduce) {
+  td.empty.loading::before { animation: none; }
+}
+
 td.num, .stake, .coef, .arb-age { font-variant-numeric: tabular-nums; }
 .arb-age { color: var(--muted); white-space: nowrap; }
 
