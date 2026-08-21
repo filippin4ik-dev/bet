@@ -752,6 +752,8 @@ tbody tr.pinned.hot { box-shadow: inset 3px 0 0 var(--hot); background: var(--ho
 }
 .autobet-result .leg-ok { color: var(--accent); }
 .autobet-result .leg-fail { color: var(--danger); }
+.autobet-result .mode-dry { color: var(--hot); }
+.autobet-result .mode-real { color: var(--danger); }
 
 .bet-note { margin-top: 12px; color: var(--muted); font-size: 0.8rem; line-height: 1.5; }
 

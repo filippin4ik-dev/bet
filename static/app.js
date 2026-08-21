@@ -860,8 +860,8 @@ async function autobetApi(path, body) {
 function renderAutobetResult(el, res) {
   el.hidden = false;
   const modeLabel = res.dry_run
-    ? '<b style="color:var(--hot)">РЕЖИМ ИМИТАЦИИ</b> (реальный запрос не отправлялся)'
-    : '<b style="color:#ef4444">РЕАЛЬНАЯ СТАВКА</b>';
+    ? '<b class="mode-dry">РЕЖИМ ИМИТАЦИИ</b> (реальный запрос не отправлялся)'
+    : '<b class="mode-real">РЕАЛЬНАЯ СТАВКА</b>';
   const legsHtml = res.legs.map((l) =>
     `<div class="${l.ok ? "leg-ok" : "leg-fail"}">${l.ok ? "✓" : "✗"} ` +
     // ставка реальная, её считал сервер — показываем ровно в тех рублях,
