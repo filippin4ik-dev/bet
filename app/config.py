@@ -616,8 +616,7 @@ SITE_TRUST_PROXY = os.getenv("SITE_TRUST_PROXY", "1") not in ("0", "false", "no"
 SITE_LOGIN_MAX_FAILS = int(os.getenv("SITE_LOGIN_MAX_FAILS", "10"))
 SITE_LOGIN_FAIL_WINDOW = float(os.getenv("SITE_LOGIN_FAIL_WINDOW", "300"))
 # Забаненные адреса и подсети (формат как у SITE_IP_WHITELIST). Начальное
-# значение: дальше список правится в админке — кнопкой «Забанить IP» в
-# разделе «Кто на сайте» или руками в разделе «Доступ к сайту».
+# значение: дальше список правится в админке, раздел «Доступ к сайту».
 SITE_IP_BLACKLIST = os.getenv("SITE_IP_BLACKLIST", "").strip()
 
 # Раз в сколько секунд авто-обновлять баланс подключённых аккаунтов БК.
