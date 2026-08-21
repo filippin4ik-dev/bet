@@ -7,7 +7,10 @@
 (двойной шанс, точный счёт, фора с ничьей) тройкой П1/X/П2 не считает.
 """
 import time
+from dataclasses import replace
 
+from app.arbitrage import find_arbs
+from app.models import KIND_PREMATCH, MarketOdds
 from app.parsers.bcgame import BCGameParser
 
 NOW = time.time()
@@ -149,6 +152,24 @@ def test_draw_no_bet_is_its_own_market():
 def test_plain_winner_stays_a_winner():
     odds = _by_key(_parse({"186": {"": _k(**{"4": 1.8, "5": 2.1})}}))
     assert odds["winner"].k1 == 1.8
+
+
+def test_draw_no_bet_does_not_pair_with_a_plain_winner():
+    """Ту же вилку движок нашёл бы, будь у рынка ключ обычного победителя:
+    коэффициенты здесь заведомо вилочные. Проверяем именно то, что до
+    движка отдельный ключ доходит целым — канон рынков сводит формы одного
+    ключа к одной, и «winner_dnb» легко было бы срезать до «winner»."""
+    dnb = _parse({"11": {"": _k(**{"4": 2.1, "5": 1.7})}})[0]
+    rival = MarketOdds(
+        bookmaker="Winline", sport="Футбол", team1="Спартак", team2="Зенит",
+        market="Победитель", market_key="winner", outcome1="П1",
+        outcome2="П2", k1=1.7, k2=2.1, kind=KIND_PREMATCH,
+        start_ts=dnb.start_ts, start_time=dnb.start_time)
+    assert dnb.market_key == "winner_dnb"
+    assert find_arbs([dnb, rival]) == []
+    # а между собой такие рынки сшиваются: вилка по ним настоящая
+    twin = replace(rival, bookmaker="Fonbet", market_key="winner_dnb")
+    assert len(find_arbs([dnb, twin])) == 1
 
 
 def test_total_and_handicap():
