@@ -51,9 +51,9 @@ def get_parsers() -> list[BaseParser]:
         parsers.append(BCGameParser())
     elif not _bc_notice_shown:
         log.info(
-            "bc.game отключена (BCGAME_ENABLED=0): единственная зарубежная "
-            "БК в наборе, её линия и написание имён команд заметно "
-            "расходятся с БК РФ. BCGAME_ENABLED=1 — включить обратно.")
+            "bc.game отключена (BCGAME_ENABLED=0): единственная крипто-БК "
+            "в наборе (деньги в USDT, курс задаётся в админке). "
+            "BCGAME_ENABLED=1 — включить обратно.")
         _bc_notice_shown = True
     if LIGASTAVOK_ENABLED:
         parsers.append(LigaStavokParser())
