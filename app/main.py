@@ -118,10 +118,10 @@ async def guard(request: Request, call_next):
 
 async def _guarded_response(request: Request, call_next, *, api: bool):
     path = request.url.path
-    if config.TRUSTED_HOSTS:
+    if config.TRUSTED_HOSTS and not security.local_host(request):
         host = (request.headers.get("host") or "").lower()
         if host.split(":")[0] not in {h.split(":")[0]
-                                      for h in config.TRUSTED_HOSTS}:
+                                     for h in config.TRUSTED_HOSTS}:
             return JSONResponse({"detail": "Неизвестный домен."},
                                 status_code=421)
     if config.FORCE_HTTPS and not security.is_https(request) \

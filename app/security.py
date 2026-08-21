@@ -149,6 +149,28 @@ def _proxy_header(request, name: str) -> str:
     return request.headers.get(name, "").split(",")[0].strip()
 
 
+_LOCAL_HOSTS = ("localhost", "127.0.0.1", "::1", "[::1]")
+
+
+def local_host(request) -> bool:
+    """Запрос к самому серверу с самого сервера.
+
+    Проверка домена (SITE_DOMAIN) не должна ломать обращения по
+    localhost: ими проверяют, что приложение живо, и ими же идёт
+    диагностика на VPS (`curl localhost:8000/...` в README). Обойти
+    защиту так нельзя — снаружи в заголовок можно написать «localhost»,
+    но соединение всё равно придёт не с петлевого адреса, а его мы и
+    требуем."""
+    host = (request.headers.get("host") or "").lower().split(":")[0]
+    if host not in _LOCAL_HOSTS and f"[{host}]" not in _LOCAL_HOSTS:
+        return False
+    peer = getattr(getattr(request, "client", None), "host", "") or ""
+    try:
+        return ipaddress.ip_address(peer).is_loopback
+    except ValueError:
+        return False
+
+
 def is_https(request) -> bool:
     """Пришёл ли запрос по HTTPS (с учётом обратного прокси)."""
     if _proxy_header(request, "x-forwarded-proto").lower() == "https":

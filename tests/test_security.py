@@ -172,6 +172,28 @@ def test_foreign_domain_is_not_served(monkeypatch):
     assert _gate(theirs).status_code == 421
 
 
+def test_domain_check_does_not_break_localhost(monkeypatch):
+    """С самого сервера по localhost проверяют, жив ли сайт, и им же идёт
+    диагностика на VPS — заданный домен ломать это не должен."""
+    monkeypatch.setattr(config, "TRUSTED_HOSTS", ("arb.example.ru",))
+    _reset()
+    loopback = _FakeRequest("/api/arbs", host="127.0.0.1",
+                            cookies=_session_cookies(),
+                            headers={"host": "localhost:8000"})
+    assert _gate(loopback).status_code == 200
+
+
+def test_localhost_in_the_header_is_not_a_way_around_the_domain(monkeypatch):
+    """Снаружи в заголовок можно написать что угодно: «localhost» от
+    постороннего адреса домен не открывает."""
+    monkeypatch.setattr(config, "TRUSTED_HOSTS", ("arb.example.ru",))
+    _reset()
+    spoof = _FakeRequest("/api/arbs", host="203.0.113.9",
+                         cookies=_session_cookies(),
+                         headers={"host": "localhost"})
+    assert _gate(spoof).status_code == 421
+
+
 # ---------- заголовки ----------
 
 def test_security_headers_are_on_every_answer():
