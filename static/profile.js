@@ -27,9 +27,6 @@ const els = {
   toastHost: document.getElementById("toast-host"),
 };
 
-const fmtMoney = (n) => Math.round(Number(n)).toLocaleString("ru-RU") + " ₽";
-const fmtNum = (n) => Math.round(Number(n)).toLocaleString("ru-RU");
-
 function escapeHtml(s) {
   const div = document.createElement("div");
   div.textContent = s ?? "";
@@ -59,14 +56,16 @@ async function api(path, opts) {
   return data;
 }
 
+/* Суммы игрока сервер и хранит, и присылает в рублях — на экран они идут
+ * через fmtRub/fmtNumRub, то есть в выбранной администратором валюте. */
 function renderPlayer(player) {
   els.title.textContent = player.name;
   els.login.textContent = player.username;
-  els.moneyStart.textContent = fmtMoney(player.start_balance);
+  els.moneyStart.textContent = fmtRub(player.start_balance);
   els.moneyProfit.textContent = (player.profit >= 0 ? "+" : "") +
-    fmtMoney(player.profit);
-  els.moneyBalance.textContent = fmtMoney(player.balance);
-  els.moneyStaked.textContent = fmtMoney(player.staked);
+    fmtRub(player.profit);
+  els.moneyBalance.textContent = fmtRub(player.balance);
+  els.moneyStaked.textContent = fmtRub(player.staked);
   els.moneyBets.textContent = `сохранённых ставок: ${player.bets_count}`;
   // Поля формы не перетираем, пока человек в них печатает: страница
   // перерисовывается после каждого сохранения и удаления записи.
@@ -74,7 +73,8 @@ function renderPlayer(player) {
     els.fieldName.value = player.display_name || "";
   }
   if (document.activeElement !== els.fieldBalance) {
-    els.fieldBalance.value = player.start_balance;
+    els.fieldBalance.value = Math.round(toDisplay(player.start_balance));
+    els.fieldBalance.step = money.step;
   }
 }
 
@@ -93,7 +93,7 @@ function legsCell(legs) {
        <span class="out">${escapeHtml(l.outcome)}</span>
        <span class="coef">${Number(l.odds).toFixed(2)}</span>
        <span class="bk-chip">${escapeHtml(l.bookmaker)}</span>
-       <span class="leg-stake">${fmtNum(l.stake)} ₽</span>
+       <span class="leg-stake">${fmtRub(l.stake)}</span>
      </div>`).join("");
 }
 
@@ -113,15 +113,17 @@ function renderBets(bets) {
         <span class="sport-league">${escapeHtml(b.sport)}</span></td>
       <td data-label="Рынок">${escapeHtml(b.market)}</td>
       <td data-label="Плечи">${legsCell(b.legs)}</td>
-      <td data-label="Сумма" class="stake">${fmtNum(b.stake_total)}</td>
-      <td data-label="Выигрыш" class="stake">${fmtNum(b.payout)}</td>
-      <td data-label="Прибыль" class="stake profit-cell">${b.profit >= 0 ? "+" : ""}${fmtNum(b.profit)}</td>
+      <td data-label="Сумма" class="stake">${fmtNumRub(b.stake_total)}</td>
+      <td data-label="Выигрыш" class="stake">${fmtNumRub(b.payout)}</td>
+      <td data-label="Прибыль" class="stake profit-cell">${b.profit >= 0 ? "+" : ""}${fmtNumRub(b.profit)}</td>
       <td><button type="button" class="bet-del" data-id="${b.id}"
                   title="Удалить запись — баланс пересчитается">✕</button></td>
     </tr>`).join("");
 }
 
 async function load() {
+  // валюта — раньше сумм: иначе первые числа мигнули бы рублями
+  await loadCurrency();
   let me;
   try {
     me = await api("/api/profile/me");
@@ -161,7 +163,9 @@ els.form.addEventListener("submit", async (e) => {
       method: "POST",
       body: JSON.stringify({
         display_name: els.fieldName.value,
-        start_balance: parseFloat(els.fieldBalance.value) || 0,
+        // в базе баланс лежит в рублях: отправить сюда доллары значит
+        // урезать его почти в сто раз
+        start_balance: toBaseRub(parseFloat(els.fieldBalance.value) || 0),
         password: els.fieldPassword.value || null,
       }),
     });

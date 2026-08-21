@@ -13,6 +13,10 @@ Type=simple
 User=www-data
 Group=www-data
 WorkingDirectory=/opt/arb-scanner
+# Домен, secure-cookie и прочие настройки, которые прописывает
+# deploy/setup_domain.sh. Минус в начале пути — файла может не быть
+# (доступ по IP, без домена), и это не ошибка запуска.
+EnvironmentFile=-/etc/arb-scanner.env
 Environment=SCAN_INTERVAL=30
 Environment=SOUND_ALERT_PROFIT=2.5
 Environment=DB_PATH=/opt/arb-scanner/arbs.sqlite3

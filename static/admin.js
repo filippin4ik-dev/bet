@@ -37,9 +37,13 @@ const els = {
   accessPassword: document.getElementById("access-password"),
   accessWhitelist: document.getElementById("access-whitelist"),
   accessBlacklist: document.getElementById("access-blacklist"),
-  visitorsNote: document.getElementById("visitors-note"),
-  visitorsBody: document.getElementById("visitors-body"),
-  bannedIps: document.getElementById("banned-ips"),
+  currencyNote: document.getElementById("currency-note"),
+  currencyChoice: document.getElementById("currency-choice"),
+  currencyRate: document.getElementById("currency-rate"),
+  currencyRateNote: document.getElementById("currency-rate-note"),
+  currencyError: document.getElementById("currency-error"),
+  saveCurrencyBtn: document.getElementById("save-currency-btn"),
+  cbrRateBtn: document.getElementById("cbr-rate-btn"),
   accessIpOnly: document.getElementById("access-ip-only"),
   saveAccessBtn: document.getElementById("save-access-btn"),
   clearAccessBtn: document.getElementById("clear-access-btn"),
@@ -140,9 +144,27 @@ els.logoutBtn.addEventListener("click", async () => {
   showLoggedOut();
 });
 
-function fmtMoney(v) {
+/* Валюта отображения и курс: приходят вместе со списком аккаунтов и
+ * из своего раздела админки (см. renderCurrency). */
+let currencyState = null;
+
+function fmtMoney(v, symbol = "₽") {
   if (v === null || v === undefined) return "—";
-  return `${Number(v).toFixed(2)} ₽`;
+  return `${Number(v).toFixed(2)} ${symbol}`;
+}
+
+/* Баланс аккаунта — в валюте самой БК: крипто-площадка держит деньги в
+ * долларах, и рублёвый знак завысил бы её баланс почти в сто раз. Рядом
+ * показываем рублёвый эквивалент — именно он идёт в лимит ставки. */
+function accountBalance(a) {
+  const own = fmtMoney(a.balance, a.currency_symbol || "₽");
+  if (a.currency === "RUB" || a.balance === null || a.balance === undefined) {
+    return own;
+  }
+  const rub = a.balance_rub === null || a.balance_rub === undefined
+    ? '<span class="warn-text" title="Курс доллара не задан в разделе «Валюта и курс» — этот баланс не учитывается в лимитах ставки">курс не задан</span>'
+    : `<span class="muted">≈ ${Number(a.balance_rub).toFixed(2)} ₽</span>`;
+  return `${own}<br>${rub}`;
 }
 
 function fmtDate(s) {
@@ -210,7 +232,7 @@ async function loadAccounts() {
       <td class="login-type-cell">${loginTypeSelect(a)}</td>
       <td>${escapeHtml(a.login)}</td>
       <td>${a.has_cookies ? '<span class="ok-text" title="Cookie задана — вход по ней, минуя форму/капчу">есть</span>' : "—"}</td>
-      <td>${fmtMoney(a.balance)}</td>
+      <td>${accountBalance(a)}</td>
       <td>${fmtDate(a.balance_updated_at)}</td>
       <td>${status}</td>
       <td><input type="checkbox" data-id="${a.id}" class="acc-enabled" ${a.enabled ? "checked" : ""}></td>
@@ -771,136 +793,110 @@ els.addMyIpBtn.addEventListener("click", () => {
   els.accessWhitelist.value = lines.join("\n");
 });
 
-/* ---------- кто на сайте: устройства, адреса, бан ---------- */
+/* ---------- валюта отображения и курс доллара ---------- */
 
-let visitorsInfo = null;
+const RATE_SOURCE_NAMES = {
+  cbr: "официальный курс ЦБ РФ",
+  manual: "задан руками",
+  env: "из переменной USD_RUB_RATE",
+  none: "не задан",
+};
 
-function fmtSince(sec) {
-  if (sec == null) return "—";
-  if (sec < 60) return "только что";
-  if (sec < 3600) return `${Math.round(sec / 60)} мин назад`;
-  if (sec < 86400) return `${Math.round(sec / 3600)} ч назад`;
-  return `${Math.round(sec / 86400)} сут назад`;
-}
+function renderCurrency(state) {
+  currencyState = state;
+  const rate = state.usd_rub;
+  // Доллар без курса выбрать нельзя: пересчитывать суммы нечем, а
+  // выключенная кнопка объясняет это лучше ошибки после нажатия.
+  els.currencyChoice.innerHTML = "<legend>Валюта отображения</legend>"
+    + (state.currencies || []).map((c) => {
+      const locked = c.code !== state.base && !rate;
+      const title = locked
+        ? "Сначала задайте курс доллара к рублю"
+        : `Показывать суммы в ${c.name.toLowerCase()}`;
+      return `<label class="admin-choice__option" title="${escapeHtml(title)}">
+        <input type="radio" name="display-currency" value="${escapeHtml(c.code)}"
+               ${c.code === state.currency ? "checked" : ""}
+               ${locked ? "disabled" : ""}>
+        <span>${escapeHtml(c.symbol)} ${escapeHtml(c.name)}</span>
+      </label>`;
+    }).join("");
 
-function visitorTags(v, data) {
-  const tags = [`<span class="tag">${escapeHtml(v.kind)}</span>`];
-  if (v.device_id === data.my_device) tags.push('<span class="tag me">это вы</span>');
-  if (v.admin) tags.push('<span class="tag admin">админка</span>');
-  // «вошёл» у админского устройства не пишем: сессия админки открывает
-  // сайт сама, и пометка только сбивала бы с толку
-  else if (v.authed) tags.push('<span class="tag" title="Есть действующая сессия: учётка игрока или общий пароль">вошёл</span>');
-  if (v.blocked) {
-    tags.push(v.block_reason === "twin"
-      ? '<span class="tag banned" title="Вернулось тем же браузером с того же адреса, но уже без cookie">забанен (вернулся)</span>'
-      : '<span class="tag banned">забанен</span>');
+  if (document.activeElement !== els.currencyRate) {
+    els.currencyRate.value = rate == null ? "" : rate;
   }
-  return tags.join(" ");
+
+  els.currencyNote.textContent = rate
+    ? `${state.symbol} ${state.name} · $1 = ${rate} ₽`
+    : `${state.symbol} ${state.name} · курс доллара не задан`;
+  els.currencyNote.className = `panel-note ${rate ? "ok" : "warn"}`;
+
+  const parts = [`Источник курса: ${RATE_SOURCE_NAMES[state.rate_source]
+    || state.rate_source}`];
+  if (state.rate_updated_at) {
+    parts.push("обновлён "
+      + new Date(state.rate_updated_at * 1000).toLocaleString("ru-RU"));
+  }
+  const crypto = state.crypto_bookmakers || [];
+  if (crypto.length) {
+    parts.push(rate
+      ? `балансы крипто-БК (${crypto.join(", ")}) пересчитываются в рубли `
+        + "этим курсом"
+      : `⚠️ без курса балансы крипто-БК (${crypto.join(", ")}) в лимитах `
+        + "ставки не учитываются");
+  }
+  els.currencyRateNote.textContent = parts.join(" · ");
 }
 
-function renderVisitors(data) {
-  visitorsInfo = data;
-  const list = data.visitors || [];
-  const online = list.filter((v) => v.online).length;
-  els.visitorsNote.textContent = !data.tracking
-    ? "Учёт посетителей выключен (VISITORS_ENABLED=0)"
-    : `${online} сейчас на сайте · всего устройств: ${list.length}`;
-  els.visitorsNote.className = `panel-note ${online ? "ok" : ""}`.trim();
-
-  els.visitorsBody.innerHTML = list.length ? list.map((v) => {
-    const ips = (v.ips || []).join(", ");
-    const banned = (data.ip_blacklist || []).some(
-      (e) => e === `${v.ip}/32` || e === `${v.ip}/128` || e === v.ip);
-    const actions = v.blocked
-      ? `<button class="vis-unblock" data-device="${escapeHtml(v.device_id)}">Разбанить</button>`
-      : `<button class="vis-block" data-device="${escapeHtml(v.device_id)}"
-                 title="Закрыть сайт для этого устройства">Забанить</button>
-         <button class="vis-block-ip" data-device="${escapeHtml(v.device_id)}"
-                 title="Забанить устройство и его текущий адрес">+ адрес</button>`;
-    return `<tr class="${v.blocked ? "row-blocked" : ""}">
-      <td data-label="Устройство" class="vis-device">
-        <span class="dev-dot ${v.online ? "online" : ""}"></span>
-        <b>${escapeHtml(v.browser)}</b>${v.os ? " · " + escapeHtml(v.os) : ""}
-        ${visitorTags(v, data)}
-      </td>
-      <td data-label="Адрес" title="${escapeHtml(ips)}">
-        ${escapeHtml(v.ip || "—")}${banned ? ' <span class="tag banned">IP забанен</span>' : ""}
-      </td>
-      <td data-label="Активность">${v.online
-        ? '<span class="ok-text">сейчас на сайте</span>'
-        : escapeHtml(fmtSince(v.age_sec))}</td>
-      <td data-label="Запросов">${v.hits.toLocaleString("ru-RU")}</td>
-      <td data-label="Впервые">${escapeHtml(fmtSince(v.seen_sec))}</td>
-      <td class="vis-actions">${actions}
-        <button class="vis-forget" data-device="${escapeHtml(v.device_id)}"
-                title="Убрать из списка; при следующем заходе появится заново">Забыть</button>
-      </td>
-    </tr>`;
-  }).join("") : '<tr><td colspan="6" class="muted">Пока никто не заходил.</td></tr>';
-
-  const bannedIps = data.ip_blacklist || [];
-  els.bannedIps.hidden = !bannedIps.length;
-  els.bannedIps.innerHTML = bannedIps.length
-    ? "Забаненные адреса: " + bannedIps.map((e) =>
-      `<span class="ip-chip">${escapeHtml(e)}
-        <button class="ip-unban" data-ip="${escapeHtml(e)}" title="Разбанить">×</button>
-      </span>`).join(" ")
-    : "";
+async function loadCurrency() {
+  renderCurrency(await api("/api/admin/currency"));
 }
 
-async function loadVisitors() {
-  renderVisitors(await api("/api/admin/visitors"));
-}
-
-els.visitorsBody.addEventListener("click", async (e) => {
-  const btn = e.target.closest("button[data-device]");
-  if (!btn) return;
-  const device = btn.dataset.device;
-  const cls = btn.className;
+async function saveCurrency(body, okText) {
+  els.currencyError.hidden = true;
+  els.saveCurrencyBtn.disabled = true;
+  els.cbrRateBtn.disabled = true;
   try {
-    if (cls === "vis-forget") {
-      if (!confirm("Убрать устройство из списка? Бан с него снимется.")) return;
-      await api(`/api/admin/visitors/${encodeURIComponent(device)}`,
-                { method: "DELETE" });
-      toast("Устройство забыто");
-    } else if (cls === "vis-unblock") {
-      await api(`/api/admin/visitors/${encodeURIComponent(device)}/block`, {
-        method: "POST",
-        body: JSON.stringify({ blocked: false }),
-      });
-      toast("Устройство разблокировано (адрес, если банили, остался в списке)");
-    } else {
-      const withIp = cls === "vis-block-ip";
-      if (!confirm(withIp
-        ? "Забанить устройство и его текущий адрес?"
-        : "Закрыть сайт для этого устройства?")) return;
-      await api(`/api/admin/visitors/${encodeURIComponent(device)}/block`, {
-        method: "POST",
-        body: JSON.stringify({ blocked: true, with_ip: withIp }),
-      });
-      toast("Устройство забанено");
-    }
+    renderCurrency(await api("/api/admin/currency", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }));
+    toast(okText);
+    // Суммы в таблице аккаунтов подписаны валютой — перечитываем их,
+    // чтобы знак и рублёвый эквивалент не остались от прошлого курса.
+    await loadAccounts().catch(() => {});
   } catch (err) {
-    toast(err.message || "Не удалось изменить", "error");
+    els.currencyError.textContent = err.message || "Не удалось сохранить";
+    els.currencyError.hidden = false;
+    await loadCurrency().catch(() => {});
+  } finally {
+    els.saveCurrencyBtn.disabled = false;
+    els.cbrRateBtn.disabled = false;
   }
-  await Promise.all([loadVisitors(), loadAccess()]);
+}
+
+function chosenCurrency() {
+  const checked = els.currencyChoice
+    .querySelector("input[name='display-currency']:checked");
+  return checked ? checked.value : null;
+}
+
+els.saveCurrencyBtn.addEventListener("click", () => {
+  const raw = els.currencyRate.value.trim();
+  saveCurrency({
+    currency: chosenCurrency(),
+    usd_rub: raw === "" ? null : Number(raw.replace(",", ".")),
+  }, "Валюта и курс сохранены");
 });
 
-els.bannedIps.addEventListener("click", async (e) => {
-  const btn = e.target.closest(".ip-unban");
-  if (!btn) return;
-  const rest = (visitorsInfo.ip_blacklist || [])
-    .filter((entry) => entry !== btn.dataset.ip);
-  try {
-    await api("/api/admin/access", {
-      method: "POST",
-      body: JSON.stringify({ ip_blacklist: rest.join("\n") }),
-    });
-    toast(`Адрес ${btn.dataset.ip} разбанен`);
-  } catch (err) {
-    toast(err.message || "Не удалось разбанить", "error");
-  }
-  await Promise.all([loadVisitors(), loadAccess()]);
+els.cbrRateBtn.addEventListener("click", () => saveCurrency(
+  { from_cbr: true }, "Курс обновлён с сайта ЦБ РФ"));
+
+/* Валюту переключаем сразу по клику: отдельное «Сохранить» для одной
+ * радиокнопки — лишний шаг, а курс рядом менять при этом не обязательно. */
+els.currencyChoice.addEventListener("change", (e) => {
+  if (e.target.name !== "display-currency") return;
+  saveCurrency({ currency: e.target.value },
+               `Суммы показываем в ${e.target.value}`);
 });
 
 async function loadBetLog() {
@@ -935,7 +931,7 @@ async function loadAll() {
   // авто-ставок вообще (сейчас он спрятан, см. applyAutobetVisibility).
   await loadSettings();
   await Promise.all([loadAccounts(), loadPlayers(), loadParsers(),
-                     loadAccess(), loadVisitors(), loadBetLog()]);
+                     loadAccess(), loadCurrency(), loadBetLog()]);
 }
 
 /* ---------- ретрансляция СМС/OTP-кода при входе ---------- */
@@ -983,7 +979,6 @@ setInterval(async () => {
   try {
     renderScannerState(await api("/api/admin/settings"));
     await loadParsers();
-    await loadVisitors();
   } catch (_) { /* не залогинены — покажем при следующем входе */ }
 }, 5000);
 

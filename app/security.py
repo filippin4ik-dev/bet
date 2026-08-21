@@ -1,5 +1,5 @@
-"""Безопасность админки: подпись сессионных cookie и шифрование логинов/
-паролей аккаунтов БК в базе.
+"""Безопасность: сессионные cookie, шифрование реквизитов БК в базе и
+заголовки, которыми браузер защищает страницу от подмены и перехвата.
 
 Никакой пароль администратора или БК никогда не пишется в базу/куки
 в открытом виде:
@@ -13,12 +13,14 @@
 import base64
 import hashlib
 import hmac
+import ipaddress
 import json
 import logging
 import os
 import secrets
 import time
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from cryptography.fernet import Fernet, InvalidToken
 
@@ -126,23 +128,155 @@ def _sign(payload: str) -> str:
     return base64.urlsafe_b64encode(sig).decode("ascii").rstrip("=")
 
 
-def sign_value(value: str) -> str:
-    """Подписанное значение для cookie, у которой нет срока жизни.
+# ---------------------------------------------------------------------------
+# Cookie и заголовки безопасности
+# ---------------------------------------------------------------------------
 
-    Так помечается устройство посетителя (app/visitors.py): подпись не
-    прячет идентификатор, а лишь не даёт насочинять чужих — иначе один
-    заход мог бы наплодить в списке сколько угодно «устройств»."""
-    return f"{value}.{_sign(value)}"
+def _proxy_header(request, name: str) -> str:
+    """Значение заголовка от обратного прокси — только если запрос пришёл
+    из локальной сети, то есть от нашего же nginx. Иначе посетитель мог бы
+    объявить своё соединение защищённым и получить cookie без флага
+    Secure (см. app/access.py::client_ip — там та же логика для адреса)."""
+    if not config.SITE_TRUST_PROXY:
+        return ""
+    peer = getattr(getattr(request, "client", None), "host", "") or ""
+    try:
+        addr = ipaddress.ip_address(peer)
+    except ValueError:
+        return ""
+    if not (addr.is_loopback or addr.is_private):
+        return ""
+    return request.headers.get(name, "").split(",")[0].strip()
 
 
-def unsign_value(token: str | None) -> str | None:
-    if not token or "." not in token:
-        return None
-    value, sig = token.rsplit(".", 1)
-    if not hmac.compare_digest(sig.encode("utf-8", "replace"),
-                               _sign(value).encode("ascii")):
-        return None
-    return value
+_LOCAL_HOSTS = ("localhost", "127.0.0.1", "::1", "[::1]")
+
+
+def local_host(request) -> bool:
+    """Запрос к самому серверу с самого сервера.
+
+    Проверка домена (SITE_DOMAIN) не должна ломать обращения по
+    localhost: ими проверяют, что приложение живо, и ими же идёт
+    диагностика на VPS (`curl localhost:8000/...` в README). Обойти
+    защиту так нельзя — снаружи в заголовок можно написать «localhost»,
+    но соединение всё равно придёт не с петлевого адреса, а его мы и
+    требуем."""
+    host = (request.headers.get("host") or "").lower().split(":")[0]
+    if host not in _LOCAL_HOSTS and f"[{host}]" not in _LOCAL_HOSTS:
+        return False
+    peer = getattr(getattr(request, "client", None), "host", "") or ""
+    try:
+        return ipaddress.ip_address(peer).is_loopback
+    except ValueError:
+        return False
+
+
+def is_https(request) -> bool:
+    """Пришёл ли запрос по HTTPS (с учётом обратного прокси)."""
+    if _proxy_header(request, "x-forwarded-proto").lower() == "https":
+        return True
+    return getattr(getattr(request, "url", None), "scheme", "") == "https"
+
+
+def cookie_secure(request) -> bool:
+    """Ставить ли флаг Secure (cookie только по HTTPS).
+
+    По умолчанию — «auto»: по HTTPS ставим, по HTTP нет. Иначе на сервере
+    без сертификата (первый запуск, доступ по IP) cookie не доехала бы до
+    браузера вовсе и войти было бы невозможно. COOKIE_SECURE=1 включает
+    флаг всегда — так и надо делать, когда домен и сертификат уже есть
+    (см. deploy/setup_domain.sh)."""
+    mode = config.COOKIE_SECURE
+    if mode in ("1", "true", "yes", "always"):
+        return True
+    if mode in ("0", "false", "no", "never"):
+        return False
+    return is_https(request)
+
+
+def set_session_cookie(response, request, name: str, value: str, *,
+                       ttl: float, samesite: str = "lax") -> None:
+    """Ставит сессионную cookie с полным набором защит.
+
+    HttpOnly — чтобы её не достал скрипт со страницы (XSS не превращается
+    в угон сессии), SameSite — чтобы браузер не отправлял её по запросу с
+    чужого сайта (CSRF), Secure — чтобы она не ушла по открытому HTTP,
+    где её можно перехватить."""
+    response.set_cookie(name, value, max_age=int(ttl), httponly=True,
+                        samesite=samesite, secure=cookie_secure(request),
+                        path="/")
+
+
+def clear_session_cookie(response, name: str) -> None:
+    response.delete_cookie(name, path="/")
+
+
+def security_headers(request, *, api: bool) -> dict:
+    """Заголовки безопасности ответа.
+
+    - HSTS велит браузеру ходить на домен только по HTTPS (даже если
+      человек набрал адрес руками) — ставим только на HTTPS-ответах,
+      иначе заперли бы сами себя на сервере без сертификата;
+    - CSP запрещает грузить чужие скрипты и встраивать сайт в рамку: свои
+      скрипты и стили лежат в /static, внешних источников у сайта нет;
+    - no-store на ответы API: вилки, балансы и списки игроков не должны
+      оставаться ни в кэше браузера, ни у прокси по пути.
+    """
+    headers = {
+        "X-Content-Type-Options": "nosniff",
+        "X-Frame-Options": "DENY",
+        "Referrer-Policy": "no-referrer",
+        "Permissions-Policy": "geolocation=(), microphone=(), camera=()",
+        "Cross-Origin-Opener-Policy": "same-origin",
+        "Content-Security-Policy": (
+            "default-src 'self'; "
+            # инлайновые иконки страниц — data:-URL со svg
+            "img-src 'self' data:; "
+            "style-src 'self'; "
+            "script-src 'self'; "
+            # звук уведомления генерируется WebAudio, внешних медиа нет
+            "media-src 'self'; "
+            "connect-src 'self'; "
+            "font-src 'self'; "
+            "form-action 'self'; "
+            "base-uri 'none'; "
+            "frame-ancestors 'none'; "
+            "object-src 'none'"),
+    }
+    if is_https(request):
+        headers["Strict-Transport-Security"] = \
+            f"max-age={int(config.HSTS_MAX_AGE)}; includeSubDomains"
+    if api:
+        headers["Cache-Control"] = "no-store"
+        headers["Pragma"] = "no-cache"
+    return headers
+
+
+def same_origin(request) -> bool:
+    """Пришёл ли изменяющий запрос с нашей же страницы.
+
+    Заголовок Origin браузер подставляет сам и подделать его со страницы
+    нельзя. Ни Origin, ни Referer нет — это не браузер (curl, systemd,
+    мобильное приложение), и подделывать нечего: там нет чужой страницы,
+    которая могла бы отправить запрос вашей cookie."""
+    origin = request.headers.get("origin") or ""
+    if not origin:
+        referer = request.headers.get("referer") or ""
+        if not referer:
+            return True
+        origin = referer
+    try:
+        host = urlsplit(origin).netloc.lower()
+    except ValueError:
+        return False
+    if not host:
+        return False
+    allowed = {(request.headers.get("host") or "").lower()}
+    allowed |= {h.lower() for h in config.TRUSTED_HOSTS}
+    # сравниваем и с портом, и без него: за nginx браузер видит 443, а в
+    # заголовке Host порт может отсутствовать
+    bare = {h.split(":")[0] for h in allowed if h}
+    return host in allowed or host.split(":")[0] in bare
 
 
 def create_session_token(username: str, ttl: float | None = None) -> str:

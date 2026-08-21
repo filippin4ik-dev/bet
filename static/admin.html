@@ -52,7 +52,7 @@
     <a href="#panel-parsers">Парсеры БК</a>
     <a href="#panel-players">Игроки</a>
     <a href="#panel-access">Доступ к сайту</a>
-    <a href="#panel-visitors">Кто на сайте</a>
+    <a href="#panel-currency">Валюта и курс</a>
     <a href="#panel-accounts">Аккаунты БК</a>
     <a href="#panel-autobet" id="nav-autobet" hidden>Авто-ставки</a>
     <a href="#panel-betlog" id="nav-betlog" hidden>Журнал ставок</a>
@@ -191,30 +191,37 @@
     </div>
   </section>
 
-  <section class="admin-panel" id="panel-visitors">
+  <section class="admin-panel" id="panel-currency">
     <div class="panel-head">
-      <h2>👀 Кто на сайте</h2>
-      <span class="panel-note" id="visitors-note"></span>
+      <h2>💱 Валюта и курс</h2>
+      <span class="panel-note" id="currency-note"></span>
     </div>
     <p class="admin-hint">
-      Каждому браузеру выдаётся cookie с меткой устройства: по ней видно, кто
-      смотрит сайт, даже когда адрес меняется (телефон, мобильный интернет).
-      «Забанить» закрывает сайт для устройства целиком; если оно вернётся тем
-      же браузером с того же адреса, но уже без cookie — бан применится сам.
-      Вход в админку баны не затрагивают, запереть себя нельзя.
+      Считает движок всегда в рублях — в них приходят суммы плеч и лимиты
+      ставки, в них же хранятся балансы игроков. Выбор ниже меняет валюту
+      <b>отображения</b>: суммы на сайте пересчитываются курсом, а банк
+      берётся привычным для этой валюты набором (5 000 ₽ или $50, а не
+      «$54.32»). Курс нужен и расчёту: крипто-БК (bc.game) держит деньги в
+      долларах, и без пересчёта её лимит ставки был бы завышен почти в сто
+      раз. Пока курс не задан, доллар выбрать нельзя — считать выдуманным
+      курсом хуже, чем не считать вовсе.
     </p>
-    <div class="table-scroll">
-      <table class="admin-table" id="visitors-table">
-        <thead>
-          <tr>
-            <th>Устройство</th><th>Адрес</th><th>Активность</th>
-            <th>Запросов</th><th>Впервые</th><th></th>
-          </tr>
-        </thead>
-        <tbody id="visitors-body"></tbody>
-      </table>
+    <div class="admin-form">
+      <fieldset class="admin-choice" id="currency-choice">
+        <legend>Валюта отображения</legend>
+      </fieldset>
+      <div class="admin-form-row">
+        <label class="stack">Курс доллара, ₽ за $1
+          <input type="number" id="currency-rate" step="0.0001" min="1"
+                 placeholder="напр. 92.5">
+        </label>
+        <button id="save-currency-btn" class="primary-btn">Сохранить</button>
+        <button id="cbr-rate-btn" class="soft-btn"
+                title="Официальный курс ЦБ РФ на сегодня">↻ Курс с ЦБ РФ</button>
+      </div>
+      <p class="admin-hint" id="currency-rate-note"></p>
+      <div id="currency-error" class="admin-error" hidden></div>
     </div>
-    <div class="banned-ips" id="banned-ips" hidden></div>
   </section>
 
   <section class="admin-panel" id="panel-accounts">

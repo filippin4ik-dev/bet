@@ -421,6 +421,28 @@ td.empty {
   font-size: 0.92rem;
 }
 
+/* Первая загрузка: полный обход БК занимает десятки секунд, и застывшая
+   надпись выглядит как зависший сайт. Кружок показывает, что данные ещё
+   едут — ждать стоит, а не перезагружать страницу. */
+td.empty.loading::before {
+  content: "";
+  display: inline-block;
+  width: 13px;
+  height: 13px;
+  margin-right: 9px;
+  vertical-align: -2px;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.9s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+/* Уважаем системную настройку «меньше анимации»: крутящийся элемент
+   мешает людям, которым от движения на экране становится плохо. */
+@media (prefers-reduced-motion: reduce) {
+  td.empty.loading::before { animation: none; }
+}
+
 td.num, .stake, .coef, .arb-age { font-variant-numeric: tabular-nums; }
 .arb-age { color: var(--muted); white-space: nowrap; }
 
@@ -730,6 +752,8 @@ tbody tr.pinned.hot { box-shadow: inset 3px 0 0 var(--hot); background: var(--ho
 }
 .autobet-result .leg-ok { color: var(--accent); }
 .autobet-result .leg-fail { color: var(--danger); }
+.autobet-result .mode-dry { color: var(--hot); }
+.autobet-result .mode-real { color: var(--danger); }
 
 .bet-note { margin-top: 12px; color: var(--muted); font-size: 0.8rem; line-height: 1.5; }
 

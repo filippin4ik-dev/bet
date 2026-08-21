@@ -17,22 +17,26 @@ versions, ...}. Забираем ВСЕ перечисленные чанки и
 полный текущий срез линии (несколько тысяч событий за пару секунд).
 
 Рынки BetBy — стандартные (Betradar-подобные) id с русскими названиями из
-справочника. Разбираем ВСЕ двухисходные рынки: победитель/ставка без
-ничьей, тоталы, форы (в т.ч. по геймам/сетам), «обе забьют», чет/нечет,
-индивидуальные тоталы. Предмет/период рынка нормализуется общим
-`market_scope`, чтобы совпадать с тем же рынком у других БК.
+справочника. Разбираем ВСЕ двухисходные рынки: победитель, тоталы, форы
+(в т.ч. по геймам/сетам), «обе забьют», чет/нечет, индивидуальные тоталы —
+и трёхисходный «Исход 1X2» (П1/X/П2). Предмет/период рынка нормализуется
+общим `market_scope`, чтобы совпадать с тем же рынком у других БК.
 
-TODO (рынок «Исход 1X2», с ничьей): у остальных четырёх БК этот рынок уже
-разбирается (см. arbitrage.find_arbs_1x2) — он самый частый в футболе/
-хоккее и даёт заметно больше вилок. У bc.game/BetBy id исхода «ничья»
-(аналог OUT_C1/OUT_C2 = "4"/"5") НЕ подтверждён — угадывать номер без
-доступа к живому справочнику `/api/v3/descriptions/.../markets/ru`
-рискованно (перепутанный исход в автоматической ставке = потеря денег).
-Чтобы добавить: посмотрите в справочнике рынок с названием, содержащим
-«{$competitor1}»/«{$competitor2}» и тремя исходами вместо двух — там будет
-третий id (ничья); добавьте его как OUT_DRAW и постройте MarketOdds с
-k3/outcome3="X" по образцу других парсеров (не забудьте sane_1x2_margin).
+Исход 1X2 — самый частый рынок футбола и хоккея (в живом прематч-фиде он
+есть у большинства событий) и единственный рынок, по которому работает
+трёхсторонний движок вилок (arbitrage.find_arbs_1x2). Номера исходов для
+него НЕ зашиты в код: их отдаёт сам справочник рынков — у трёхисходного
+рынка результата в нём ровно три исхода с названиями «{$competitor1}»,
+«ничья», «{$competitor2}», и id берутся оттуда (см. _result3_ids). Зашитый
+номер здесь опаснее лишнего запроса: перепутанный исход в ставке — это
+потерянные деньги, а нумерация рынков у платформы своя на каждый вид
+спорта.
 
+«Ставка без ничьей» (draw no bet) идёт ОТДЕЛЬНЫМ рынком (winner_dnb), а не
+победителем: у неё те же два исхода и те же id, что у победителя, но
+ничья возвращает ставку. Сшить её с обычным двухисходным победителем
+другой БК — значит показать вилку, которой нет: на ничьей одна нога
+вернётся, а вторая проиграет.
 
 brand_id bc.game периодически меняется — парсер пытается узнать актуальный
 с самого сайта, а при неудаче берёт значение по умолчанию из config.
@@ -46,7 +50,8 @@ from ..config import (BCGAME_API_HOST, BCGAME_BRAND_ID, BCGAME_LANG,
                       BCGAME_PROVIDER_URL, HTTP_TIMEOUT)
 from ..models import KIND_LIVE, KIND_PREMATCH, MarketOdds
 from .base import BaseParser
-from .html_utils import fmt_hcap, fmt_total, format_start, market_scope
+from .html_utils import (fmt_hcap, fmt_total, format_start, market_scope,
+                         sane_1x2_margin)
 
 log = logging.getLogger("parsers.bcgame")
 
@@ -59,6 +64,18 @@ OUT_OVER, OUT_UNDER = "12", "13"   # тотал: больше / меньше
 OUT_HCAP1, OUT_HCAP2 = "1714", "1715"  # фора: команда 1 (+hcp) / команда 2 (-hcp)
 OUT_BTS_YES, OUT_BTS_NO = "74", "76"    # обе забьют: да / нет
 OUT_ODD, OUT_EVEN = "70", "72"     # чет/нечет: нечётное / чётное
+
+# Названия исходов трёхисходного рынка результата в справочнике. Именно по
+# ним (а не по номерам) опознаётся тройка П1/X/П2 — см. _result3_ids.
+_C1_NAME, _C2_NAME = "{$competitor1}", "{$competitor2}"
+_DRAW_NAME = "ничья"
+
+# Виды рынков справочника, из которых берём тройку П1/X/П2. «Result» —
+# обычный результат матча или его части. Родственные «ResultEP» (досрочная
+# выплата) и «ResultFast» (результат внутри интервала) выглядят так же, но
+# считаются по другим правилам, и сшивать их с исходом матча у другой БК
+# нельзя.
+_RESULT3_TYPES = ("Result",)
 
 # Плейсхолдеры названия рынка из справочника: {!setnr}/{gamenr} — номер
 # периода, {$competitor1}/{%player} — участник, {total}/{+hcp} — линия.
@@ -77,6 +94,11 @@ class BCGameParser(BaseParser):
         self._brand_id: str | None = None
         self._markets: dict[str, dict] = {}
         self._markets_at = 0.0
+        # id рынка → тройка исходов П1/X/П2 (или None, если рынок не
+        # трёхисходный). Справочник разбирается один раз на рынок, а не на
+        # каждое событие: рынков две тысячи, событий — тысячи, и тройка от
+        # события не зависит.
+        self._result3: dict[str, tuple[str, str, str] | None] = {}
 
     # ---------- сетевые помощники ----------
 
@@ -130,6 +152,7 @@ class BCGameParser(BaseParser):
         if isinstance(data, dict) and data:
             self._markets = data
             self._markets_at = now
+            self._result3.clear()
             log.info("bc.game: справочник рынков — %d рынков", len(data))
 
     # ---------- сбор линии ----------
@@ -183,7 +206,12 @@ class BCGameParser(BaseParser):
             for o in self._parse_event(eid, ev, sports, categories,
                                        tournaments, live, now):
                 by_key[o.match_key] = o
-        return list(by_key.values())
+        odds = list(by_key.values())
+        three = sum(1 for o in odds if o.market_key.startswith("winner1x2"))
+        log.info("bc.game: %s — %d котировок на %d событий, из них исход "
+                 "1X2: %d", section, len(odds),
+                 len({o.event_key for o in odds}), three)
+        return odds
 
     def _parse_event(self, eid: str, ev: dict, sports: dict,
                      categories: dict, tournaments: dict,
@@ -218,19 +246,19 @@ class BCGameParser(BaseParser):
             mdesc = self._markets.get(str(mid))
             if not mdesc or not isinstance(variants, dict):
                 continue
-            name = mdesc.get("name") or ""
             for spec_str, outcomes in variants.items():
                 if not isinstance(outcomes, dict):
                     continue
-                o = self._market(name, spec_str, outcomes, base)
+                o = self._market(str(mid), mdesc, spec_str, outcomes, base)
                 if o is not None:
                     out.append(o)
         return out
 
     # ---------- классификация одного рынка ----------
 
-    def _market(self, name: str, spec_str: str, outcomes: dict,
+    def _market(self, mid: str, mdesc: dict, spec_str: str, outcomes: dict,
                 base: dict) -> MarketOdds | None:
+        name = mdesc.get("name") or ""
         spec = self._parse_spec(spec_str)
         ids = set(outcomes)
 
@@ -241,11 +269,33 @@ class BCGameParser(BaseParser):
                 return None
 
         low = name.lower().replace("ё", "е")
-        has_c1 = "{$competitor1}" in name or "{%player}" in name
-        has_c2 = "{$competitor2}" in name
+        has_c1 = _C1_NAME in name or "{%player}" in name
+        has_c2 = _C2_NAME in name
         scope = self._scope(name, spec)
 
-        # --- Победитель / ставка без ничьей (команда1 / команда2) ---
+        # --- Исход 1X2 (П1 / ничья / П2) ---
+        three = self._result3_ids(mid, mdesc)
+        if three and ids >= set(three):
+            k1, kx, k2 = k(three[0]), k(three[1]), k(three[2])
+            if not sane_1x2_margin(k1, kx, k2):
+                return None
+            return MarketOdds(
+                market="Исход (1X2)" + (f" ({scope})" if scope else ""),
+                market_key=f"winner1x2:{scope}" if scope else "winner1x2",
+                outcome1="П1", outcome2="П2", outcome3="X",
+                k1=k1, k2=k2, k3=kx, **base)
+
+        # --- Ставка без ничьей: те же исходы, но ничья возвращает ставку ---
+        if ids >= {OUT_C1, OUT_C2} and "без ничьей" in low:
+            k1, k2 = k(OUT_C1), k(OUT_C2)
+            if not self._ok(k1, k2):
+                return None
+            return MarketOdds(
+                market="Ставка без ничьей" + (f" ({scope})" if scope else ""),
+                market_key=f"winner_dnb:{scope}" if scope else "winner_dnb",
+                outcome1="П1", outcome2="П2", k1=k1, k2=k2, **base)
+
+        # --- Победитель (двухисходный: ничьей в рынке нет) ---
         if ids >= {OUT_C1, OUT_C2}:
             k1, k2 = k(OUT_C1), k(OUT_C2)
             if not self._ok(k1, k2):
@@ -315,6 +365,49 @@ class BCGameParser(BaseParser):
         return None
 
     # ---------- помощники ----------
+
+    def _result3_ids(self, mid: str,
+                     mdesc: dict) -> tuple[str, str, str] | None:
+        """id исходов П1/X/П2 этого рынка по справочнику (или None).
+
+        Тройка признаётся, только если у рынка результата ровно три исхода
+        и их названия — в точности «{$competitor1}», «ничья» и
+        «{$competitor2}». Точность важна: рядом в справочнике лежат похожие
+        на вид рынки с теми же тремя исходами, ставить по которым как по
+        исходу матча нельзя — двойной шанс («{$competitor1} или ничья»),
+        точный счёт и фора («ничья ({hcp})»), а у одного рынка в живом
+        справочнике обе крайние подписи и вовсе указывают на одну команду.
+        """
+        if mid in self._result3:
+            return self._result3[mid]
+        found = None
+        if mdesc.get("market_type") in _RESULT3_TYPES:
+            for variants in (mdesc.get("variants") or {}).values():
+                for variant in variants or ():
+                    found = self._triple(variant.get("outcomes") or [])
+                    if found:
+                        break
+                if found:
+                    break
+        self._result3[mid] = found
+        return found
+
+    @staticmethod
+    def _triple(outcomes: list) -> tuple[str, str, str] | None:
+        if len(outcomes) != 3:
+            return None
+        by_name: dict[str, str] = {}
+        for out in outcomes:
+            name = str(out.get("name") or "").strip().lower()
+            name = name.replace("ё", "е")
+            oid = str(out.get("id") or "")
+            if not oid or name in by_name:
+                return None      # повторная подпись — разметка непонятна
+            by_name[name] = oid
+        want = (_C1_NAME, _DRAW_NAME, _C2_NAME)
+        if set(by_name) != set(want):
+            return None
+        return by_name[want[0]], by_name[want[1]], by_name[want[2]]
 
     @staticmethod
     def _ok(k1: float | None, k2: float | None) -> bool:
