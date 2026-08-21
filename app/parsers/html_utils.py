@@ -509,6 +509,10 @@ def display_market(key: str, fallback: str) -> str:
         return "Победитель" + (f" ({lbl})" if lbl else "")
     if kind == "winner1x2":
         return "Исход (1X2)" + (f" ({lbl})" if lbl else "")
+    if kind == "winner_dnb":
+        # «Ставка без ничьей»: исходов два, но ничья возвращает ставку —
+        # с обычным победителем такой рынок не сшивается (см. bcgame.py)
+        return "Ставка без ничьей" + (f" ({lbl})" if lbl else "")
     if kind == "bothscore":
         return "Обе забьют" + (f" ({lbl})" if lbl else "")
     if kind == "oddeven":
