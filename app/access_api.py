@@ -13,7 +13,8 @@ from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel
 
 from . import access, config, db, players
-from .security import verify_admin_password
+from .security import (clear_session_cookie, set_session_cookie,
+                       verify_admin_password)
 
 log = logging.getLogger("access")
 
@@ -38,10 +39,10 @@ class LoginBody(BaseModel):
     password: str
 
 
-def _site_cookie(response: Response, username: str) -> None:
-    response.set_cookie(
-        access.COOKIE_NAME, access.session_cookie(username),
-        max_age=int(config.SITE_SESSION_TTL), httponly=True, samesite="lax")
+def _site_cookie(response: Response, request: Request, username: str) -> None:
+    set_session_cookie(response, request, access.COOKIE_NAME,
+                       access.session_cookie(username),
+                       ttl=config.SITE_SESSION_TTL)
 
 
 @router.post("/login")
@@ -65,22 +66,21 @@ def login(body: LoginBody, request: Request, response: Response):
     if player is not None:
         access.note_success(ip)
         db.touch_player_login(player["id"])
-        response.set_cookie(
-            players.COOKIE_NAME, players.session_cookie(player),
-            max_age=int(config.SITE_SESSION_TTL), httponly=True,
-            samesite="lax")
+        set_session_cookie(response, request, players.COOKIE_NAME,
+                           players.session_cookie(player),
+                           ttl=config.SITE_SESSION_TTL)
         log.info("Вход игрока %s (IP %s)", player["username"], ip)
         return {"ok": True, "player": players.public_profile(player)}
 
     if verify_admin_password(body.username, body.password):
         access.note_success(ip)
-        _site_cookie(response, config.ADMIN_USERNAME)
+        _site_cookie(response, request, config.ADMIN_USERNAME)
         log.info("Вход администратора на сайт (IP %s)", ip)
         return {"ok": True, "admin": True}
 
     if access.check_password(body.password):
         access.note_success(ip)
-        _site_cookie(response, "site")
+        _site_cookie(response, request, "site")
         log.info("Вход по общему паролю доступа (IP %s)", ip)
         return {"ok": True}
 
@@ -94,6 +94,6 @@ def login(body: LoginBody, request: Request, response: Response):
 def logout(response: Response):
     # Гасим обе cookie сразу: в браузере может лежать и сессия игрока, и
     # старая сессия сайта по общему паролю — иначе «выйти» не выводит.
-    response.delete_cookie(players.COOKIE_NAME)
-    response.delete_cookie(access.COOKIE_NAME)
+    clear_session_cookie(response, players.COOKIE_NAME)
+    clear_session_cookie(response, access.COOKIE_NAME)
     return {"ok": True}

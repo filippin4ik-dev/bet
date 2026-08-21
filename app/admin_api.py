@@ -15,11 +15,12 @@ import time
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel
 
-from . import (access, accounts_manager, bk_control, config, connectors, db,
-               otp, players, visitors)
+from . import (access, accounts_manager, bk_control, config, connectors,
+               currency, db, otp, players)
 from .runtime import live_scanner, scanner
-from .security import create_session_token, verify_admin_password, \
-    verify_session_token
+from .security import (clear_session_cookie, create_session_token,
+                       set_session_cookie, verify_admin_password,
+                       verify_session_token)
 
 log = logging.getLogger("admin_api")
 
@@ -42,19 +43,36 @@ class LoginBody(BaseModel):
 
 
 @router.post("/login")
-def login(body: LoginBody, response: Response):
+def login(body: LoginBody, request: Request, response: Response):
+    """Вход в админку — с тем же ограничением на перебор, что и вход на
+    сайт: пароль администратора открывает аккаунты БК и защиту сайта, и
+    подбирать его без счётчика попыток было бы проще всего."""
+    ip = access.client_ip(request)
+    if access.too_many_fails(ip):
+        raise HTTPException(
+            status_code=429,
+            detail="Слишком много неудачных попыток. Подождите "
+                   f"{int(config.SITE_LOGIN_FAIL_WINDOW / 60)} мин "
+                   "и попробуйте снова.")
     if not verify_admin_password(body.username, body.password):
+        access.note_fail(ip)
+        log.warning("Неверный вход в админку: логин «%s» (IP %s)",
+                    body.username or "—", ip)
         raise HTTPException(status_code=401, detail="Неверный логин или пароль")
-    token = create_session_token(body.username)
-    response.set_cookie(
-        COOKIE_NAME, token, max_age=int(config.ADMIN_SESSION_TTL),
-        httponly=True, samesite="lax")
+    access.note_success(ip)
+    # Сессия админки — samesite=strict: в отличие от сайта, по внешней
+    # ссылке в админку никто не переходит, а вот запрос «со стороны» с
+    # админской cookie не нужен совсем.
+    set_session_cookie(response, request, COOKIE_NAME,
+                       create_session_token(body.username),
+                       ttl=config.ADMIN_SESSION_TTL, samesite="strict")
+    log.info("Вход в админку (%s, IP %s)", body.username, ip)
     return {"ok": True, "username": body.username}
 
 
 @router.post("/logout")
 def logout(response: Response):
-    response.delete_cookie(COOKIE_NAME)
+    clear_session_cookie(response, COOKIE_NAME)
     return {"ok": True}
 
 
@@ -102,7 +120,16 @@ def _checked_login_type(bookmaker: str, value: str | None) -> str:
 
 @router.get("/accounts")
 def list_accounts(username: str = Depends(require_admin)):
-    return {"accounts": db.list_accounts()}
+    """Аккаунты БК. У каждого — валюта самой БК: крипто-площадка держит
+    деньги в долларах, и показывать её баланс с рублёвым знаком значит
+    завышать его почти в сто раз."""
+    accounts = db.list_accounts()
+    for acc in accounts:
+        code = currency.bookmaker_currency(acc["bookmaker"])
+        acc["currency"] = code
+        acc["currency_symbol"] = currency.info(code)["symbol"]
+        acc["balance_rub"] = currency.to_rub(acc.get("balance"), code)
+    return {"accounts": accounts, "currency": currency.state()}
 
 
 class AccountBody(BaseModel):
@@ -431,72 +458,45 @@ def update_access(body: AccessBody, request: Request,
 
 
 # ---------------------------------------------------------------------------
-# Кто на сайте: устройства посетителей и бан
+# Валюта отображения и курс доллара к рублю
 # ---------------------------------------------------------------------------
 
-@router.get("/visitors")
-def list_visitors(request: Request, username: str = Depends(require_admin)):
-    """Устройства, заходившие на сайт: браузер, ОС, адреса, свежесть.
-
-    my_device/my_ip нужны фронтенду, чтобы пометить в списке самого
-    оператора — иначе легко забанить собственный телефон."""
-    return {
-        "visitors": visitors.snapshot(),
-        "online_window_sec": config.VISITOR_ONLINE_WINDOW,
-        "ip_blacklist": access.ip_blacklist(),
-        "my_device": visitors.device_id_of(request),
-        "my_ip": access.client_ip(request),
-        "tracking": bool(config.VISITORS_ENABLED),
-    }
+@router.get("/currency")
+def get_currency(username: str = Depends(require_admin)):
+    return currency.state()
 
 
-class VisitorBlockBody(BaseModel):
-    blocked: bool = True
-    # заодно забанить адрес, с которого устройство приходило в последний
-    # раз (у телефона он плавает, поэтому это дополнение к бану устройства,
-    # а не замена ему)
-    with_ip: bool = False
+class CurrencyBody(BaseModel):
+    # код валюты отображения: RUB / USD / USDT (None — не менять)
+    currency: str | None = None
+    # курс доллара к рублю, ₽ за $1 (None — не менять)
+    usd_rub: float | None = None
+    # взять официальный курс с ЦБ РФ вместо ручного значения
+    from_cbr: bool = False
 
 
-@router.post("/visitors/{device_id}/block")
-def block_visitor(device_id: str, body: VisitorBlockBody, request: Request,
-                  username: str = Depends(require_admin)):
-    """Банит или разбанивает устройство (и, по желанию, его адрес)."""
-    my_ip = access.client_ip(request)
-    if body.blocked and device_id == visitors.device_id_of(request):
-        raise HTTPException(
-            status_code=400,
-            detail="Это устройство, с которого вы сейчас открыли админку — "
-                   "банить его незачем.")
-    entry = visitors.set_blocked(device_id, body.blocked)
-    if entry is None:
-        raise HTTPException(status_code=404, detail="Устройство не найдено")
-    banned_ip = None
-    if body.with_ip and entry["ip"]:
-        if entry["ip"] == my_ip:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Адрес {my_ip} — ваш собственный: забанив его, вы "
-                       "закроете доступ себе. Устройство при этом "
-                       "заблокировано.")
-        current = access.ip_blacklist()
-        if not access.ip_in_whitelist(entry["ip"], current):
-            access.set_ip_blacklist("\n".join(current + [entry["ip"]]))
-        banned_ip = entry["ip"]
-    log.info("Устройство %s %s из админки (%s)%s", device_id,
-             "забанено" if body.blocked else "разбанено", username,
-             f", адрес {banned_ip} в чёрном списке" if banned_ip else "")
-    return {"ok": True, "device_id": device_id, "blocked": body.blocked,
-            "banned_ip": banned_ip, "ip_blacklist": access.ip_blacklist()}
+@router.post("/currency")
+def update_currency(body: CurrencyBody,
+                    username: str = Depends(require_admin)):
+    """Меняет валюту отображения и курс доллара.
 
-
-@router.delete("/visitors/{device_id}")
-def forget_visitor(device_id: str, username: str = Depends(require_admin)):
-    """Убирает устройство из списка. Бан при этом снимается: устройство
-    появится заново при следующем заходе."""
-    if not visitors.forget(device_id):
-        raise HTTPException(status_code=404, detail="Устройство не найдено")
-    return {"ok": True}
+    Курс применяется ПЕРЕД валютой: доллар без курса включить нельзя, и
+    если оператор задаёт то и другое одной кнопкой, порядок не должен
+    заставлять его нажимать «Сохранить» дважды."""
+    try:
+        if body.from_cbr:
+            rate = currency.fetch_cbr_rate()
+            log.info("Курс доллара обновлён с ЦБ (%s): %s ₽", username, rate)
+        elif body.usd_rub is not None:
+            rate = currency.set_usd_rub(body.usd_rub)
+            log.info("Курс доллара задан из админки (%s): %s ₽", username,
+                     rate)
+        if body.currency is not None:
+            code = currency.set_currency(body.currency)
+            log.info("Валюта отображения — %s (%s)", code, username)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return currency.state()
 
 
 # ---------------------------------------------------------------------------

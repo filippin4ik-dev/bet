@@ -12,7 +12,7 @@ from fastapi import Body, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import access, accounts_manager, autobet, config, db, visitors
+from . import access, accounts_manager, autobet, config, currency, db, security
 from .access_api import router as access_router
 from .admin_api import require_admin
 from .admin_api import router as admin_router
@@ -44,6 +44,11 @@ async def lifespan(app: FastAPI):
              "общий пароль %s%s", accounts,
              "задан" if access.password_set() else "не задан",
              ", строгий режим (только свои IP)" if access.ip_only() else "")
+    log.info("Домен: %s; cookie только по HTTPS: %s; валюта: %s (курс "
+             "доллара %s)",
+             config.SITE_DOMAIN or "любой (доступ по IP)",
+             config.COOKIE_SECURE, currency.currency(),
+             currency.usd_rub() or "не задан")
     if not accounts:
         log.warning(
             "Учётных записей игроков нет — войти можно только реквизитами "
@@ -55,7 +60,6 @@ async def lifespan(app: FastAPI):
              asyncio.create_task(live_scanner.run()),
              asyncio.create_task(balance_loop.run())]
     yield
-    visitors.flush()   # хвост посещений с момента последнего сброса
     scanner.stop()
     live_scanner.stop()
     balance_loop.stop()
@@ -79,49 +83,56 @@ def _gate_free(path: str) -> bool:
     return path in GATE_FREE_PATHS or path.startswith(GATE_FREE_PREFIXES)
 
 
-def _tracked(path: str) -> bool:
-    """Считать ли запрос посещением. Статику не считаем: одна открытая
-    страница тянет её пачкой, а устройство и так видно по самой странице."""
-    return not path.startswith("/static/") and path != "/favicon.ico"
+# Методы, которые ЧТО-ТО МЕНЯЮТ: их принимаем только со своей же страницы
+# (см. security.same_origin) — чужой сайт не должен уметь нажать кнопку в
+# админке вашей cookie.
+_UNSAFE_METHODS = ("POST", "PUT", "PATCH", "DELETE")
 
 
 @app.middleware("http")
-async def access_gate(request: Request, call_next):
-    """Шлюз сайта: учёт устройства посетителя и проверка доступа.
+async def guard(request: Request, call_next):
+    """Единый шлюз сайта: защита соединения и проверка доступа.
 
-    Порядок важен. Сначала запрос отмечается в списке посетителей
-    (app/visitors.py) и проверяется бан устройства — забаненного не пускают
-    даже на открытый сайт. Дальше работает обычная защита: пароль и/или
-    белый список IP (app/access.py). Пока пароль не задан и список пуст,
-    шлюз пропускает всё — иначе первый же запуск запер бы оператора."""
+    Порядок проверок — от «этот запрос вообще не наш» к «этому посетителю
+    сюда нельзя»:
+
+    1. заголовок Host: задан домен (SITE_DOMAIN) — чужое имя не
+       обслуживаем вовсе. Иначе сайт отвечал бы по любому домену, который
+       кто-то направил на ваш IP, и по нему собирали бы пароли;
+    2. HTTPS: при FORCE_HTTPS открытый запрос уводим на защищённый адрес,
+       чтобы пароль и cookie не ушли по каналу, где их читают;
+    3. свой ли источник у изменяющего запроса (защита от CSRF);
+    4. доступ: чёрный список адресов, строгий режим, вход (app/access.py).
+
+    Ответ в любом случае получает заголовки безопасности, а ответ API —
+    ещё и запрет кэширования: вилки и балансы не должны оставаться в кэше
+    браузера или прокси.
+    """
     path = request.url.path
-    ip = access.client_ip(request)
-    visit = None
-    if config.VISITORS_ENABLED and _tracked(path):
-        visit = visitors.observe(
-            request, ip=ip, path=path,
-            authed=access.valid_session(request),
-            admin=access.admin_session(request))
-    response = await _gated_response(request, call_next, ip=ip, visit=visit)
-    if visit and visit["set_cookie"]:
-        response.set_cookie(
-            visitors.COOKIE_NAME, visit["cookie"],
-            max_age=int(config.VISITOR_COOKIE_TTL), httponly=True,
-            samesite="lax")
+    api = path.startswith("/api/")
+    response = await _guarded_response(request, call_next, api=api)
+    for name, value in security.security_headers(request, api=api).items():
+        response.headers[name] = value
     return response
 
 
-async def _gated_response(request: Request, call_next, *, ip: str,
-                          visit: dict | None):
+async def _guarded_response(request: Request, call_next, *, api: bool):
     path = request.url.path
-    api = path.startswith("/api/")
-    if visit and visit["blocked"] and not access.admin_session(request):
-        if api:
-            return JSONResponse(
-                {"detail": "Доступ с этого устройства закрыт."},
-                status_code=403)
-        return FileResponse(STATIC_DIR / "blocked.html", status_code=403,
-                            headers={"Cache-Control": "no-cache"})
+    if config.TRUSTED_HOSTS:
+        host = (request.headers.get("host") or "").lower()
+        if host.split(":")[0] not in {h.split(":")[0]
+                                      for h in config.TRUSTED_HOSTS}:
+            return JSONResponse({"detail": "Неизвестный домен."},
+                                status_code=421)
+    if config.FORCE_HTTPS and not security.is_https(request) \
+            and request.method in ("GET", "HEAD"):
+        return RedirectResponse(
+            str(request.url.replace(scheme="https")), status_code=308)
+    if request.method in _UNSAFE_METHODS and not security.same_origin(request):
+        return JSONResponse(
+            {"detail": "Запрос пришёл с другого сайта и отклонён."},
+            status_code=403)
+    ip = access.client_ip(request)
     if _gate_free(path):
         return await call_next(request)
     allowed, reason = access.check_request(request)
@@ -188,7 +199,16 @@ def get_arbs(
         snap["arbs_1x2"], "k1_bookmaker", "k2_bookmaker", "kx_bookmaker")
     snap["sound_alert_profit"] = SOUND_ALERT_PROFIT
     snap["autobet_ui"] = config.AUTOBET_UI
+    # Валюта едет вместе с вилками: сменил её оператор в админке — открытые
+    # вкладки пересчитают суммы на следующем же опросе, без перезагрузки.
+    snap["currency"] = currency.state()
     return snap
+
+
+@app.get("/api/currency")
+def get_currency():
+    """Валюта отображения и курс доллара (задаются в админке)."""
+    return currency.state()
 
 
 @app.get("/api/rejected")
@@ -288,6 +308,7 @@ def get_live_arbs(
     snap["autobet_enabled"] = config.AUTOBET_ENABLED
     snap["autobet_dry_run"] = config.AUTOBET_DRY_RUN
     snap["autobet_ui"] = config.AUTOBET_UI
+    snap["currency"] = currency.state()
     return snap
 
 
