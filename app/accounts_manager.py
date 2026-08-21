@@ -6,7 +6,7 @@ import logging
 import threading
 from concurrent.futures import ThreadPoolExecutor
 
-from . import config, db
+from . import config, currency, db
 from .connectors import get_connector
 
 log = logging.getLogger("accounts")
@@ -30,8 +30,13 @@ def refresh_balance(account_id: int) -> None:
     try:
         balance = connector.get_balance()
         db.set_account_balance(account_id, balance, None)
-        log.info("Баланс %s (%s) обновлён: %.2f₽",
-                 acc["bookmaker"], acc["label"] or account_id, balance)
+        # Баланс хранится и логируется в валюте САМОЙ БК: у крипто-БК это
+        # доллары, и «превращать» их в рубли при чтении нельзя — курс
+        # меняется, а число в базе осталось бы старым.
+        log.info("Баланс %s (%s) обновлён: %.2f %s",
+                 acc["bookmaker"], acc["label"] or account_id, balance,
+                 currency.info(
+                     currency.bookmaker_currency(acc["bookmaker"]))["symbol"])
     except Exception as exc:  # noqa: BLE001
         db.set_account_balance(account_id, None, str(exc))
         log.warning("Не удалось обновить баланс %s (%s): %s",
@@ -51,16 +56,29 @@ def refresh_all_async() -> None:
 
 
 def available_balance_by_bookmaker() -> dict[str, float]:
-    """Суммарный известный баланс по каждой БК (по включённым аккаунтам).
+    """Суммарный известный баланс по каждой БК, в РУБЛЯХ.
 
     Аккаунты без проверенного баланса (ещё не обновлялись/ошибка) не
     учитываются — так что после первого добавления аккаунта лимит
-    появится не раньше первого успешного refresh."""
+    появится не раньше первого успешного refresh.
+
+    Баланс крипто-БК приходит в долларах и пересчитывается курсом из
+    админки. Курс не задан — баланс такой БК считается НЕизвестным: лимит
+    ставки без пересчёта был бы завышен почти в сто раз, а по нему
+    ставятся настоящие деньги."""
     totals: dict[str, float] = {}
     for acc in db.list_accounts():
         if not acc["enabled"] or acc.get("balance") is None:
             continue
-        totals[acc["bookmaker"]] = totals.get(acc["bookmaker"], 0.0) + acc["balance"]
+        bk = acc["bookmaker"]
+        in_rub = currency.to_rub(acc["balance"],
+                                 currency.bookmaker_currency(bk))
+        if in_rub is None:
+            log.warning("Баланс %s не учтён в лимитах: курс доллара к рублю "
+                        "не задан (задайте его в админке, раздел «Валюта»)",
+                        bk)
+            continue
+        totals[bk] = totals.get(bk, 0.0) + in_rub
     return totals
 
 
