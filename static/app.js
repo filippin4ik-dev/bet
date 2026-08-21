@@ -771,10 +771,14 @@ function copyStake(btn, value) {
 
 let betArb = null;   // вилка, открытая в модалке (обновляется при опросе)
 
+/* Разбивка банка по плечам — та же формула, что на сервере
+ * (app/arbitrage.py::calc_stakes). Округление берётся по валюте
+ * отображения (см. money.js::roundMoney): в рублях до рубля, в долларах
+ * до цента. */
 function calcBetStakes(k1, k2, bank) {
   const s = 1 / k1 + 1 / k2;
-  const stake1 = Math.round(bank * (1 / k1) / s);
-  const stake2 = Math.max(0, Math.round(bank) - stake1);
+  const stake1 = roundMoney(bank * (1 / k1) / s);
+  const stake2 = Math.max(0, roundMoney(roundMoney(bank) - stake1));
   // выигрыш при любом исходе (минимум из двух плеч — из-за округления)
   const payout = Math.min(stake1 * k1, stake2 * k2);
   return { stake1, stake2, payout, profit: payout - bank };
@@ -983,9 +987,9 @@ let bet3Arb = null;
 
 function calcBetStakes3(k1, kx, k2, bank) {
   const s = 1 / k1 + 1 / kx + 1 / k2;
-  const stake1 = Math.round(bank * (1 / k1) / s);
-  const stakex = Math.round(bank * (1 / kx) / s);
-  const stake2 = Math.max(0, Math.round(bank) - stake1 - stakex);
+  const stake1 = roundMoney(bank * (1 / k1) / s);
+  const stakex = roundMoney(bank * (1 / kx) / s);
+  const stake2 = Math.max(0, roundMoney(roundMoney(bank) - stake1 - stakex));
   const payout = Math.min(stake1 * k1, stakex * kx, stake2 * k2);
   return { stake1, stakex, stake2, payout, profit: payout - bank };
 }

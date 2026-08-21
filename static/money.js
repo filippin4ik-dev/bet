@@ -39,9 +39,29 @@ function toBaseRub(amount) {
   return Math.round((amount / money.perRub) * 100) / 100;
 }
 
+/* До какого знака округлять суммы. В рублях — до рубля: копейки в купоне
+ * никому не нужны, а лишние два знака в двенадцати столбцах — мусор. В
+ * долларах доллар «весит» почти сто рублей, и округление до целого
+ * перекосило бы разбивку небольшого банка ($10 превратились бы в $4 и $6
+ * вместо $3.62 и $6.38, а показанная прибыль стала бы неправдой). */
+function moneyDecimals() {
+  return money.perRub >= 1 ? 0 : 2;
+}
+
+function roundMoney(n) {
+  const p = 10 ** moneyDecimals();
+  return Math.round(Number(n) * p) / p;
+}
+
+function _fmt(n) {
+  const d = moneyDecimals();
+  return Number(n).toLocaleString("ru-RU",
+    { minimumFractionDigits: d, maximumFractionDigits: d });
+}
+
 // Сумма, уже приведённая к валюте отображения.
 const fmtMoney = (n) => n === null || n === undefined
-  ? "—" : Math.round(Number(n)).toLocaleString("ru-RU") + " " + money.symbol;
+  ? "—" : _fmt(n) + " " + money.symbol;
 
 // Сумма, пришедшая с сервера в рублях (баланс игрока, лимит ставки).
 const fmtRub = (n) => fmtMoney(toDisplay(n));
@@ -49,8 +69,7 @@ const fmtRub = (n) => fmtMoney(toDisplay(n));
 /* Число без знака валюты: в таблицах валюта стоит в заголовке столбца
  * («Ставка 1, ₽») — 12 столбцов и без повторяющегося знака еле влезают
  * в ноутбучный экран. */
-const fmtNum = (n) => n === null || n === undefined
-  ? "—" : Math.round(Number(n)).toLocaleString("ru-RU");
+const fmtNum = (n) => n === null || n === undefined ? "—" : _fmt(n);
 
 const fmtNumRub = (n) => fmtNum(toDisplay(n));
 
