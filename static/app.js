@@ -107,6 +107,38 @@ let profile = null;
 // сервере), но код и кнопки остались на месте.
 let autobetUi = false;
 
+/* ---------- валюта отображения ---------- */
+
+/* Пересчёт живёт в money.js, здесь — только то, что зависит от банка.
+ * Сам банк НЕ пересчитывается, а берётся набором, привычным для валюты
+ * (1 000 ₽ или $50): «банк $54.32» никто не ставит. Суммы плеч считаются
+ * от него той же формулой, что на сервере — она пропорциональна банку,
+ * поэтому валюта расчёту безразлична. */
+onCurrencyChange = () => syncBankOptions();
+
+/* Список банков валюты. Выбранный банк сохраняется в localStorage, но при
+ * смене валюты рублёвая тысяча в списке долларов бессмысленна — берём
+ * ближайший по смыслу пункт (тот же по порядку). */
+function syncBankOptions() {
+  const previous = [...els.bank.options].map((o) => o.value);
+  const at = previous.indexOf(els.bank.value);
+  const same = previous.length === money.banks.length
+    && money.banks.every((b, i) => String(b) === previous[i]);
+  if (same) return;
+  els.bank.innerHTML = money.banks.map((b) =>
+    `<option value="${b}">${Number(b).toLocaleString("ru-RU")}</option>`).join("");
+  const idx = at >= 0 && at < money.banks.length
+    ? at
+    : Math.min(1, money.banks.length - 1);   // по умолчанию средний банк
+  els.bank.value = String(money.banks[idx]);
+  for (const input of [els.betBank, els.bet3Bank]) {
+    input.step = money.step;
+    input.min = money.banks[0];
+    input.value = els.bank.value;
+  }
+  saveState();
+}
+
 /* ---------- цвета букмекеров ---------- */
 
 const BK_CLASS = {
@@ -323,11 +355,6 @@ function escapeHtml(s) {
 
 /* ---------- отрисовка ---------- */
 
-const fmtMoney = (n) => Number(n).toLocaleString("ru-RU") + " ₽";
-// В таблице рубли выносим в заголовок столбца («Ставка 1, ₽»): 12 столбцов
-// и без повторяющегося знака еле влезают в ноутбучный экран.
-const fmtNum = (n) => Number(n).toLocaleString("ru-RU");
-
 function startLabel(r) {
   if (r.kind === "live") return null;
   if (!r.start_ts && !r.start_time) return null;
@@ -506,7 +533,7 @@ function renderProfile() {
   els.profileLink.hidden = !profile;
   if (profile) {
     els.profileName.textContent = `👤 ${profile.name}`;
-    els.profileBalance.textContent = fmtMoney(Math.round(profile.balance));
+    els.profileBalance.textContent = fmtRub(profile.balance);
   }
   els.betSave.hidden = !profile;
   els.bet3Save.hidden = !profile;
@@ -530,8 +557,8 @@ async function saveBet(btn, body) {
     profile = data.player;
     renderProfile();
     btn.textContent = "✓ Сохранено";
-    toast(`Ставка в профиле. Прибыль +${fmtMoney(Math.round(data.profit))}, ` +
-      `баланс ${fmtMoney(Math.round(data.player.balance))}`);
+    toast(`Ставка в профиле. Прибыль +${fmtRub(data.profit)}, ` +
+      `баланс ${fmtRub(data.player.balance)}`);
     setTimeout(() => { btn.textContent = original; }, 1600);
   } catch (err) {
     btn.textContent = original;
@@ -563,7 +590,10 @@ function togglePin(key) {
 }
 
 function renderArbs() {
-  const bank = els.bank.value;
+  // Суммы плеч считаем от выбранного банка той же формулой, что на
+  // сервере: она пропорциональна банку, поэтому одинаково верна и в
+  // рублях, и в долларах (готовый расчёт с сервера всегда рублёвый).
+  const bank = Math.max(0, parseFloat(els.bank.value) || 0);
   els.arbCount.innerHTML = `Вилок <b>${lastArbs.length}</b>`;
   const rows = applySort(applyFilters(lastArbs));
 
@@ -585,7 +615,7 @@ function renderArbs() {
   }
 
   els.body.innerHTML = all.map((a) => {
-    const st = a.stakes[bank] || {};
+    const st = calcBetStakes(a.k1_max, a.k2_max, bank);
     const pinned = pinnedSet.has(a.match_key);
     const cls = ["arb-row"];
     if (pinned) cls.push("pinned");
@@ -621,7 +651,7 @@ function togglePin3(key) {
 }
 
 function renderArbs1x2() {
-  const bank = els.bank.value;
+  const bank = Math.max(0, parseFloat(els.bank.value) || 0);
   const rows = applySort(applyFilters(lastArbs1x2));
 
   const byKey = new Map(lastArbs1x2.map((a) => [a.match_key, a]));
@@ -640,7 +670,7 @@ function renderArbs1x2() {
   }
 
   els.body1x2.innerHTML = all.map((a) => {
-    const st = a.stakes[bank] || {};
+    const st = calcBetStakes3(a.k1_max, a.kx_max, a.k2_max, bank);
     const pinned = pinnedSet.has(a.match_key);
     const cls = ["arb-row"];
     if (pinned) cls.push("pinned");
@@ -733,7 +763,8 @@ function copyStake(btn, value) {
     btn.textContent = "✓ Скопировано";
     setTimeout(() => { btn.textContent = orig; }, 1200);
   };
-  const fail = () => toast(`Скопируйте сумму вручную: ${value} ₽`, "warn");
+  const fail = () => toast(
+    `Скопируйте сумму вручную: ${value} ${money.symbol}`, "warn");
   if (!navigator.clipboard) return fail();
   navigator.clipboard.writeText(String(value)).then(done, fail);
 }
@@ -779,8 +810,8 @@ function renderBetModal() {
   }
 
   els.betSummary.innerHTML = bank > 0
-    ? `Выигрыш при любом исходе: <b>${fmtMoney(Math.round(st.payout))}</b> · ` +
-      `чистая прибыль: <b class="profit">+${fmtMoney(Math.round(st.profit))}</b>`
+    ? `Выигрыш при любом исходе: <b>${fmtMoney(st.payout)}</b> · ` +
+      `чистая прибыль: <b class="profit">+${fmtMoney(st.profit)}</b>`
     : "Укажите сумму ставки";
 
   renderLimit(els.betLimit, a.max_stake);
@@ -800,7 +831,7 @@ function renderLimit(el, maxStake) {
   }
   el.hidden = false;
   el.innerHTML = `Лимит по балансу подключённых аккаунтов: ` +
-    `<span class="limit-known">${fmtMoney(Math.round(maxStake))}</span>`;
+    `<span class="limit-known">${fmtRub(maxStake)}</span>`;
 }
 
 async function autobetApi(path, body) {
@@ -829,7 +860,9 @@ function renderAutobetResult(el, res) {
     : '<b style="color:#ef4444">РЕАЛЬНАЯ СТАВКА</b>';
   const legsHtml = res.legs.map((l) =>
     `<div class="${l.ok ? "leg-ok" : "leg-fail"}">${l.ok ? "✓" : "✗"} ` +
-    `${escapeHtml(l.bookmaker)} · ${escapeHtml(l.outcome)} · ${fmtMoney(l.stake)}@${l.odds} — ` +
+    // ставка реальная, её считал сервер — показываем ровно в тех рублях,
+    // которые ушли в купон, без пересчёта в валюту отображения
+    `${escapeHtml(l.bookmaker)} · ${escapeHtml(l.outcome)} · ${Number(l.stake).toLocaleString("ru-RU")} ₽@${l.odds} — ` +
     `${escapeHtml(l.message)}</div>`).join("");
   const note = res.note ? `<div class="leg-fail">${escapeHtml(res.note)}</div>` : "";
   el.innerHTML = `${modeLabel}<br>${legsHtml}${note}`;
@@ -897,6 +930,8 @@ els.betSave.addEventListener("click", () => {
   if (!betArb) return;
   const bank = Math.max(0, parseFloat(els.betBank.value) || 0);
   const st = calcBetStakes(betArb.k1_max, betArb.k2_max, bank);
+  // Баланс игрока хранится в рублях, поэтому в профиль уходят рубли:
+  // отправить сюда доллары значит уменьшить баланс почти в сто раз.
   saveBet(els.betSave, {
     match_key: betArb.match_key,
     kind: betArb.kind,
@@ -907,9 +942,9 @@ els.betSave.addEventListener("click", () => {
     profit_pct: betArb.profit_pct,
     legs: [
       { bookmaker: betArb.k1_bookmaker, outcome: betArb.outcome1,
-        odds: betArb.k1_max, stake: st.stake1 },
+        odds: betArb.k1_max, stake: toBaseRub(st.stake1) },
       { bookmaker: betArb.k2_bookmaker, outcome: betArb.outcome2,
-        odds: betArb.k2_max, stake: st.stake2 },
+        odds: betArb.k2_max, stake: toBaseRub(st.stake2) },
     ],
   });
 });
@@ -986,8 +1021,8 @@ function renderBet3Modal() {
   }
 
   els.bet3Summary.innerHTML = bank > 0
-    ? `Выигрыш при любом исходе: <b>${fmtMoney(Math.round(st.payout))}</b> · ` +
-      `чистая прибыль: <b class="profit">+${fmtMoney(Math.round(st.profit))}</b>`
+    ? `Выигрыш при любом исходе: <b>${fmtMoney(st.payout)}</b> · ` +
+      `чистая прибыль: <b class="profit">+${fmtMoney(st.profit)}</b>`
     : "Укажите сумму ставки";
 
   renderLimit(els.bet3Limit, a.max_stake);
@@ -1062,13 +1097,14 @@ els.bet3Save.addEventListener("click", () => {
     match: bet3Arb.match,
     market: "Исход (1X2)",
     profit_pct: bet3Arb.profit_pct,
+    // суммы в профиль — всегда в рублях (см. betSave выше)
     legs: [
       { bookmaker: bet3Arb.k1_bookmaker, outcome: "П1",
-        odds: bet3Arb.k1_max, stake: st.stake1 },
+        odds: bet3Arb.k1_max, stake: toBaseRub(st.stake1) },
       { bookmaker: bet3Arb.kx_bookmaker, outcome: "X",
-        odds: bet3Arb.kx_max, stake: st.stakex },
+        odds: bet3Arb.kx_max, stake: toBaseRub(st.stakex) },
       { bookmaker: bet3Arb.k2_bookmaker, outcome: "П2",
-        odds: bet3Arb.k2_max, stake: st.stake2 },
+        odds: bet3Arb.k2_max, stake: toBaseRub(st.stake2) },
     ],
   });
 });
@@ -1147,6 +1183,9 @@ async function poll() {
 
     soundAlertProfit = data.sound_alert_profit ?? 2.5;
     autobetUi = !!data.autobet_ui;
+    // Валюту сменили в админке — открытые вкладки подхватят её на этом же
+    // опросе, перезагружать страницу не нужно.
+    applyCurrency(data.currency);
     els.soundThreshold.textContent = soundAlertProfit;
     els.interval.textContent = data.scan_interval;
 
