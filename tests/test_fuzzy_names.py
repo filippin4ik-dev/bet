@@ -118,6 +118,82 @@ def test_event_groups_merge_fuzzy_variant():
     print("OK: test_event_groups_merge_fuzzy_variant")
 
 
+# ---------- сокращённые названия ----------
+
+def test_short_name_merges_with_its_full_form():
+    """«Сувон» и «Сувон Самсунг» — одна команда, хотя побуквенно похожи
+    всего на 0.56 (порог слияния — 0.9). Раньше событие не сшивалось и
+    вилка по нему терялась; теперь короткое имя признаётся сокращением
+    полного, если полное в этом виде спорта ОДНО."""
+    odds = [
+        mk("Winline", k1=2.10, k2=2.05,
+           team1="Сувон Самсунг", team2="Кимчхон Санму"),
+        mk("Fonbet", k1=1.95, k2=2.30,
+           team1="Сувон", team2="Кимчхон Санму"),
+    ]
+    arbs = find_arbs(odds)
+    assert arbs, "однозначное сокращение названия должно склеивать событие"
+    print("OK: test_short_name_merges_with_its_full_form")
+
+
+def test_ambiguous_short_name_is_not_merged():
+    """«Манчестер» — это и «Манчестер Юнайтед», и «Манчестер Сити».
+    Слить его с любым из них значит через DSU сделать два разных клуба
+    одним — и получить вилку из цен разных матчей."""
+    odds = [
+        mk("Winline", k1=2.10, k2=2.05,
+           team1="Манчестер Юнайтед", team2="Эвертон"),
+        mk("Fonbet", k1=1.95, k2=2.30,
+           team1="Манчестер", team2="Эвертон"),
+        mk("Winline", k1=1.80, k2=2.00,
+           team1="Манчестер Сити", team2="Фулхэм"),
+    ]
+    arbs = find_arbs(odds)
+    assert not arbs, "неоднозначное сокращение сливать нельзя"
+    print("OK: test_ambiguous_short_name_is_not_merged")
+
+
+def test_short_word_does_not_drive_a_merge():
+    """Сокращение должно опираться на существенное слово. «Ювентус» и
+    «Ювентус Манчестер» тут ни при чём — проверяем огрызок: у пары «Сан»
+    и «Сан Паулу» общее слово короче FUZZY_NAME_MIN_WORD букв, и такое
+    вложение не считается."""
+    odds = [
+        mk("Winline", k1=2.10, k2=2.05, team1="Сан Паулу", team2="Эвертон"),
+        mk("Fonbet", k1=1.95, k2=2.30, team1="Сан", team2="Эвертон"),
+    ]
+    arbs = find_arbs(odds)
+    assert not arbs, "по трёхбуквенному огрызку сливать нельзя"
+    print("OK: test_short_word_does_not_drive_a_merge")
+
+
+def test_short_name_still_obeys_the_start_time_split():
+    """Сокращение сливает ИМЕНА, но не отменяет допуск по времени: первый
+    и ответный матчи так же остаются разными событиями."""
+    odds = [
+        mk("Winline", k1=2.10, k2=2.05,
+           team1="Сувон Самсунг", team2="Кимчхон Санму", start_ts=NOW),
+        mk("Fonbet", k1=1.95, k2=2.30,
+           team1="Сувон", team2="Кимчхон Санму", start_ts=NOW + 5 * 3600),
+    ]
+    arbs = find_arbs(odds)
+    assert not arbs, "разрыв в 5 часов — это два разных матча"
+    print("OK: test_short_name_still_obeys_the_start_time_split")
+
+
+def test_short_name_of_one_bookmaker_alone_is_not_merged():
+    """Оба написания у ОДНОЙ БК — это два её матча, а не сокращение."""
+    odds = [
+        mk("Winline", k1=2.10, k2=2.05,
+           team1="Сувон Самсунг", team2="Кимчхон Санму"),
+        mk("Winline", k1=1.95, k2=2.30,
+           team1="Сувон", team2="Кимчхон Санму", start_ts=NOW + 300),
+    ]
+    arbs = find_arbs(odds)
+    assert not arbs, "две росписи одной БК нельзя сводить в вилку"
+    print("OK: test_short_name_of_one_bookmaker_alone_is_not_merged")
+
+
 def test_far_apart_start_ts_not_merged_despite_similar_names():
     """Даже похожие имена не должны склеиваться, если время старта
     расходится намного больше допуска вида спорта — иначе рискуем
@@ -142,5 +218,10 @@ if __name__ == "__main__":
     test_one_team_totally_different_not_merged()
     test_same_bookmaker_never_merged()
     test_event_groups_merge_fuzzy_variant()
+    test_short_name_merges_with_its_full_form()
+    test_ambiguous_short_name_is_not_merged()
+    test_short_word_does_not_drive_a_merge()
+    test_short_name_still_obeys_the_start_time_split()
+    test_short_name_of_one_bookmaker_alone_is_not_merged()
     test_far_apart_start_ts_not_merged_despite_similar_names()
     print("Все тесты прошли.")

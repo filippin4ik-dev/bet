@@ -60,14 +60,25 @@ def search(odds):
 
 # ---------- разные написания названий ----------
 
-def test_arb_lost_to_different_spelling_is_reported():
-    """«Сувон Самсунг» у одной БК и «Сувон» у другой — событие не
-    склеилось, вилка по нему не нашлась. Она должна попасть в отсеянные."""
-    odds = [
-        total("Fonbet", "Сувон Самсунг", "Кимчхон Сангму", 2.30, 1.70),
-        total("Winline", "Сувон", "Кимчхон Санму", 1.80, 2.25),
+# Сокращённое имя, у которого продолжение НЕ единственное: «Манчестер»
+# вкладывается и в «Манчестер Юнайтед», и в «Манчестер Сити». Сливать по
+# нему нельзя (иначе два клуба стали бы одним), поэтому такое событие
+# остаётся несшитым — и его как раз должен показать этот проход.
+def _ambiguous_short_name_line():
+    return [
+        total("Fonbet", "Манчестер Юнайтед", "Кимчхон Сангму", 2.30, 1.70),
+        total("Winline", "Манчестер", "Кимчхон Санму", 1.80, 2.25),
+        # третий клуб с тем же началом — из-за него «Манчестер» и
+        # неоднозначен; своей вилки он не даёт
+        total("Fonbet", "Манчестер Сити", "Эвертон", 1.90, 1.95),
     ]
-    arbs, unmatched, _ = search(odds)
+
+
+def test_arb_lost_to_different_spelling_is_reported():
+    """«Манчестер Юнайтед» у одной БК и «Манчестер» у другой — сократить
+    можно и до «Сити», поэтому движок сливать не стал и вилка не нашлась.
+    Она должна попасть в отсеянные."""
+    arbs, unmatched, _ = search(_ambiguous_short_name_line())
     assert arbs == [], "события не склеились — обычная вилка невозможна"
     assert len(unmatched) == 1
     found = unmatched[0]
@@ -75,8 +86,8 @@ def test_arb_lost_to_different_spelling_is_reported():
     assert found.profit_pct > 0
     # в причине видны ОБА написания и обе БК: проверять руками нужно именно
     # то, что движок счёл одним матчем
-    assert "Сувон Самсунг" in found.reject_reason
-    assert "Сувон —" in found.reject_reason
+    assert "Манчестер Юнайтед" in found.reject_reason
+    assert "Манчестер —" in found.reject_reason
     assert "Fonbet" in found.reject_reason
     assert "Winline" in found.reject_reason
     # плечи — из РАЗНЫХ БК, иначе это вилка внутри одного события
@@ -86,9 +97,10 @@ def test_arb_lost_to_different_spelling_is_reported():
 def test_three_outcome_arb_is_reported_too():
     """Тройка П1/X/П2 теряется от расхождения имён так же, как пара."""
     odds = [
-        winner1x2("Fonbet", "Сувон Самсунг", "Кимчхон Сангму", 2.60, 3.30,
+        winner1x2("Fonbet", "Манчестер Юнайтед", "Кимчхон Сангму", 2.60, 3.30,
                   3.00),
-        winner1x2("BetBoom", "Сувон", "Кимчхон Санму", 2.20, 3.90, 3.10),
+        winner1x2("BetBoom", "Манчестер", "Кимчхон Санму", 2.20, 3.90, 3.10),
+        winner1x2("Fonbet", "Манчестер Сити", "Эвертон", 1.90, 3.60, 4.10),
     ]
     _, _, unmatched3 = search(odds)
     assert len(unmatched3) >= 1
@@ -101,11 +113,27 @@ def test_no_arb_after_merge_means_no_row():
     """Похожие названия сами по себе — не повод для строки: показываем
     только то, из-за чего теряется ВИЛКА."""
     odds = [
-        total("Fonbet", "Сувон Самсунг", "Кимчхон Сангму", 1.80, 1.70),
-        total("Winline", "Сувон", "Кимчхон Санму", 1.75, 1.90),
+        total("Fonbet", "Манчестер Юнайтед", "Кимчхон Сангму", 1.80, 1.70),
+        total("Winline", "Манчестер", "Кимчхон Санму", 1.75, 1.90),
+        total("Fonbet", "Манчестер Сити", "Эвертон", 1.90, 1.95),
     ]
     _, unmatched, unmatched3 = search(odds)
     assert unmatched == [] and unmatched3 == []
+
+
+def test_unambiguous_short_name_becomes_a_normal_arb():
+    """«Сувон» сокращается только до «Сувон Самсунг» — тут движок сшивает
+    событие сам, и вилка попадает в ОСНОВНОЙ список, а не в отсеянные.
+
+    Именно этот случай раньше терялся: побуквенно «сувон» и «самсунг
+    сувон» похожи всего на 0.56, до порога слияния имён далеко."""
+    odds = [
+        total("Fonbet", "Сувон Самсунг", "Кимчхон Сангму", 2.30, 1.70),
+        total("Winline", "Сувон", "Кимчхон Санму", 1.80, 2.25),
+    ]
+    arbs, unmatched, _ = search(odds)
+    assert len(arbs) == 1, "сокращение однозначное — событие должно сшиться"
+    assert unmatched == [], "вилка показана обычной, дублировать её незачем"
 
 
 def test_different_teams_sharing_a_word_are_not_merged():
@@ -126,8 +154,8 @@ def test_same_bookmaker_twice_is_not_a_spelling_problem():
         total("Fonbet", "Сувон Самсунг", "Кимчхон Сангму", 2.30, 1.70),
         total("Fonbet", "Сувон", "Кимчхон Санму", 1.80, 2.25),
     ]
-    _, unmatched, _ = search(odds)
-    assert unmatched == []
+    arbs, unmatched, _ = search(odds)
+    assert arbs == [] and unmatched == []
 
 
 def test_far_apart_events_are_not_candidates():
@@ -138,7 +166,8 @@ def test_far_apart_events_are_not_candidates():
         total("Winline", "Сувон", "Кимчхон Санму", 1.80, 2.25,
               start_ts=NOW + 48 * 3600),
     ]
-    _, unmatched, _ = search(odds)
+    arbs, unmatched, _ = search(odds)
+    assert arbs == [], "допуск времени разводит их в разные матчи"
     assert unmatched == []
 
 

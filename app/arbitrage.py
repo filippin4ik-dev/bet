@@ -21,9 +21,11 @@ from collections import defaultdict
 from typing import Iterable
 
 from .config import (ARB_MAX_PROFIT, ARB_REJECTED_MAX,
-                     ARB_UNMATCHED_CANDIDATES_MAX, BANKS,
+                     ARB_UNMATCHED_CANDIDATES_MAX, BANKS, BOOKMAKER_FAMILIES,
                      COMBAT_ROUNDS_DEFAULT_RULE, COMBAT_ROUNDS_RULE_LABELS,
-                     COMBAT_ROUNDS_RULES, FUZZY_NAME_MIN_SINGLE_RATIO,
+                     COMBAT_ROUNDS_RULES, FUZZY_NAME_CONTAINMENT,
+                     FUZZY_NAME_CONTAINMENT_RATIO, FUZZY_NAME_EXTRA_WORDS,
+                     FUZZY_NAME_MIN_SINGLE_RATIO, FUZZY_NAME_MIN_WORD,
                      FUZZY_NAME_SIM_THRESHOLD, START_TS_TOLERANCE,
                      START_TS_TOLERANCE_COMBAT, START_TS_TOLERANCE_RAPID)
 from .models import Arb, Arb3, KIND_LIVE, KIND_PREMATCH, MarketOdds
@@ -168,6 +170,57 @@ def _may_match(a: tuple[int, int], b: tuple[int, int]) -> bool:
     return 2 * fit >= FUZZY_NAME_MIN_SINGLE_RATIO * (la + lb)
 
 
+# Сколько слов максимум разбираем при поиске вложения. Имя из десятка слов —
+# это не команда, а строка мусора; полный перебор его подмножеств стоил бы
+# дороже всего остального вместе взятого.
+_CONTAIN_MAX_WORDS = 8
+
+
+@functools.lru_cache(maxsize=200_000)
+def _name_words(name: str) -> frozenset[str]:
+    return frozenset(name.split())
+
+
+def _containment_map(names: Iterable[str]) -> dict[str, str]:
+    """Соответствие «сокращённое имя → его полное написание» внутри одного
+    вида спорта, и только там, где полное написание ЕДИНСТВЕННОЕ.
+
+    Сокращения — отдельная от опечаток беда: «Сувон» и «Сувон Самсунг» это
+    одна команда, но побуквенная похожесть у них 0.55, то есть намного ниже
+    FUZZY_NAME_SIM_THRESHOLD, и событие между БК не сшивалось (README про
+    это прямо говорит как про известную потерю — такие вилки было видно
+    только на вкладке «Отсеянные»).
+
+    Единственность обязательна. «Манчестер» вкладывается и в «Манчестер
+    Юнайтед», и в «Манчестер Сити»; слив его с любым из них, мы через DSU
+    сделали бы Юнайтед и Сити ОДНОЙ командой — и получили бы вилку из цен
+    двух разных матчей. Поэтому имя, у которого продолжений больше одного,
+    из соответствия выбрасывается целиком.
+    """
+    names = {n for n in names if n}
+    out: dict[str, set[str]] = defaultdict(set)
+    for long in names:
+        words = _name_words(long)
+        n = len(words)
+        if n < 2 or n > _CONTAIN_MAX_WORDS:
+            continue
+        ordered = sorted(words)
+        # подмножества, отличающиеся на 1..FUZZY_NAME_EXTRA_WORDS слов
+        for drop in range(1, min(FUZZY_NAME_EXTRA_WORDS, n - 1) + 1):
+            for gone in itertools.combinations(ordered, drop):
+                short = " ".join(w for w in ordered if w not in gone)
+                if short in names and short != long:
+                    out[short].add(long)
+    return {short: next(iter(longs)) for short, longs in out.items()
+            if len(longs) == 1
+            and max(len(w) for w in _name_words(short)) >= FUZZY_NAME_MIN_WORD}
+
+
+def _contained(contain: dict[str, str], a: str, b: str) -> bool:
+    """Одно из имён — однозначное сокращение другого (см. _containment_map)."""
+    return contain.get(a) == b or contain.get(b) == a
+
+
 class TimeSplit:
     """Одно событие, разошедшееся у разных БК по времени старта.
 
@@ -283,10 +336,23 @@ def build_name_canon_map(odds: list[MarketOdds]) -> dict[str, str]:
                 ev["books"], ev["lo"], ev["hi"], ev["tol"])
         (timed if ev["lo"] is not None else loose)[root].append(item)
 
+    # «Сокращённое имя → полное» считается ОДИН раз на вид спорта и по всем
+    # его именам сразу: единственность продолжения (см. _containment_map)
+    # можно проверить только зная их все, а не по отдельной паре событий.
+    contain_by_root: dict[str, dict[str, str]] = {}
+    if FUZZY_NAME_CONTAINMENT:
+        for root in set(timed) | set(loose):
+            names = {name
+                     for item in itertools.chain(timed.get(root, ()),
+                                                 loose.get(root, ()))
+                     for name in item[0]}
+            contain_by_root[root] = _containment_map(names)
+
     dsu = _UnionFind()
     for root, items in timed.items():
         items.sort(key=lambda x: x[4])  # по началу окна старта
         cap = _fuzzy_window_cap(root)
+        contain = contain_by_root.get(root)
         n = len(items)
         for i in range(n):
             hi_i, tol_i = items[i][5], items[i][6]
@@ -298,20 +364,40 @@ def build_name_canon_map(odds: list[MarketOdds]) -> dict[str, str]:
                     break
                 if gap > max(tol_i, items[j][6]):
                     continue
-                _merge_if_alike(dsu, items[i], items[j])
+                _merge_if_alike(dsu, items[i], items[j], contain)
 
     for root, items in loose.items():
         # бессрочных событий немного (только лайв и только там, где БК не
         # прислала время), поэтому сравнение со всем корнем не дорого
         rest = timed.get(root, ())
+        contain = contain_by_root.get(root)
         for i, item in enumerate(items):
             for other in itertools.chain(items[i + 1:], rest):
-                _merge_if_alike(dsu, item, other)
+                _merge_if_alike(dsu, item, other, contain)
 
     return {name: dsu.find(name) for name in dsu._parent}
 
 
-def _merge_if_alike(dsu: _UnionFind, a: tuple, b: tuple) -> None:
+def _team_ratio(x: str, y: str, sig_x: tuple, sig_y: tuple,
+                contain: dict[str, str]) -> float:
+    """Похожесть имён одной команды: побуквенная или «вложение».
+
+    Побуквенную считает difflib, но только если дешёвый предфильтр не
+    отверг пару сразу. Вложение (сокращённое имя против полного) difflib не
+    ловит в принципе — «сувон» против «самсунг сувон» это 0.55, — поэтому
+    оно проверяется отдельно и предфильтр на него не распространяется:
+    предфильтр оценивает как раз побуквенное сходство, которого здесь и не
+    должно быть.
+    """
+    if contain and _contained(contain, x, y):
+        return FUZZY_NAME_CONTAINMENT_RATIO
+    if not _may_match(sig_x, sig_y):
+        return -1.0
+    return difflib.SequenceMatcher(None, x, y).ratio()
+
+
+def _merge_if_alike(dsu: _UnionFind, a: tuple, b: tuple,
+                    contain: dict[str, str] | None = None) -> None:
     """Сливает имена двух пар команд, если они достаточно похожи.
 
     Решение о времени старта принимает вызывающий — здесь только имена."""
@@ -319,19 +405,17 @@ def _merge_if_alike(dsu: _UnionFind, a: tuple, b: tuple) -> None:
     pair_b, sig_b0, sig_b1, books_b = b[0], b[1], b[2], b[3]
     if len(books_a) == 1 and books_a == books_b:
         return  # оба написания только у ОДНОЙ БК — это разные её матчи
-    straight_ok = _may_match(sig_a0, sig_b0) and _may_match(sig_a1, sig_b1)
-    swapped_ok = _may_match(sig_a0, sig_b1) and _may_match(sig_a1, sig_b0)
+    contain = contain or {}
+    r00 = _team_ratio(pair_a[0], pair_b[0], sig_a0, sig_b0, contain)
+    r11 = _team_ratio(pair_a[1], pair_b[1], sig_a1, sig_b1, contain)
+    straight_ok = r00 >= 0 and r11 >= 0
+    r01 = _team_ratio(pair_a[0], pair_b[1], sig_a0, sig_b1, contain)
+    r10 = _team_ratio(pair_a[1], pair_b[0], sig_a1, sig_b0, contain)
+    swapped_ok = r01 >= 0 and r10 >= 0
     if not straight_ok and not swapped_ok:
         return  # ни в одной ориентации имена не дотянут до порога
-    straight = swapped = -1.0
-    if straight_ok:
-        r00 = difflib.SequenceMatcher(None, pair_a[0], pair_b[0]).ratio()
-        r11 = difflib.SequenceMatcher(None, pair_a[1], pair_b[1]).ratio()
-        straight = (r00 + r11) / 2
-    if swapped_ok:
-        r01 = difflib.SequenceMatcher(None, pair_a[0], pair_b[1]).ratio()
-        r10 = difflib.SequenceMatcher(None, pair_a[1], pair_b[0]).ratio()
-        swapped = (r01 + r10) / 2
+    straight = (r00 + r11) / 2 if straight_ok else -1.0
+    swapped = (r01 + r10) / 2 if swapped_ok else -1.0
     if straight >= swapped:
         avg, ra, rb = straight, r00, r11
         match0, match1 = pair_b[0], pair_b[1]
@@ -539,6 +623,31 @@ REJECT_UNMATCHED_TIME = "unmatched_time"
 # раундов, фора по раундам, чет/нечет раундов). Победитель боя от правил
 # подсчёта раундов не зависит и в список не входит.
 _ROUND_COUNT_MARKETS = ("total", "itotal", "hcap", "oddeven")
+
+
+def _families() -> dict[str, int]:
+    """Имя БК → номер её семьи-маркетмейкера (см. BOOKMAKER_FAMILIES)."""
+    out: dict[str, int] = {}
+    for i, group in enumerate(BOOKMAKER_FAMILIES):
+        for bk in group:
+            out[bk] = i
+    return out
+
+
+_FAMILY_OF = _families()
+
+
+def same_market_maker(bk1: str, bk2: str) -> bool:
+    """Считает ли этим двум БК линию один и тот же маркетмейкер.
+
+    Такая пара — не вилка, даже когда 1/К1 + 1/К2 < 1. Площадки одной
+    платформы берут кэфы из общего фида и отличаются только своей маржой:
+    прибыль между ними — это либо мгновенный рассинхрон фида, либо ошибка
+    разбора, а ставка ложится в ОДНУ книгу риска, где обе ноги режут
+    вместе. См. BOOKMAKER_FAMILIES.
+    """
+    a = _FAMILY_OF.get(bk1.strip().lower())
+    return a is not None and a == _FAMILY_OF.get(bk2.strip().lower())
 
 
 def _rounds_rule(bookmaker: str) -> str:
@@ -824,6 +933,8 @@ def find_arbs(odds: Iterable[MarketOdds],
             for o2 in side_b.values():
                 if o1.bookmaker == o2.bookmaker:
                     continue  # обе стороны из одной БК — не вилка (маржа)
+                if same_market_maker(o1.bookmaker, o2.bookmaker):
+                    continue  # линию обеим считает одна платформа
                 margin = 1 / o1.odds + 1 / o2.odds
                 if margin >= 1:
                     continue
@@ -957,8 +1068,12 @@ def find_arbs_1x2(odds: Iterable[MarketOdds],
         # в двухисходном движке, показываем каждую валидную вилку
         for c1, cx, c2 in itertools.product(
                 *(list(d.values()) for d in legs)):
-            if len({c1.bookmaker, cx.bookmaker, c2.bookmaker}) < 2:
+            books = {c1.bookmaker, cx.bookmaker, c2.bookmaker}
+            if len(books) < 2:
                 continue  # все три ставки у одной БК — это её же маржа
+            if all(same_market_maker(x, y)
+                   for x, y in itertools.combinations(books, 2)):
+                continue  # линию всем трём плечам считает одна платформа
             margin = 1 / c1.odds + 1 / cx.odds + 1 / c2.odds
             if margin >= 1:
                 continue
