@@ -38,6 +38,10 @@
   --shadow: 0 12px 32px rgba(2, 6, 16, 0.45);
   --shadow-sm: 0 4px 14px rgba(2, 6, 16, 0.3);
   --ring: 0 0 0 3px rgba(52, 211, 153, 0.25);
+
+  /* Высоту липкой шапки меряет theme.js: от неё отступают липкие
+     заголовки таблиц, иначе они прячутся под шапкой при прокрутке. */
+  --header-h: 0px;
 }
 
 [data-theme="light"] {
@@ -95,6 +99,22 @@ body {
 
 a { color: var(--accent); }
 
+::selection { background: var(--accent-soft); color: var(--text); }
+
+/* Полосы прокрутки — в тон панелям: серые системные на тёмном фоне
+   выглядят как чужая деталь, а прокручиваемых мест тут много (вкладки,
+   лента чипов БК, широкие таблицы). */
+html { scrollbar-color: var(--border) transparent; scrollbar-width: thin; }
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border: 2px solid transparent;
+  background-clip: padding-box;
+  border-radius: 999px;
+}
+::-webkit-scrollbar-thumb:hover { background: var(--muted); background-clip: padding-box; }
+
 .tnum { font-variant-numeric: tabular-nums; }
 .muted { color: var(--muted); }
 .nowrap { white-space: nowrap; }
@@ -110,6 +130,13 @@ header {
   background: color-mix(in srgb, var(--bg) 86%, transparent);
   backdrop-filter: blur(12px);
   border-bottom: 1px solid var(--border-soft);
+  transition: box-shadow .18s, border-color .18s;
+}
+/* Страницу прокрутили (data-scrolled ставит theme.js) — под шапкой едет
+   содержимое, и ей нужна тень, иначе слои сливаются. */
+[data-scrolled="1"] header {
+  border-bottom-color: var(--border);
+  box-shadow: var(--shadow-sm);
 }
 
 .header-top {
@@ -206,6 +233,14 @@ header h1 {
   white-space: nowrap;
 }
 .status-item b { color: var(--text); font-weight: 650; }
+/* Волосяная черта перед каждым пунктом, кроме первого: без неё режим,
+   свежесть, покрытие и счётчик вилок читались одной длинной фразой.
+   Пустые пункты (покрытие и счётчик до первого ответа сервера) черту не
+   получают — она висела бы в воздухе. */
+.status-item:not(:empty) ~ .status-item:not(:empty) {
+  border-left: 1px solid var(--border);
+  padding-left: 14px;
+}
 
 .scanning { color: var(--hot); display: inline-flex; align-items: center; gap: 6px; }
 .scanning::before {
@@ -240,6 +275,10 @@ header h1 {
 .bk-fresh.busy .dot { animation: pulse 1.1s ease-in-out infinite; }
 .bk-fresh.off { opacity: 0.55; }
 .bk-fresh.off .bk-note { color: var(--live); }
+/* Отставшая БК: её кэфы уже могли смениться, и вилка с её плечом —
+   под вопросом. Единственная подпись в ряду одинаковых чипов. */
+.bk-fresh.stale { border-color: color-mix(in srgb, var(--hot) 55%, transparent); }
+.bk-fresh.stale .bk-note { color: var(--hot); }
 
 /* --------------------------------------------------- панель управления --- */
 
@@ -379,7 +418,9 @@ th, td { padding: 11px 13px; text-align: left; vertical-align: middle; }
 
 thead th {
   position: sticky;
-  top: 0;
+  /* Не 0: там уже стоит липкая шапка сайта, и подписи столбцов уезжали
+     под неё (высоту меряет theme.js, см. --header-h). */
+  top: var(--header-h);
   z-index: 5;
   background: var(--panel-2);
   color: var(--muted);
@@ -409,6 +450,14 @@ th.sortable.sorted-desc::after { content: " ▼"; opacity: 1; color: var(--accen
 .sort-bk.sorted-desc::after { content: " ▼"; font-size: 0.75em; }
 
 tbody tr { border-top: 1px solid var(--border-soft); }
+
+/* Чередование строк: в вилках 12–13 столбцов, и взгляд, идя от матча к
+   прибыли, соскакивал на соседнюю строку. Только на «настоящих» таблицах:
+   ниже 861px строка и так отдельная карточка (см. media-блок). */
+@media (min-width: 861px) {
+  tbody tr:nth-child(even) { background: color-mix(in srgb, var(--panel-2) 60%, transparent); }
+}
+
 tbody tr:hover { background: var(--panel-hover); }
 
 tbody tr.hot { background: var(--hot-soft); }
@@ -459,7 +508,9 @@ td.num, .stake, .coef, .arb-age { font-variant-numeric: tabular-nums; }
 .kind.prematch { background: var(--info-soft); color: var(--info); }
 .kind.live-cell { color: var(--live); font-weight: 700; }
 
-/* Доходность — цветная плашка: чем выше, тем заметнее */
+/* Доходность — цветная плашка: чем выше, тем заметнее.
+ * Ступени задаёт app.js (profitCell) по самой доходности, а не по личной
+ * настройке звука: в глазах цифра должна значить одно и то же всегда. */
 .profit {
   display: inline-block;
   padding: 3px 9px;
@@ -470,7 +521,11 @@ td.num, .stake, .coef, .arb-age { font-variant-numeric: tabular-nums; }
   color: var(--accent);
   white-space: nowrap;
 }
+.profit.p-mid { background: color-mix(in srgb, var(--accent) 22%, transparent); }
+.profit.p-high { background: var(--accent); color: var(--accent-ink); }
 tr.hot .profit { background: var(--hot-soft); color: var(--hot); }
+tr.hot .profit.p-mid { background: color-mix(in srgb, var(--hot) 24%, transparent); }
+tr.hot .profit.p-high { background: var(--hot); color: var(--accent-ink); }
 
 .stake .bk { display: block; color: var(--muted); font-size: 0.76rem; }
 .bk { color: var(--muted); font-size: 0.8rem; }
@@ -1025,6 +1080,17 @@ td.sport { max-width: 210px; }
   line-height: 1.3;
   margin-top: 1px;
 }
+/* Турнир — в одну строку с многоточием: длинные названия («Чемпионат
+   Южной Кореи. Первый дивизион») распухали на три строки и растягивали
+   всю строку таблицы. Полное название остаётся в подсказке (title
+   ставит sportCell в app.js). */
+@media (min-width: 861px) {
+  .sport-root, .sport-league {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+}
 /* Матч — то, что читают в первую очередь: ему место нужнее, чем турниру,
    иначе автоширина таблицы рвала названия команд по слогам */
 td.match-name { min-width: 148px; }
@@ -1109,6 +1175,12 @@ tr.hot .profit-cell { color: var(--hot); }
   /* Чипы БК — одной прокручиваемой строкой вместо пяти строк подряд */
   .bk-freshness { flex-wrap: nowrap; overflow-x: auto; padding-bottom: 2px; }
   .status-bar { font-size: 0.82rem; }
+  /* Разделители — только на широком экране: здесь строка состояния и так
+     переносится, и черта уезжала в начало новой строки, где ей не место. */
+  .status-item:not(:empty) ~ .status-item:not(:empty) {
+    border-left: 0;
+    padding-left: 0;
+  }
   td.sport, td.match-name { max-width: none; min-width: 0; }
   .sport-root, .sport-league { display: inline; }
   .sport-league::before { content: " · "; }

@@ -9,7 +9,9 @@ main#admin-view { max-width: 1080px; margin: 0 auto; }
   flex-wrap: wrap;
   margin: 16px 0 4px;
   position: sticky;
-  top: 62px;
+  /* Ровно под шапкой: её высота плавает по ширине экрана, поэтому берём
+     измеренную (--header-h ставит theme.js), а не подобранное число. */
+  top: var(--header-h);
   z-index: 20;
   background: color-mix(in srgb, var(--bg) 88%, transparent);
   backdrop-filter: blur(8px);
