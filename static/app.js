@@ -148,6 +148,7 @@ const BK_CLASS = {
   "Liga Stavok": "bk-liga",    // зелёный
   "Лига Ставок": "bk-liga",
   "bc.game": "bk-bcgame",      // фиолетовый
+  "Roobet": "bk-roobet",       // бирюзовый
   "LeonBet": "bk-leon",        // жёлтый
   "Betcity": "bk-betcity",     // голубой (циан)
   "Melbet": "bk-melbet",       // розовый

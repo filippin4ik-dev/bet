@@ -493,6 +493,7 @@ tr.hot .profit { background: var(--hot-soft); color: var(--hot); }
 .bk-winline { color: #fb923c; }   /* Winline — оранжевый */
 .bk-liga    { color: #4ade80; }   /* Лига Ставок — зелёный */
 .bk-bcgame  { color: #c084fc; }   /* bc.game — фиолетовый */
+.bk-roobet  { color: #2dd4bf; }   /* Roobet — бирюзовый */
 .bk-leon    { color: #eab308; }   /* LeonBet — жёлтый */
 .bk-betcity { color: #22d3ee; }   /* Betcity — голубой (циан) */
 .bk-melbet  { color: #f472b6; }   /* Melbet — розовый */
@@ -505,6 +506,7 @@ tr.hot .profit { background: var(--hot-soft); color: var(--hot); }
 [data-theme="light"] .bk-winline { color: #c2410c; }
 [data-theme="light"] .bk-liga    { color: #15803d; }
 [data-theme="light"] .bk-bcgame  { color: #7e22ce; }
+[data-theme="light"] .bk-roobet  { color: #0f766e; }
 [data-theme="light"] .bk-leon    { color: #a16207; }
 [data-theme="light"] .bk-betcity { color: #0e7490; }
 [data-theme="light"] .bk-melbet  { color: #be185d; }

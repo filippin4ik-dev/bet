@@ -391,6 +391,9 @@ BCGAME_PROVIDER_URL = os.getenv(
     "https://bc.game/api/platform-sports/v14/home/sport/provider/support/")
 # Язык линии (ru — русские названия команд/рынков для сопоставления с БК РФ).
 BCGAME_LANG = os.getenv("BCGAME_LANG", "ru")
+# Сайт площадки: Origin/Referer запросов к фиду и адрес ссылок на событие.
+BCGAME_SITE_HOST = os.getenv("BCGAME_SITE_HOST",
+                             "https://bc.game").rstrip("/")
 # Включена ли bc.game — единственная крипто-БК в наборе (платформа BetBy,
 # деньги в USDT). Её линия сшивается с российскими БК по русским
 # названиям команд из того же фида, и с разбором рынка «Исход 1X2»
@@ -399,6 +402,34 @@ BCGAME_LANG = os.getenv("BCGAME_LANG", "ru")
 # РФ чаще прочих, поэтому спорные склейки уходят на вкладку «Отсеянные», а
 # саму БК можно выключить в админке или переменной BCGAME_ENABLED=0.
 BCGAME_ENABLED = os.getenv("BCGAME_ENABLED", "1") not in (
+    "0", "false", "no", "")
+
+# ---- Roobet (зеркало roo916.com): тот же фид BetBy, другой бренд ----
+# Собственный узел Roobet (roobet.sptpub.com) на адрес дата-центра отвечает
+# «access blocked», а общий узел платформы тот же бренд отдаёт спокойно —
+# поэтому по умолчанию берём общий (он же у bc.game). Свой узел имеет смысл
+# указывать, только если у сервера «жилой» IP.
+ROOBET_API_HOST = os.getenv("ROOBET_API_HOST",
+                            "https://cocoesports.com").rstrip("/")
+# brand_id BetBy по умолчанию (актуализируется автоматически, см. ниже).
+ROOBET_BRAND_ID = os.getenv("ROOBET_BRAND_ID", "2186449803775455232")
+# Каталог Roobet отдаёт актуальный brand_id по GraphQL без авторизации.
+# Сама страница сайта закрыта Cloudflare, а эта ручка — нет.
+ROOBET_GRAPHQL_URL = os.getenv("ROOBET_GRAPHQL_URL",
+                               "https://roobet.com/_api/graphql").strip()
+ROOBET_LANG = os.getenv("ROOBET_LANG", "ru")
+# Origin/Referer запросов к фиду — основной домен площадки.
+ROOBET_SITE_HOST = os.getenv("ROOBET_SITE_HOST",
+                             "https://roobet.com").rstrip("/")
+# Куда вести ссылки на событие. По умолчанию зеркало roo916.com: основной
+# домен во многих странах не открывается.
+ROOBET_SPORTS_URL = os.getenv("ROOBET_SPORTS_URL",
+                              "https://roo916.com/sports").rstrip("/")
+# Включена ли Roobet. Вторая крипто-БК на той же платформе, что и bc.game:
+# между собой они в вилку НЕ сшиваются (см. BOOKMAKER_FAMILIES), но каждая
+# годится вторым плечом против российских контор, и линии у них всё же
+# разные — Roobet показывает события, которых у bc.game нет.
+ROOBET_ENABLED = os.getenv("ROOBET_ENABLED", "1") not in (
     "0", "false", "no", "")
 
 # ---- LeonBet: публичный JSON-фид линии ----
