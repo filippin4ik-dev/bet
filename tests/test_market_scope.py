@@ -123,3 +123,34 @@ def test_unknown_subject_keeps_own_token():
     scope = ms("Суммарный тотал минут, на которых забиты голы")
     assert scope and scope != ""
     assert scope != ms("Тотал")
+
+
+def test_player_comparison_is_not_a_team_market():
+    """«Фолы игрока (сравнение игроков)» (LeonBet) — рынок про ДВУХ
+    ИГРОКОВ, а не про две команды.
+
+    Собственного токена у него не было, и ключ выходил тот же, что у
+    «кто из КОМАНД сделает больше фолов» (Fonbet, Betcity). Цены там
+    расходятся втрое — на живой линии ничья стоила 3.34 против 12.0, — и
+    движок исправно объявлял это вилкой в 15–22 %. Ставка по такой
+    «вилке» проигрывает обеими ногами.
+    """
+    team = ms("Фолы. Фактический исход")
+    player = ms("Фолы игрока (сравнение игроков)")
+    assert team == "fouls"
+    assert player != team
+    assert "fouls" in player and "players" in player
+
+
+def test_player_comparison_of_any_subject_stays_apart():
+    for subject in ("Сейвы", "Удары", "Удары в створ", "Голевые передачи"):
+        team = ms(f"Тотал {subject.lower()}")
+        player = ms(f"{subject} игрока (сравнение игроков)")
+        assert player != team, subject
+    assert ms("Сравнение спортсменов") == "players"
+
+
+def test_per_player_totals_keep_their_own_numbers():
+    """Складка «сравнения» не должна съесть номер игрока: «тотал первого
+    игрока» и «тотал второго» — разные рынки (теннис, LeonBet)."""
+    assert ms("Тотал первого игрока") != ms("Тотал второго игрока")

@@ -148,6 +148,7 @@ const BK_CLASS = {
   "Liga Stavok": "bk-liga",    // зелёный
   "Лига Ставок": "bk-liga",
   "bc.game": "bk-bcgame",      // фиолетовый
+  "Roobet": "bk-roobet",       // бирюзовый
   "LeonBet": "bk-leon",        // жёлтый
   "Betcity": "bk-betcity",     // голубой (циан)
   "Melbet": "bk-melbet",       // розовый
@@ -282,8 +283,22 @@ const rootSport = (s) => String(s).split(" · ")[0].trim();
 function sportCell(sport) {
   const [root, ...rest] = String(sport).split(" · ");
   const league = rest.join(" · ").trim();
+  // title — потому что на широких таблицах турнир обрезан многоточием
+  // (см. .sport-league в style.css), а знать его целиком иногда нужно.
   return `<span class="sport-root">${escapeHtml(root)}</span>` +
-    (league ? `<span class="sport-league">${escapeHtml(league)}</span>` : "");
+    (league
+      ? `<span class="sport-league" title="${escapeHtml(league)}">${escapeHtml(league)}</span>`
+      : "");
+}
+
+/* Плашка доходности. Ступени фиксированные и от настройки звука не
+ * зависят: звуковой порог — это «когда меня будить», личное дело каждого,
+ * а насыщенность плашки должна значить одно и то же в любой вкладке.
+ * 1,5 % — вилка, ради которой стоит открыть две БК; 4 % — редкость, за
+ * которой обычно стоит ошибка линии, и её видно через всю таблицу. */
+function profitCell(pct) {
+  const tier = pct >= 4 ? " p-high" : pct >= 1.5 ? " p-mid" : "";
+  return `<span class="profit${tier}">${pct.toFixed(2)} %</span>`;
 }
 
 // Все БК, участвующие в строке: у матча — список БК, у вилки — БК её плеч
@@ -478,22 +493,31 @@ function renderBkCounts(bookmakers) {
     return `${Math.round(s / 60)} мин назад`;
   };
   // Каждая БК обновляется в своём темпе (медленная не тормозит быструю).
-  // Возраст котировок показываем всегда, а у той, которую опрашивают прямо
-  // сейчас, добавляем пометку: обход БК идёт десятки секунд, и без неё
-  // непонятно, БК «зависла» или как раз качает линию. Выключенную в админке
-  // БК видно отдельно — иначе её исчезновение из шапки выглядит как сбой.
+  // У той, которую опрашивают прямо сейчас, добавляем пометку: обход БК
+  // идёт десятки секунд, и без неё непонятно, БК «зависла» или как раз
+  // качает линию. Выключенную в админке БК видно отдельно — иначе её
+  // исчезновение из шапки выглядит как сбой.
+  //
+  // Возраст пишем ТОЛЬКО у отставших: при обычном ходе дел свежи все
+  // восемь, и восемь одинаковых «только что» подряд занимали в шапке
+  // вторую строку, ничего не сообщая. Смысл этой подписи ровно один —
+  // заметить БК, которая отстала, поэтому такую ещё и подсвечиваем.
+  // Точный возраст всегда есть в подсказке под курсором.
   const chips = Object.entries(bookmakers || {}).map(([bk, v]) => {
     const cls = bkClass(bk);
     const count = typeof v === "number" ? v : v.count;
     const state = typeof v === "number" ? {} : v;
+    const stale = Boolean(state.count) && !state.off && state.age_sec >= 90;
     const note = state.off
       ? "выключена"
-      : [state.count ? age(state.age_sec) : "", state.busy ? "обновляется…" : ""]
+      : [stale ? age(state.age_sec) : "", state.busy ? "обновляется…" : ""]
         .filter(Boolean).join(", ");
-    const extra = [state.busy ? "busy" : "", state.off ? "off" : ""].join(" ").trim();
+    const extra = [state.busy ? "busy" : "", state.off ? "off" : "",
+                   stale ? "stale" : ""].join(" ").trim();
     // Почему БК на нуле — под курсором: подробности место в шапке
     // и так, а совсем без причины ноль выглядит как загадка.
-    const hint = state.note ? `${bk}: ${state.note}` : bk;
+    const hint = [bk, state.count ? age(state.age_sec) : "", state.note]
+      .filter(Boolean).join(" · ");
     return `<span class="bk-fresh ${cls} ${extra}" title="${escapeHtml(hint)}">
         <span class="dot"></span>${escapeHtml(bk)}
         <span class="bk-count">${count}</span>
@@ -630,7 +654,7 @@ function renderArbs() {
       <td data-label="Рынок">${escapeHtml(a.market)}</td>
       <td data-label="Исход 1"><span class="out">${escapeHtml(a.outcome1)}</span> <span class="coef">${a.k1_max.toFixed(2)}</span> ${bkChip(a.k1_bookmaker)}</td>
       <td data-label="Исход 2"><span class="out">${escapeHtml(a.outcome2)}</span> <span class="coef">${a.k2_max.toFixed(2)}</span> ${bkChip(a.k2_bookmaker)}</td>
-      <td data-label="Доходность"><span class="profit">${a.profit_pct.toFixed(2)} %</span></td>
+      <td data-label="Доходность">${profitCell(a.profit_pct)}</td>
       <td data-label="Живёт" class="num arb-age" data-first-seen="${a.first_seen || ""}">${fmtAge(a.first_seen)}</td>
       <td data-label="Ставка 1" class="stake">${fmtNum(st.stake1)}</td>
       <td data-label="Ставка 2" class="stake">${fmtNum(st.stake2)}</td>
@@ -683,7 +707,7 @@ function renderArbs1x2() {
       <td data-label="П1"><span class="out">П1</span> <span class="coef">${a.k1_max.toFixed(2)}</span> ${bkChip(a.k1_bookmaker)}</td>
       <td data-label="X"><span class="out">X</span> <span class="coef">${a.kx_max.toFixed(2)}</span> ${bkChip(a.kx_bookmaker)}</td>
       <td data-label="П2"><span class="out">П2</span> <span class="coef">${a.k2_max.toFixed(2)}</span> ${bkChip(a.k2_bookmaker)}</td>
-      <td data-label="Доходность"><span class="profit">${a.profit_pct.toFixed(2)} %</span></td>
+      <td data-label="Доходность">${profitCell(a.profit_pct)}</td>
       <td data-label="Живёт" class="num arb-age" data-first-seen="${a.first_seen || ""}">${fmtAge(a.first_seen)}</td>
       <td data-label="Ставка П1" class="stake">${fmtNum(st.stake1)}</td>
       <td data-label="Ставка X" class="stake">${fmtNum(st.stakex)}</td>

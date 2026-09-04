@@ -648,6 +648,7 @@ async function loadParsers() {
 const BK_CLASS = {
   "Fonbet": "bk-fonbet", "BetBoom": "bk-betboom", "Winline": "bk-winline",
   "Liga Stavok": "bk-liga", "Лига Ставок": "bk-liga", "bc.game": "bk-bcgame",
+  "Roobet": "bk-roobet",
   "LeonBet": "bk-leon", "Betcity": "bk-betcity", "Melbet": "bk-melbet",
 };
 const bkClass = (bk) => BK_CLASS[bk] || "bk-other";

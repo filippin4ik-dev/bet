@@ -21,9 +21,11 @@ from collections import defaultdict
 from typing import Iterable
 
 from .config import (ARB_MAX_PROFIT, ARB_REJECTED_MAX,
-                     ARB_UNMATCHED_CANDIDATES_MAX, BANKS,
+                     ARB_UNMATCHED_CANDIDATES_MAX, BANKS, BOOKMAKER_FAMILIES,
                      COMBAT_ROUNDS_DEFAULT_RULE, COMBAT_ROUNDS_RULE_LABELS,
-                     COMBAT_ROUNDS_RULES, FUZZY_NAME_MIN_SINGLE_RATIO,
+                     COMBAT_ROUNDS_RULES, FUZZY_NAME_CONTAINMENT,
+                     FUZZY_NAME_CONTAINMENT_RATIO, FUZZY_NAME_EXTRA_WORDS,
+                     FUZZY_NAME_MIN_SINGLE_RATIO, FUZZY_NAME_MIN_WORD,
                      FUZZY_NAME_SIM_THRESHOLD, START_TS_TOLERANCE,
                      START_TS_TOLERANCE_COMBAT, START_TS_TOLERANCE_RAPID)
 from .models import Arb, Arb3, KIND_LIVE, KIND_PREMATCH, MarketOdds
@@ -32,12 +34,36 @@ from .parsers.html_utils import (canon_market_key, display_market, key_scope,
 
 log = logging.getLogger("arbitrage")
 
+# Латиница, неотличимая на вид от кириллицы. БК смешивают раскладки прямо
+# посреди слова: в живой линии рядом лежат «Эльверсберг» русской «е» и
+# «Эльвeрsberg» латинской — на вид одно и то же, побуквенно разное.
+# Складываем латиницу в кириллицу: одинаково выглядящие строки становятся
+# одинаковыми и сравниваются как надо.
+#
+# Из-за складки все словари ниже тоже должны быть в сложенном виде («fc»
+# превращается в «fс» с кириллической «с»), поэтому они и строятся через
+# _fold, а не записаны буквами.
+_HOMOGLYPHS = str.maketrans("acekmopxy", "асекморху")
+
+
+def _fold(word: str) -> str:
+    return word.translate(_HOMOGLYPHS)
+
+
 # Слова-шумы в названиях команд, мешающие сопоставлению между БК.
 # ВАЖНО: маркер женской команды («ж»/«жен») НЕ шум — без него мужской
 # и женский матчи одинаковых клубов слились бы в одно событие.
-_NOISE = {"фк", "fc", "хк", "hc", "бк", "bc", "clubs", "клуб"}
+_NOISE = {_fold(w) for w in
+          ("фк", "fc", "хк", "hc", "бк", "bc", "clubs", "клуб")}
 # Женские маркеры приводим к одному виду: «(ж)», «жен», «women», «w»
-_FEMALE = {"ж", "жен", "женщины", "w", "women"}
+_FEMALE = {_fold(w) for w in ("ж", "жен", "женщины", "w", "women")}
+
+# Номер дубля/резерва: «Серро Портеньо II» и «Серро Портеньо 2» — одна и та
+# же команда, но побуквенно это разные строки, и на пороге похожести пара
+# не проходила. Больше четырёх составов у клуба не бывает, а «i» и «v»
+# по отдельности слишком часто оказываются инициалом или предлогом, чтобы
+# считать их римскими цифрами.
+_ROMAN = {"ii": "2", "iii": "3", "iv": "4"}
 
 # Заглушки вместо имён команд. БК ставит их, когда состав пары ещё не
 # объявлен, — и это НЕ имя: у Fonbet таких «событий» под сотню, у Melbet
@@ -45,11 +71,11 @@ _FEMALE = {"ж", "жен", "женщины", "w", "women"}
 # такой матч одной БК сопоставляется с каждым таким матчем другой, а это
 # разные матчи разных лиг: кэфы у них любые, и «вилки» из этой каши —
 # ложные. На живой линии шести БК так набиралось 82 вилки из 137.
-_PLACEHOLDER_TEAMS = {
+_PLACEHOLDER_TEAMS = {_fold(t) for t in (
     "хозяева", "хозяин", "гости", "гость",
     "1 команда", "2 команда", "1 команда я", "2 команда я",
     "home", "away", "1 team", "2 team", "team1", "team2",
-}
+)}
 
 
 # Имена команд повторяются в сотнях тысяч котировок (одно событие — десятки
@@ -59,14 +85,57 @@ _PLACEHOLDER_TEAMS = {
 # уникальных имён за сутки десятки тысяч.
 @functools.lru_cache(maxsize=200_000)
 def norm_team(name: str) -> str:
-    name = name.lower().replace("ё", "е")
+    name = name.lower().replace("ё", "е").translate(_HOMOGLYPHS)
     name = re.sub(r"[^\w\s]", " ", name)
     words = []
     for w in name.split():
         if not w or w in _NOISE:
             continue
-        words.append("ж" if w in _FEMALE else w)
+        if w in _FEMALE:
+            words.append("ж")
+            continue
+        words.append(_ROMAN.get(w, w))
     return " ".join(sorted(words))  # порядок слов тоже не важен
+
+
+# Один и тот же вид спорта под разными подписями. Корень делит линию на
+# части, внутри которых движок ищет похожие написания имён (см.
+# build_name_canon_map) и выбирает допуск времени старта (_start_tolerance):
+# пока подписи расходились, «ММА», «UFC» и «Единоборства/UFC» жили каждая
+# сама по себе, и на живой линии из 255 таких событий с другой БК склеились
+# единицы — при том что у «Единоборства» склеивается две трети. Тот же
+# счёт у гэльских игр («Гэльский футбол» и «Херлинг» — 146 событий, ноль
+# склеек) и у регби, где подпись отличается регистром и пробелом.
+#
+# Заметьте: сводить сюда РАЗНЫЕ виды спорта нельзя (падел и пиклбол
+# похожи, но это не одна игра) — общий корень нужен там, где БК спорят о
+# названии, а не о сути.
+#
+# Ключи приводятся той же складкой раскладок, что и сама подпись: иначе
+# латинская «ufc» из таблицы никогда не совпала бы с уже сложенной «ufс».
+_SPORT_ALIASES = {_fold(k): v for k, v in {
+    "мма": "единоборства",
+    "mma": "единоборства",
+    "ufc": "единоборства",
+    "единоборства/ufc": "единоборства",
+    "смешанные единоборства": "единоборства",
+    "бои без правил": "единоборства",
+    "кулачные бои": "единоборства",
+    "регби лига": "регби",
+    "регбилиг": "регби",
+    "регби юнион": "регби",
+    "регби союз": "регби",
+    "гэльский футбол": "гэльский спорт",
+    "гэльские виды спорта": "гэльский спорт",
+    "херлинг": "гэльский спорт",
+    "падел": "падел-теннис",
+    "падель": "падел-теннис",
+    "падел теннис": "падел-теннис",
+    "падель теннис": "падел-теннис",
+    # весь киберспорт BetBoom подписывает одним словом «Кибер» — то есть
+    # четыре тысячи её котировок не сравнивались с киберспортом остальных
+    "кибер": "киберспорт",
+}.items()}
 
 
 @functools.lru_cache(maxsize=20_000)
@@ -74,7 +143,23 @@ def sport_root(sport: str) -> str:
     """Корневой вид спорта из подписи котировки: «Футбол · Россия. РПЛ» →
     «футбол». Разные виды спорта не сопоставляются между собой, а лига в
     названии у каждой БК своя."""
-    return sport.split("·")[0].strip().lower().replace("ё", "е")
+    root = _fold(sport.split("·")[0].strip().lower().replace("ё", "е"))
+    return _SPORT_ALIASES.get(root, root)
+
+
+# Псевдо-лиги «Статистика»: в графе команды там стоит не команда, а ЧТО
+# считают — «Крылья Советов удары по воротам», «Южная Корея (ж) (3-х очк.
+# попадания)». Написания соседних таких «команд» отличаются на пару букв,
+# а означают РАЗНЫЕ рынки, и фаззи-склейка имён сводила их в одно событие:
+# на живой линии оттуда шли «вилки» по 30–66 % — то есть ставка на удары
+# ПО воротам против ставки на удары ОТ ворот, проигрышная обеими ногами.
+# Такие события сшиваются между БК только точным совпадением имён.
+_STATS_LEAGUE_RE = re.compile(r"(?i)статистик")
+
+
+def is_stats_league(sport: str) -> bool:
+    """Событие из псевдо-лиги «Статистика» (см. _STATS_LEAGUE_RE)?"""
+    return bool(_STATS_LEAGUE_RE.search(sport))
 
 
 def _named(team1: str, team2: str) -> bool:
@@ -135,6 +220,27 @@ def _fuzzy_window_cap(root: str) -> float:
 
 
 @functools.lru_cache(maxsize=200_000)
+def _squad_marks(name: str) -> frozenset[str]:
+    """Номера составов в имени: «Серро Портеньо 2» → {'2'}.
+
+    Дубль клуба играет в своей лиге и со своими соперниками — это ДРУГАЯ
+    команда, хотя от основы её отличает одна цифра. Побуквенно же они
+    почти неразличимы, а по словам дубль — это основа плюс одно слово, то
+    есть и порог похожести, и «вложение» сводят их в одно событие.
+
+    Годятся только ОТДЕЛЬНО стоящие цифры от 2 до 9. Числа подлиннее в
+    названии клуба означают не состав, а год основания («Шальке 04»,
+    «1899 Хоффенхайм») или возраст («Хеллеруп ИК U19»), и требовать их
+    совпадения нельзя: как раз эти написания у БК и разъезжаются. Единица
+    отдельно тоже не состав, а номер клуба в городе («1. ФК Магдебург»).
+    """
+    return frozenset(w for w in name.split() if w in _SQUAD_DIGITS)
+
+
+_SQUAD_DIGITS = frozenset("23456789")
+
+
+@functools.lru_cache(maxsize=200_000)
 def _name_sig(name: str) -> tuple[int, int]:
     """«Паспорт» имени для дешёвого предфильтра: длина и битовая маска
     встречающихся в нём символов.
@@ -166,6 +272,57 @@ def _may_match(a: tuple[int, int], b: tuple[int, int]) -> bool:
     fit = min(la - (mask_a & ~mask_b).bit_count(),
               lb - (mask_b & ~mask_a).bit_count())
     return 2 * fit >= FUZZY_NAME_MIN_SINGLE_RATIO * (la + lb)
+
+
+# Сколько слов максимум разбираем при поиске вложения. Имя из десятка слов —
+# это не команда, а строка мусора; полный перебор его подмножеств стоил бы
+# дороже всего остального вместе взятого.
+_CONTAIN_MAX_WORDS = 8
+
+
+@functools.lru_cache(maxsize=200_000)
+def _name_words(name: str) -> frozenset[str]:
+    return frozenset(name.split())
+
+
+def _containment_map(names: Iterable[str]) -> dict[str, str]:
+    """Соответствие «сокращённое имя → его полное написание» внутри одного
+    вида спорта, и только там, где полное написание ЕДИНСТВЕННОЕ.
+
+    Сокращения — отдельная от опечаток беда: «Сувон» и «Сувон Самсунг» это
+    одна команда, но побуквенная похожесть у них 0.55, то есть намного ниже
+    FUZZY_NAME_SIM_THRESHOLD, и событие между БК не сшивалось (README про
+    это прямо говорит как про известную потерю — такие вилки было видно
+    только на вкладке «Отсеянные»).
+
+    Единственность обязательна. «Манчестер» вкладывается и в «Манчестер
+    Юнайтед», и в «Манчестер Сити»; слив его с любым из них, мы через DSU
+    сделали бы Юнайтед и Сити ОДНОЙ командой — и получили бы вилку из цен
+    двух разных матчей. Поэтому имя, у которого продолжений больше одного,
+    из соответствия выбрасывается целиком.
+    """
+    names = {n for n in names if n}
+    out: dict[str, set[str]] = defaultdict(set)
+    for long in names:
+        words = _name_words(long)
+        n = len(words)
+        if n < 2 or n > _CONTAIN_MAX_WORDS:
+            continue
+        ordered = sorted(words)
+        # подмножества, отличающиеся на 1..FUZZY_NAME_EXTRA_WORDS слов
+        for drop in range(1, min(FUZZY_NAME_EXTRA_WORDS, n - 1) + 1):
+            for gone in itertools.combinations(ordered, drop):
+                short = " ".join(w for w in ordered if w not in gone)
+                if short in names and short != long:
+                    out[short].add(long)
+    return {short: next(iter(longs)) for short, longs in out.items()
+            if len(longs) == 1
+            and max(len(w) for w in _name_words(short)) >= FUZZY_NAME_MIN_WORD}
+
+
+def _contained(contain: dict[str, str], a: str, b: str) -> bool:
+    """Одно из имён — однозначное сокращение другого (см. _containment_map)."""
+    return contain.get(a) == b or contain.get(b) == a
 
 
 class TimeSplit:
@@ -254,6 +411,8 @@ def build_name_canon_map(odds: list[MarketOdds]) -> dict[str, str]:
             continue
         if not _named(o.team1, o.team2):
             continue
+        if is_stats_league(o.sport):
+            continue  # там имя — это рынок, а не команда (см. выше)
         t1, t2 = norm_team(o.team1), norm_team(o.team2)
         root = sport_root(o.sport)
         key = (root, frozenset((t1, t2)))
@@ -283,10 +442,23 @@ def build_name_canon_map(odds: list[MarketOdds]) -> dict[str, str]:
                 ev["books"], ev["lo"], ev["hi"], ev["tol"])
         (timed if ev["lo"] is not None else loose)[root].append(item)
 
+    # «Сокращённое имя → полное» считается ОДИН раз на вид спорта и по всем
+    # его именам сразу: единственность продолжения (см. _containment_map)
+    # можно проверить только зная их все, а не по отдельной паре событий.
+    contain_by_root: dict[str, dict[str, str]] = {}
+    if FUZZY_NAME_CONTAINMENT:
+        for root in set(timed) | set(loose):
+            names = {name
+                     for item in itertools.chain(timed.get(root, ()),
+                                                 loose.get(root, ()))
+                     for name in item[0]}
+            contain_by_root[root] = _containment_map(names)
+
     dsu = _UnionFind()
     for root, items in timed.items():
         items.sort(key=lambda x: x[4])  # по началу окна старта
         cap = _fuzzy_window_cap(root)
+        contain = contain_by_root.get(root)
         n = len(items)
         for i in range(n):
             hi_i, tol_i = items[i][5], items[i][6]
@@ -298,20 +470,42 @@ def build_name_canon_map(odds: list[MarketOdds]) -> dict[str, str]:
                     break
                 if gap > max(tol_i, items[j][6]):
                     continue
-                _merge_if_alike(dsu, items[i], items[j])
+                _merge_if_alike(dsu, items[i], items[j], contain)
 
     for root, items in loose.items():
         # бессрочных событий немного (только лайв и только там, где БК не
         # прислала время), поэтому сравнение со всем корнем не дорого
         rest = timed.get(root, ())
+        contain = contain_by_root.get(root)
         for i, item in enumerate(items):
             for other in itertools.chain(items[i + 1:], rest):
-                _merge_if_alike(dsu, item, other)
+                _merge_if_alike(dsu, item, other, contain)
 
     return {name: dsu.find(name) for name in dsu._parent}
 
 
-def _merge_if_alike(dsu: _UnionFind, a: tuple, b: tuple) -> None:
+def _team_ratio(x: str, y: str, sig_x: tuple, sig_y: tuple,
+                contain: dict[str, str]) -> float:
+    """Похожесть имён одной команды: побуквенная или «вложение».
+
+    Побуквенную считает difflib, но только если дешёвый предфильтр не
+    отверг пару сразу. Вложение (сокращённое имя против полного) difflib не
+    ловит в принципе — «сувон» против «самсунг сувон» это 0.55, — поэтому
+    оно проверяется отдельно и предфильтр на него не распространяется:
+    предфильтр оценивает как раз побуквенное сходство, которого здесь и не
+    должно быть.
+    """
+    if _squad_marks(x) != _squad_marks(y):
+        return -1.0    # основа и дубль — разные команды (см. _squad_marks)
+    if contain and _contained(contain, x, y):
+        return FUZZY_NAME_CONTAINMENT_RATIO
+    if not _may_match(sig_x, sig_y):
+        return -1.0
+    return difflib.SequenceMatcher(None, x, y).ratio()
+
+
+def _merge_if_alike(dsu: _UnionFind, a: tuple, b: tuple,
+                    contain: dict[str, str] | None = None) -> None:
     """Сливает имена двух пар команд, если они достаточно похожи.
 
     Решение о времени старта принимает вызывающий — здесь только имена."""
@@ -319,19 +513,17 @@ def _merge_if_alike(dsu: _UnionFind, a: tuple, b: tuple) -> None:
     pair_b, sig_b0, sig_b1, books_b = b[0], b[1], b[2], b[3]
     if len(books_a) == 1 and books_a == books_b:
         return  # оба написания только у ОДНОЙ БК — это разные её матчи
-    straight_ok = _may_match(sig_a0, sig_b0) and _may_match(sig_a1, sig_b1)
-    swapped_ok = _may_match(sig_a0, sig_b1) and _may_match(sig_a1, sig_b0)
+    contain = contain or {}
+    r00 = _team_ratio(pair_a[0], pair_b[0], sig_a0, sig_b0, contain)
+    r11 = _team_ratio(pair_a[1], pair_b[1], sig_a1, sig_b1, contain)
+    straight_ok = r00 >= 0 and r11 >= 0
+    r01 = _team_ratio(pair_a[0], pair_b[1], sig_a0, sig_b1, contain)
+    r10 = _team_ratio(pair_a[1], pair_b[0], sig_a1, sig_b0, contain)
+    swapped_ok = r01 >= 0 and r10 >= 0
     if not straight_ok and not swapped_ok:
         return  # ни в одной ориентации имена не дотянут до порога
-    straight = swapped = -1.0
-    if straight_ok:
-        r00 = difflib.SequenceMatcher(None, pair_a[0], pair_b[0]).ratio()
-        r11 = difflib.SequenceMatcher(None, pair_a[1], pair_b[1]).ratio()
-        straight = (r00 + r11) / 2
-    if swapped_ok:
-        r01 = difflib.SequenceMatcher(None, pair_a[0], pair_b[1]).ratio()
-        r10 = difflib.SequenceMatcher(None, pair_a[1], pair_b[0]).ratio()
-        swapped = (r01 + r10) / 2
+    straight = (r00 + r11) / 2 if straight_ok else -1.0
+    swapped = (r01 + r10) / 2 if swapped_ok else -1.0
     if straight >= swapped:
         avg, ra, rb = straight, r00, r11
         match0, match1 = pair_b[0], pair_b[1]
@@ -493,8 +685,13 @@ def _market_group(o: MarketOdds, name_map: dict[str, str] | None = None) -> str:
 # бокса начинается «после предыдущего») и у разных БК расходится на часы.
 # Для них действует большой допуск START_TS_TOLERANCE_COMBAT: одна пара
 # бойцов не дерётся дважды за день, ложной склейки не будет.
-_COMBAT_ROOTS = {"единоборства", "смешанные единоборства", "бокс", "mma",
-                 "ufc", "кикбоксинг", "муай-тай", "бои без правил"}
+#
+# Подписи «ММА», «UFC», «Смешанные единоборства» и «Бои без правил» сюда
+# больше не входят: их сводит к «единоборствам» ещё sport_root
+# (_SPORT_ALIASES). Раньше эти три подписи мимо набора и проходили — и
+# бои с них считались обычным, часовым допуском, хотя расходятся у БК как
+# раз на часы.
+_COMBAT_ROOTS = {"единоборства", "бокс", "кикбоксинг", "муай-тай"}
 
 # «Быстрые» турниры/лиги, где одна и та же пара соперников играет НЕСКОЛЬКО
 # матчей за вечер с интервалом в минуты — виртуальный футбол и похожие
@@ -502,7 +699,12 @@ _COMBAT_ROOTS = {"единоборства", "смешанные единобо�
 # турнира/чемпионата, например «FC 26. ... 2x3 мин.» или «H2H LIGA-3. 2x4
 # мин.». Для них НЕЛЬЗЯ расширять START_TS_TOLERANCE (см. ниже) — иначе два
 # разных матча той же пары в одну сессию склеятся в одну «вилку».
-_RAPID_FIXTURE_RE = re.compile(r"(?i)\d+\s*[xх]\s*\d+\s*мин")
+#
+# Длительность считается и по-английски: у крипто-БК на платформе BetBy
+# турниры подписаны латиницей («NBA 2K26 · H2H GG League (4x5 min)»), и на
+# «мин» они не отзывались — то есть самым опасным лигам, где одна пара
+# играет каждые десять минут, доставался обычный часовой допуск.
+_RAPID_FIXTURE_RE = re.compile(r"(?i)\d+\s*[xх]\s*\d+\s*(?:мин|min)")
 
 
 @functools.lru_cache(maxsize=20_000)
@@ -539,6 +741,31 @@ REJECT_UNMATCHED_TIME = "unmatched_time"
 # раундов, фора по раундам, чет/нечет раундов). Победитель боя от правил
 # подсчёта раундов не зависит и в список не входит.
 _ROUND_COUNT_MARKETS = ("total", "itotal", "hcap", "oddeven")
+
+
+def _families() -> dict[str, int]:
+    """Имя БК → номер её семьи-маркетмейкера (см. BOOKMAKER_FAMILIES)."""
+    out: dict[str, int] = {}
+    for i, group in enumerate(BOOKMAKER_FAMILIES):
+        for bk in group:
+            out[bk] = i
+    return out
+
+
+_FAMILY_OF = _families()
+
+
+def same_market_maker(bk1: str, bk2: str) -> bool:
+    """Считает ли этим двум БК линию один и тот же маркетмейкер.
+
+    Такая пара — не вилка, даже когда 1/К1 + 1/К2 < 1. Площадки одной
+    платформы берут кэфы из общего фида и отличаются только своей маржой:
+    прибыль между ними — это либо мгновенный рассинхрон фида, либо ошибка
+    разбора, а ставка ложится в ОДНУ книгу риска, где обе ноги режут
+    вместе. См. BOOKMAKER_FAMILIES.
+    """
+    a = _FAMILY_OF.get(bk1.strip().lower())
+    return a is not None and a == _FAMILY_OF.get(bk2.strip().lower())
 
 
 def _rounds_rule(bookmaker: str) -> str:
@@ -824,6 +1051,8 @@ def find_arbs(odds: Iterable[MarketOdds],
             for o2 in side_b.values():
                 if o1.bookmaker == o2.bookmaker:
                     continue  # обе стороны из одной БК — не вилка (маржа)
+                if same_market_maker(o1.bookmaker, o2.bookmaker):
+                    continue  # линию обеим считает одна платформа
                 margin = 1 / o1.odds + 1 / o2.odds
                 if margin >= 1:
                     continue
@@ -957,8 +1186,12 @@ def find_arbs_1x2(odds: Iterable[MarketOdds],
         # в двухисходном движке, показываем каждую валидную вилку
         for c1, cx, c2 in itertools.product(
                 *(list(d.values()) for d in legs)):
-            if len({c1.bookmaker, cx.bookmaker, c2.bookmaker}) < 2:
+            books = {c1.bookmaker, cx.bookmaker, c2.bookmaker}
+            if len(books) < 2:
                 continue  # все три ставки у одной БК — это её же маржа
+            if all(same_market_maker(x, y)
+                   for x, y in itertools.combinations(books, 2)):
+                continue  # линию всем трём плечам считает одна платформа
             margin = 1 / c1.odds + 1 / cx.odds + 1 / c2.odds
             if margin >= 1:
                 continue
