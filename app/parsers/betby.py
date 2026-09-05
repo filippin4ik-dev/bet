@@ -81,7 +81,8 @@ from urllib.parse import urlencode
 import requests.adapters
 
 from ..config import (BETBY_FULL_MARKETS, BETBY_FULL_MARKETS_BLOCK_PAUSE,
-                      BETBY_FULL_MARKETS_LIVE, BETBY_FULL_MARKETS_MAX,
+                      BETBY_FULL_MARKETS_BURST, BETBY_FULL_MARKETS_LIVE,
+                      BETBY_FULL_MARKETS_MAX,
                       BETBY_FULL_MARKETS_PER_CYCLE, BETBY_FULL_MARKETS_RATE,
                       BETBY_FULL_MARKETS_REFRESH, BETBY_FULL_MARKETS_TIMEOUT,
                       BETBY_FULL_MARKETS_WORKERS, HTTP_TIMEOUT)
@@ -97,27 +98,51 @@ _MARKETS_TTL = 3600.0
 
 
 class _Throttle:
-    """Общий для всех площадок BetBy темп запросов полной росписи.
+    """Общий для всех площадок BetBy лимит запросов полной росписи.
 
     Узел считает запросы на адрес, а не на бренд, поэтому ограничитель
-    один на процесс: запросы всех парсеров (и прематча, и лайва) выходят
-    не чаще BETBY_FULL_MARKETS_RATE в секунду. После ответа «access
-    blocked» ручка события не трогается BETBY_FULL_MARKETS_BLOCK_PAUSE
-    секунд — лишние запросы только продлевают блокировку.
+    один на процесс — для всех парсеров, прематча и лайва. Устроен как
+    «ведро с токенами» по образу лимита самого узла (см. BETBY_FULL_
+    MARKETS_RATE в config.py): в ведре BETBY_FULL_MARKETS_BURST токенов,
+    каждый запрос берёт один, пополняется ведро на BETBY_FULL_MARKETS_RATE
+    в секунду. Так первый обход после старта быстро набирает роспись
+    ближайших событий, а дальше запросы идут ровно тем темпом, который
+    узел прощает. После ответа «access blocked» ведро считается пустым, и
+    ручка события не трогается BETBY_FULL_MARKETS_BLOCK_PAUSE секунд —
+    лишние запросы только продлевают блокировку.
     """
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._next = 0.0
+        self.tokens = float(BETBY_FULL_MARKETS_BURST)
+        self._updated = time.monotonic()
         self.blocked_until = 0.0
 
-    def wait(self) -> None:
+    def _refill(self, now: float) -> None:
+        self.tokens = min(float(BETBY_FULL_MARKETS_BURST),
+                          self.tokens + (now - self._updated)
+                          * BETBY_FULL_MARKETS_RATE)
+        self._updated = now
+
+    def acquire(self, deadline: float) -> bool:
+        """Берёт токен на один запрос, при нужде дожидаясь его. False —
+        токен не успеет появиться до deadline (запрос не делаем)."""
         with self._lock:
             now = time.monotonic()
-            slot = max(now, self._next)
-            self._next = slot + 1.0 / max(BETBY_FULL_MARKETS_RATE, 0.1)
-        if slot > now:
-            time.sleep(slot - now)
+            self._refill(now)
+            if self.tokens >= 1:
+                self.tokens -= 1
+                delay = 0.0
+            else:
+                delay = (1 - self.tokens) / max(BETBY_FULL_MARKETS_RATE, 1e-6)
+                if now + delay > deadline:
+                    return False
+                # резервируем будущий токен: следующий ждёт уже за ним
+                self.tokens = 0.0
+                self._updated = now + delay
+        if delay > 0:
+            time.sleep(delay)
+        return True
 
     def blocked(self) -> bool:
         return time.monotonic() < self.blocked_until
@@ -126,9 +151,18 @@ class _Throttle:
         """Отмечает блокировку; True, если она только что началась."""
         with self._lock:
             fresh = not self.blocked()
-            self.blocked_until = time.monotonic() + \
-                BETBY_FULL_MARKETS_BLOCK_PAUSE
+            now = time.monotonic()
+            self.blocked_until = now + BETBY_FULL_MARKETS_BLOCK_PAUSE
+            self.tokens = 0.0
+            self._updated = now
             return fresh
+
+    def reset(self) -> None:
+        """Полное ведро и снятая блокировка (для тестов)."""
+        with self._lock:
+            self.tokens = float(BETBY_FULL_MARKETS_BURST)
+            self._updated = time.monotonic()
+            self.blocked_until = 0.0
 
 
 _THROTTLE = _Throttle()
@@ -386,8 +420,7 @@ class BetByParser(BaseParser):
                 eid, fp = item
                 if time.monotonic() > deadline or _THROTTLE.blocked():
                     return eid, fp, None
-                _THROTTLE.wait()
-                if _THROTTLE.blocked():
+                if not _THROTTLE.acquire(deadline) or _THROTTLE.blocked():
                     return eid, fp, None
                 markets, blocked = self._event_markets(brand, section, eid)
                 if blocked and _THROTTLE.block():

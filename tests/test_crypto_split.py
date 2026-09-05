@@ -224,9 +224,11 @@ def _k(**kv):
 def _fast_and_unblocked(monkeypatch):
     """Тесты не ждут общий темп запросов и не наследуют блокировку."""
     monkeypatch.setattr(betby, "BETBY_FULL_MARKETS_RATE", 10_000.0)
+    monkeypatch.setattr(betby, "BETBY_FULL_MARKETS_BURST", 10_000)
     monkeypatch.setattr(betby, "BETBY_FULL_MARKETS_PER_CYCLE", 1000)
-    betby._THROTTLE.blocked_until = 0.0
-    betby._THROTTLE._next = 0.0
+    betby._THROTTLE.reset()
+    yield
+    betby._THROTTLE.reset()
 
 
 def _parser_with_feed(full_by_event: dict, blocked: set | None = None):
@@ -365,3 +367,41 @@ def test_access_blocked_pauses_every_betby_site(monkeypatch):
 
 def test_live_goes_without_the_full_line_by_default():
     assert betby.BETBY_FULL_MARKETS_LIVE is False
+
+
+def test_throttle_is_a_token_bucket(monkeypatch):
+    """Ведро: BURST запросов уходят сразу, дальше — по RATE в секунду, а
+    запрос, токен для которого не успеет появиться до дедлайна, не делается."""
+    monkeypatch.setattr(betby, "BETBY_FULL_MARKETS_BURST", 3)
+    monkeypatch.setattr(betby, "BETBY_FULL_MARKETS_RATE", 1000.0)
+    th = betby._Throttle()
+    far = time.monotonic() + 60
+    assert all(th.acquire(far) for _ in range(3))
+    assert th.tokens < 1
+    # четвёртый ждёт пополнения (1 мс при 1000/с) — успевает
+    assert th.acquire(far)
+    monkeypatch.setattr(betby, "BETBY_FULL_MARKETS_RATE", 0.001)
+    th.tokens = 0.0
+    assert not th.acquire(time.monotonic() + 1), \
+        "токен появится через ~1000 с — до дедлайна не успеть"
+    th.block()
+    assert th.blocked() and th.tokens == 0.0
+    th.reset()
+    assert not th.blocked() and th.tokens == 3
+
+
+def test_full_markets_stop_at_the_cycle_deadline(monkeypatch):
+    """Когда ведро пусто, обход не ждёт токены дольше своего бюджета."""
+    monkeypatch.setattr(betby, "BETBY_FULL_MARKETS_MAX", 100)
+    monkeypatch.setattr(betby, "BETBY_FULL_MARKETS_TIMEOUT", 0.05)
+    monkeypatch.setattr(betby, "BETBY_FULL_MARKETS_RATE", 0.01)
+    betby._THROTTLE.tokens = 1.0
+    top = {"18": {"total=2.5": _k(**{"12": 1.85, "13": 1.95})}}
+    full = {"16": {"hcp=-1.5": _k(**{"1714": 2.3, "1715": 1.6})}}
+    p, calls = _parser_with_feed({"a": full, "b": full})
+    events = {"a": _event(top, NOW + 100), "b": _event(top, NOW + 200)}
+    t = time.monotonic()
+    p._merge_full_markets("br", "prematch", events, False, NOW)
+    assert time.monotonic() - t < 2
+    assert [c.rsplit("/", 1)[-1] for c in calls] == ["a"]
+    assert "16" in events["a"]["markets"] and events["b"]["markets"] == top
