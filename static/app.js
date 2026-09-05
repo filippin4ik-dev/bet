@@ -6,8 +6,31 @@
 const POLL_INTERVAL_MS = 10_000;      // прематч — раз в 10 с
 const LIVE_POLL_INTERVAL_MS = 5_000;  // лайв обновляем чаще
 
+/* Страница «Крипто» (/crypto) — та же разметка и тот же опрос, но в списке
+ * остаются только вилки, у которых ВСЕ плечи стоят на крипто-площадках
+ * (bc.game, Roobet, 1win, Stake — список присылает сервер вместе с
+ * валютой, см. CRYPTO_BOOKMAKERS). Настройки страниц хранятся раздельно:
+ * фильтр «Fonbet» с общей страницы на крипто-странице бессмыслен. */
+const CRYPTO_PAGE = location.pathname.replace(/\/+$/, "") === "/crypto";
+const STORE_KEY = CRYPTO_PAGE ? "arb-scanner-ui-crypto" : "arb-scanner-ui";
+document.documentElement.dataset.page = CRYPTO_PAGE ? "crypto" : "all";
+// пока сервер не ответил — набор по умолчанию, тот же, что в config.py
+let cryptoBks = new Set(["bc.game", "roobet", "1win", "stake"]);
+const isCryptoBk = (bk) => cryptoBks.has(String(bk || "").trim().toLowerCase());
+
 const els = {
   body: document.getElementById("arbs-body"),
+  cards: document.getElementById("arbs-cards"),
+  viewBar: document.getElementById("view-bar"),
+  layoutToggle: document.getElementById("layout-toggle"),
+  hideDetails: document.getElementById("hide-details"),
+  hideDetailsLabel: document.getElementById("hide-details-label"),
+  cardsSort: document.getElementById("cards-sort"),
+  cardsSortLabel: document.getElementById("cards-sort-label"),
+  pageNav: document.getElementById("page-nav"),
+  modeSub: document.getElementById("mode-sub"),
+  sourcesAll: document.getElementById("sources-all"),
+  sourcesCrypto: document.getElementById("sources-crypto"),
   body1x2: document.getElementById("arbs1x2-body"),
   rejectedBody: document.getElementById("rejected-body"),
   matchesBody: document.getElementById("matches-body"),
@@ -149,6 +172,8 @@ const BK_CLASS = {
   "Лига Ставок": "bk-liga",
   "bc.game": "bk-bcgame",      // фиолетовый
   "Roobet": "bk-roobet",       // бирюзовый
+  "1win": "bk-onewin",         // лаймовый
+  "Stake": "bk-stake",         // светло-синий
   "LeonBet": "bk-leon",        // жёлтый
   "Betcity": "bk-betcity",     // голубой (циан)
   "Melbet": "bk-melbet",       // розовый
@@ -164,6 +189,10 @@ const state = {
   sport: "",
   bookmaker: "",
   openMatch: null,              // id открытого матча (страница котировок)
+  // Вид списка вилок. Крипто-страница новая — там сразу карточки; на общей
+  // привычная таблица остаётся, пока её не переключат.
+  layout: CRYPTO_PAGE ? "cards" : "table",   // table | cards
+  hideDetails: false,           // режим скриншота: детали ставки размыты
   sort: {
     arbs: { key: "profit_pct", dir: -1 },
     live: { key: "profit_pct", dir: -1 },
@@ -188,12 +217,15 @@ const isLiveView = (v) => v === "live" || v === "live-matches" || v === "live1x2
 function loadState() {
   let saved = {};
   try {
-    saved = JSON.parse(localStorage.getItem("arb-scanner-ui") || "{}") || {};
+    saved = JSON.parse(localStorage.getItem(STORE_KEY) || "{}") || {};
   } catch (_) { /* повреждённое хранилище — игнорируем */ }
   Object.assign(state, saved, { sort: { ...state.sort, ...(saved.sort || {}) } });
   if (!VIEWS.includes(state.view)) state.view = "arbs";
+  if (!["table", "cards"].includes(state.layout)) state.layout = "table";
+  state.hideDetails = Boolean(state.hideDetails);
   state.openMatch = null; // страница котировок не восстанавливается
   els.search.value = state.search;
+  els.hideDetails.checked = state.hideDetails;
   const minProfit = localStorage.getItem("arb-scanner-minProfit");
   if (minProfit !== null) els.minProfit.value = minProfit;
   const bank = localStorage.getItem("arb-scanner-bank");
@@ -201,7 +233,7 @@ function loadState() {
 }
 
 function saveState() {
-  localStorage.setItem("arb-scanner-ui", JSON.stringify(state));
+  localStorage.setItem(STORE_KEY, JSON.stringify(state));
   localStorage.setItem("arb-scanner-minProfit", els.minProfit.value);
   localStorage.setItem("arb-scanner-bank", els.bank.value);
 }
@@ -306,6 +338,35 @@ function profitCell(pct) {
 function rowBookmakers(r) {
   if (r.bookmakers) return r.bookmakers;
   return [r.k1_bookmaker, r.kx_bookmaker, r.k2_bookmaker].filter(Boolean);
+}
+
+/* ---------- страница «Крипто»: только крипто-площадки ---------- */
+
+/* Вилка годится для крипто-страницы, когда КАЖДОЕ её плечо — на
+ * крипто-площадке: вилка «bc.game + Fonbet» здесь не нужна, за ней идут
+ * на общую страницу. */
+const allLegsCrypto = (a) => rowBookmakers(a).every(isCryptoBk);
+
+// Матч в списке крипто-страницы — если его котирует хотя бы одна
+// крипто-площадка; чужие БК из его строки убираются.
+function cryptoMatches(rows) {
+  return rows
+    .filter((m) => (m.bookmakers || []).some(isCryptoBk))
+    .map((m) => ({ ...m, bookmakers: (m.bookmakers || []).filter(isCryptoBk) }));
+}
+
+// Роспись матча: остаются кэфы только крипто-площадок (и рынки, где они есть)
+function cryptoDetail(d) {
+  if (!d) return d;
+  const markets = (d.markets || [])
+    .map((m) => ({ ...m, quotes: (m.quotes || []).filter((q) => isCryptoBk(q.bookmaker)) }))
+    .filter((m) => m.quotes.length);
+  return { ...d, markets, bookmakers: (d.bookmakers || []).filter(isCryptoBk) };
+}
+
+function cryptoBookmakerStatus(bookmakers) {
+  return Object.fromEntries(
+    Object.entries(bookmakers || {}).filter(([bk]) => isCryptoBk(bk)));
 }
 
 function applyFilters(rows) {
@@ -438,7 +499,7 @@ function renderMatches() {
 }
 
 function renderDetail() {
-  const d = lastDetail;
+  const d = CRYPTO_PAGE ? cryptoDetail(lastDetail) : lastDetail;
   if (!d) {
     els.detailTitle.textContent = "Матч не найден";
     els.detailMeta.textContent = "Возможно, матч уже начался или котировки устарели.";
@@ -613,6 +674,72 @@ function togglePin(key) {
   renderArbs();
 }
 
+/* ---------- карточки вилок ---------- */
+
+/* Размытие карточки поштучно: глазок на карточке перекрывает общий
+ * переключатель «Скрыть детали» — можно оставить резкой одну карточку из
+ * размытых или размыть одну среди резких. Живёт до перезагрузки. */
+const cardBlur = new Map();   // match_key → true (размыть) / false (показать)
+
+function cardIsBlurred(key) {
+  return cardBlur.has(key) ? cardBlur.get(key) : state.hideDetails;
+}
+
+function toggleCardBlur(key) {
+  cardBlur.set(key, !cardIsBlurred(key));
+  rerender();
+}
+
+const EMPTY_ARBS = CRYPTO_PAGE
+  ? "Крипто-вилок нет — ждём следующего обновления… (в вилку идут только " +
+    "пары bc.game/Roobet + 1win: площадки одной платформы между собой не сшиваются)"
+  : "Вилок нет — ждём следующего обновления…";
+
+/* Одна карточка вилки: двух- или трёхплечевой (legs — исход, кэф, БК,
+ * сумма). Классом sens помечено всё, что размывается в режиме скриншота;
+ * доходность, суммы плеч и прибыль остаются резкими. */
+function arbCard(a, legs, total, profit, pinned, btnClass) {
+  const key = escapeHtml(a.match_key);
+  const cls = ["arb-card"];
+  if (pinned) cls.push("pinned");
+  if (a.profit_pct > soundAlertProfit) cls.push("hot");
+  const blurred = cardIsBlurred(a.match_key);
+  // при общем размытии карточка либо «как все», либо явно показана
+  if (blurred) cls.push("blurred");
+  else if (state.hideDetails) cls.push("revealed");
+  const legHtml = (l) => `<div class="card-leg">
+      <div class="leg-top sens"><span class="out">${escapeHtml(l.out)}</span>
+        <span class="coef">${Number(l.k).toFixed(2)}</span></div>
+      <div class="leg-bk sens">${bkChip(l.bk)}</div>
+      <div class="leg-stake"><span class="leg-stake-label">Ставка</span>${fmtMoney(l.stake)}</div>
+    </div>`;
+  return `<article class="${cls.join(" ")}" data-key="${key}"
+      title="${pinned ? "Клик — открепить" : "Клик — закрепить вилку сверху"}">
+    <div class="card-head">
+      ${profitCell(a.profit_pct)}
+      <span class="sens">${startCell(a)}</span>
+      <span class="arb-age" data-first-seen="${a.first_seen || ""}">${fmtAge(a.first_seen)}</span>
+      <span class="card-tools">
+        <button type="button" class="pin-btn" data-key="${key}"
+          title="${pinned ? "Открепить" : "Закрепить сверху"}">📌</button>
+        <button type="button" class="eye-btn" data-key="${key}"
+          title="${blurred ? "Показать детали этой вилки" : "Скрыть детали этой вилки"}">${blurred ? "👁" : "🙈"}</button>
+      </span>
+    </div>
+    <div class="card-event sens">
+      <div class="card-sport">${escapeHtml(a.sport)}</div>
+      <div class="card-match">${escapeHtml(a.match)}</div>
+      <div class="card-market">${escapeHtml(a.market)}</div>
+    </div>
+    <div class="card-legs${legs.length === 3 ? " legs-3" : ""}">${legs.map(legHtml).join("")}</div>
+    <div class="card-foot">
+      <div class="card-sum"><span class="lbl">Сумма ставок</span><b>${fmtMoney(total)}</b></div>
+      <div class="card-profit"><span class="lbl">Прибыль</span><b>+${fmtMoney(profit)}</b></div>
+      <button type="button" class="${btnClass}" data-key="${key}">Поставить</button>
+    </div>
+  </article>`;
+}
+
 function renderArbs() {
   // Суммы плеч считаем от выбранного банка той же формулой, что на
   // сервере: она пропорциональна банку, поэтому одинаково верна и в
@@ -633,8 +760,21 @@ function renderArbs() {
   renderMeta(all.length, lastArbs.length);
 
   if (!all.length) {
-    els.body.innerHTML =
-      '<tr><td colspan="12" class="empty">Вилок нет — ждём следующего обновления…</td></tr>';
+    els.body.innerHTML = `<tr><td colspan="12" class="empty">${EMPTY_ARBS}</td></tr>`;
+    els.cards.innerHTML = `<div class="empty">${EMPTY_ARBS}</div>`;
+    return;
+  }
+
+  if (state.layout === "cards") {
+    els.cards.innerHTML = all.map((a) => {
+      const st = calcBetStakes(a.k1_max, a.k2_max, bank);
+      const legs = [
+        { out: a.outcome1, k: a.k1_max, bk: a.k1_bookmaker, stake: st.stake1 },
+        { out: a.outcome2, k: a.k2_max, bk: a.k2_bookmaker, stake: st.stake2 },
+      ];
+      return arbCard(a, legs, st.stake1 + st.stake2, st.profit,
+                     pinnedSet.has(a.match_key), "bet-btn");
+    }).join("");
     return;
   }
 
@@ -645,15 +785,16 @@ function renderArbs() {
     if (pinned) cls.push("pinned");
     if (a.profit_pct > soundAlertProfit) cls.push("hot");
     // data-label подписывает ячейку на телефоне, где таблица превращается
-    // в карточки (см. @media в style.css)
+    // в карточки (см. @media в style.css); sens — размывается в режиме
+    // «скрыть детали»
     return `<tr class="${cls.join(" ")}" data-key="${escapeHtml(a.match_key)}"
         title="${pinned ? "Клик — открепить" : "Клик — закрепить вилку сверху"}">
-      <td data-label="Начало">${pinned ? "📌 " : ""}${startCell(a)}</td>
-      <td data-label="Спорт" class="sport">${sportCell(a.sport)}</td>
-      <td data-label="Матч" class="match-name">${escapeHtml(a.match)}</td>
-      <td data-label="Рынок">${escapeHtml(a.market)}</td>
-      <td data-label="Исход 1"><span class="out">${escapeHtml(a.outcome1)}</span> <span class="coef">${a.k1_max.toFixed(2)}</span> ${bkChip(a.k1_bookmaker)}</td>
-      <td data-label="Исход 2"><span class="out">${escapeHtml(a.outcome2)}</span> <span class="coef">${a.k2_max.toFixed(2)}</span> ${bkChip(a.k2_bookmaker)}</td>
+      <td data-label="Начало" class="sens">${pinned ? "📌 " : ""}${startCell(a)}</td>
+      <td data-label="Спорт" class="sport sens">${sportCell(a.sport)}</td>
+      <td data-label="Матч" class="match-name sens">${escapeHtml(a.match)}</td>
+      <td data-label="Рынок" class="sens">${escapeHtml(a.market)}</td>
+      <td data-label="Исход 1" class="sens"><span class="out">${escapeHtml(a.outcome1)}</span> <span class="coef">${a.k1_max.toFixed(2)}</span> ${bkChip(a.k1_bookmaker)}</td>
+      <td data-label="Исход 2" class="sens"><span class="out">${escapeHtml(a.outcome2)}</span> <span class="coef">${a.k2_max.toFixed(2)}</span> ${bkChip(a.k2_bookmaker)}</td>
       <td data-label="Доходность">${profitCell(a.profit_pct)}</td>
       <td data-label="Живёт" class="num arb-age" data-first-seen="${a.first_seen || ""}">${fmtAge(a.first_seen)}</td>
       <td data-label="Ставка 1" class="stake">${fmtNum(st.stake1)}</td>
@@ -688,8 +829,26 @@ function renderArbs1x2() {
   renderMeta(all.length, lastArbs1x2.length);
 
   if (!all.length) {
-    els.body1x2.innerHTML =
-      '<tr><td colspan="13" class="empty">Вилок 1X2 нет — ждём следующего обновления…</td></tr>';
+    const msg = CRYPTO_PAGE
+      ? "Крипто-вилок 1X2 нет — ждём следующего обновления…"
+      : "Вилок 1X2 нет — ждём следующего обновления…";
+    els.body1x2.innerHTML = `<tr><td colspan="13" class="empty">${msg}</td></tr>`;
+    els.cards.innerHTML = `<div class="empty">${msg}</div>`;
+    return;
+  }
+
+  if (state.layout === "cards") {
+    els.cards.innerHTML = all.map((a) => {
+      const st = calcBetStakes3(a.k1_max, a.kx_max, a.k2_max, bank);
+      const legs = [
+        { out: "П1", k: a.k1_max, bk: a.k1_bookmaker, stake: st.stake1 },
+        { out: "X", k: a.kx_max, bk: a.kx_bookmaker, stake: st.stakex },
+        { out: "П2", k: a.k2_max, bk: a.k2_bookmaker, stake: st.stake2 },
+      ];
+      return arbCard({ ...a, market: "Исход (1X2)" }, legs,
+                     st.stake1 + st.stakex + st.stake2, st.profit,
+                     pinnedSet.has(a.match_key), "bet3-btn");
+    }).join("");
     return;
   }
 
@@ -701,12 +860,12 @@ function renderArbs1x2() {
     if (a.profit_pct > soundAlertProfit) cls.push("hot");
     return `<tr class="${cls.join(" ")}" data-key="${escapeHtml(a.match_key)}"
         title="${pinned ? "Клик — открепить" : "Клик — закрепить вилку сверху"}">
-      <td data-label="Начало">${pinned ? "📌 " : ""}${startCell(a)}</td>
-      <td data-label="Спорт" class="sport">${sportCell(a.sport)}</td>
-      <td data-label="Матч" class="match-name">${escapeHtml(a.match)}</td>
-      <td data-label="П1"><span class="out">П1</span> <span class="coef">${a.k1_max.toFixed(2)}</span> ${bkChip(a.k1_bookmaker)}</td>
-      <td data-label="X"><span class="out">X</span> <span class="coef">${a.kx_max.toFixed(2)}</span> ${bkChip(a.kx_bookmaker)}</td>
-      <td data-label="П2"><span class="out">П2</span> <span class="coef">${a.k2_max.toFixed(2)}</span> ${bkChip(a.k2_bookmaker)}</td>
+      <td data-label="Начало" class="sens">${pinned ? "📌 " : ""}${startCell(a)}</td>
+      <td data-label="Спорт" class="sport sens">${sportCell(a.sport)}</td>
+      <td data-label="Матч" class="match-name sens">${escapeHtml(a.match)}</td>
+      <td data-label="П1" class="sens"><span class="out">П1</span> <span class="coef">${a.k1_max.toFixed(2)}</span> ${bkChip(a.k1_bookmaker)}</td>
+      <td data-label="X" class="sens"><span class="out">X</span> <span class="coef">${a.kx_max.toFixed(2)}</span> ${bkChip(a.kx_bookmaker)}</td>
+      <td data-label="П2" class="sens"><span class="out">П2</span> <span class="coef">${a.k2_max.toFixed(2)}</span> ${bkChip(a.k2_bookmaker)}</td>
       <td data-label="Доходность">${profitCell(a.profit_pct)}</td>
       <td data-label="Живёт" class="num arb-age" data-first-seen="${a.first_seen || ""}">${fmtAge(a.first_seen)}</td>
       <td data-label="Ставка П1" class="stake">${fmtNum(st.stake1)}</td>
@@ -934,6 +1093,20 @@ els.body.addEventListener("click", (e) => {
   // клик по строке (не по кнопке/ссылке) — закрепить/открепить вилку
   const tr = e.target.closest("tr.arb-row");
   if (tr && !e.target.closest("a")) togglePin(tr.dataset.key);
+});
+
+// Карточки: контейнер общий для двух- и трёхисходных вилок, какие именно
+// сейчас показаны — говорит вкладка
+els.cards.addEventListener("click", (e) => {
+  const card = e.target.closest("article.arb-card");
+  if (!card) return;
+  const key = card.dataset.key;
+  if (e.target.closest("button.bet-btn")) return openBetModal(key);
+  if (e.target.closest("button.bet3-btn")) return openBet3Modal(key);
+  if (e.target.closest("button.eye-btn")) return toggleCardBlur(key);
+  if (e.target.closest("a")) return;
+  // клик по карточке (или по кнопке-булавке) — закрепить/открепить
+  return isArb1x2View(state.view) ? togglePin3(key) : togglePin(key);
 });
 
 els.betClose.addEventListener("click", closeBetModal);
@@ -1167,15 +1340,31 @@ document.querySelectorAll(".copy-btn3").forEach((btn) => {
 
 function updateVisibility() {
   const detailOpen = isMatchesView(state.view) && state.openMatch !== null;
+  const arbs = isArbView(state.view) || isArb1x2View(state.view);
+  const cards = arbs && state.layout === "cards";
   // В росписи одного матча фильтры и банк ни на что не влияют — панель
   // только сбивала бы с толку («Показано: 7454» над таблицей одного матча)
   els.filters.hidden = detailOpen;
   els.filtersToggle.hidden = detailOpen;
-  els.arbsCard.hidden = !isArbView(state.view);
-  els.arbs1x2Card.hidden = !isArb1x2View(state.view);
+  els.arbsCard.hidden = !isArbView(state.view) || cards;
+  els.arbs1x2Card.hidden = !isArb1x2View(state.view) || cards;
+  els.cards.hidden = !cards;
   els.rejectedCard.hidden = !isRejectedView(state.view);
   els.matchesCard.hidden = !isMatchesView(state.view) || detailOpen;
   els.matchDetail.hidden = !detailOpen;
+  // Вид списка и режим скриншота — только у вилок: у матчей и отсеянных
+  // карточек нет, а прятать там нечего
+  els.layoutToggle.hidden = !arbs;
+  els.hideDetailsLabel.hidden = !arbs;
+  // В таблице сортируют кликом по заголовку, у карточек заголовков нет
+  els.cardsSortLabel.hidden = !cards;
+  els.layoutToggle.querySelectorAll("button").forEach(
+    (b) => b.classList.toggle("active", b.dataset.layout === state.layout));
+  els.cardsSort.value = state.sort[state.view].key;
+  if (els.cardsSort.value !== state.sort[state.view].key) {
+    els.cardsSort.value = "profit_pct";
+  }
+  document.body.classList.toggle("hide-details", arbs && state.hideDetails);
 }
 
 function rerender() {
@@ -1214,6 +1403,18 @@ async function poll() {
     // Валюту сменили в админке — открытые вкладки подхватят её на этом же
     // опросе, перезагружать страницу не нужно.
     applyCurrency(data.currency);
+    if (data.currency && Array.isArray(data.currency.crypto_bookmakers)
+        && data.currency.crypto_bookmakers.length) {
+      cryptoBks = new Set(data.currency.crypto_bookmakers.map(
+        (b) => String(b).trim().toLowerCase()));
+    }
+    // Крипто-страница: остаются вилки, у которых все плечи на
+    // крипто-площадках, и в шапке — только эти площадки
+    if (CRYPTO_PAGE) {
+      data.arbs = (data.arbs || []).filter(allLegsCrypto);
+      data.arbs_1x2 = (data.arbs_1x2 || []).filter(allLegsCrypto);
+      data.bookmakers = cryptoBookmakerStatus(data.bookmakers);
+    }
     els.soundThreshold.textContent = soundAlertProfit;
     els.interval.textContent = data.scan_interval;
 
@@ -1264,6 +1465,7 @@ async function poll() {
       const resp = await fetch(`/api/rejected?min_profit=${minProfit}`);
       const data = await resp.json();
       lastRejected = [...(data.rejected || []), ...(data.rejected_1x2 || [])]
+        .filter((a) => !CRYPTO_PAGE || allLegsCrypto(a))
         .sort((a, b) => b.profit_pct - a.profit_pct);
     } catch (err) { /* статус уже показан выше */ }
   }
@@ -1276,7 +1478,7 @@ async function poll() {
       try {
         const resp = await fetch(url);
         const data = await resp.json();
-        lastMatches = data.matches;
+        lastMatches = CRYPTO_PAGE ? cryptoMatches(data.matches) : data.matches;
       } catch (err) { /* статус уже показан выше */ }
     }
   }
@@ -1371,6 +1573,33 @@ els.matchesBody.addEventListener("click", (e) => {
   if (row && row.dataset.id) openMatch(row.dataset.id);
 });
 
+els.layoutToggle.addEventListener("click", (e) => {
+  const btn = e.target.closest("button[data-layout]");
+  if (!btn || btn.dataset.layout === state.layout) return;
+  state.layout = btn.dataset.layout;
+  saveState();
+  rerender();
+});
+
+els.hideDetails.addEventListener("change", () => {
+  state.hideDetails = els.hideDetails.checked;
+  // общий переключатель важнее поштучных: сняли/поставили — все карточки
+  // снова «как все»
+  cardBlur.clear();
+  saveState();
+  rerender();
+});
+
+els.cardsSort.addEventListener("change", () => {
+  const key = els.cardsSort.value;
+  const sort = state.sort[state.view];
+  sort.key = key;
+  // доходность и свежесть — от большего к меньшему, остальное по алфавиту/времени
+  sort.dir = DESC_FIRST_KEYS.includes(key) || key === "first_seen" ? -1 : 1;
+  saveState();
+  rerender();
+});
+
 els.backBtn.addEventListener("click", closeMatch);
 
 // Сортировка по клику на заголовок. Слушаем на таблицах целиком, чтобы
@@ -1441,6 +1670,15 @@ document.addEventListener("visibilitychange", () => {
 loadState();
 els.viewTabs.querySelectorAll("button").forEach(
   (b) => b.classList.toggle("active", b.dataset.view === state.view));
+// Раздел сайта: подсветка в шапке, подзаголовок, состав источников в подвале
+els.pageNav.querySelectorAll("a").forEach((a) => a.classList.toggle(
+  "active", a.dataset.page === (CRYPTO_PAGE ? "crypto" : "all")));
+if (CRYPTO_PAGE) {
+  els.modeSub.textContent = "крипто-вилки";
+  document.title = "Крипто-вилки — bc.game, Roobet, 1win, Stake";
+  els.sourcesAll.hidden = true;
+  els.sourcesCrypto.hidden = false;
+}
 updateVisibility();
 
 loadProfile();

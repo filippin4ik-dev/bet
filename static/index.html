@@ -17,6 +17,13 @@
         Сканер <span class="accent">вилок</span>
         <span class="sub" id="mode-sub">прематч и лайв</span>
       </h1>
+      <!-- Две страницы одного сканера: все БК и только крипто-площадки
+           (bc.game, Roobet, 1win, Stake) — там вилки, обе ноги которых
+           ставятся в крипте. Активную подсвечивает app.js. -->
+      <nav class="page-nav" id="page-nav" aria-label="Разделы">
+        <a href="/" data-page="all">Все БК</a>
+        <a href="/crypto" data-page="crypto">₿ Крипто</a>
+      </nav>
       <div class="header-actions">
         <a href="/profile" class="ghost-btn profile-chip" id="profile-link" hidden
            title="Профиль: баланс и сохранённые ставки">
@@ -96,7 +103,35 @@
   </section>
 
   <main>
-    <div class="table-meta" id="table-meta"></div>
+    <!-- Вид списка вилок: таблица или карточки, и режим «для скриншота»:
+         детали ставки (матч, рынок, кэфы, БК) размываются, на виду
+         остаются только доходность и суммы. -->
+    <div class="view-bar" id="view-bar">
+      <div class="table-meta" id="table-meta"></div>
+      <div class="view-tools">
+        <label class="cards-sort-label" id="cards-sort-label">
+          Сортировка
+          <select id="cards-sort">
+            <option value="profit_pct">по доходности</option>
+            <option value="start_ts">по началу матча</option>
+            <option value="first_seen">по возрасту вилки</option>
+            <option value="sport">по виду спорта</option>
+            <option value="match">по матчу</option>
+          </select>
+        </label>
+        <label class="check hide-details-toggle" id="hide-details-label"
+               title="Размыть матч, рынок, кэфы и БК — для скриншота остаются доходность и суммы">
+          <input type="checkbox" id="hide-details">
+          🙈 Скрыть детали
+        </label>
+        <div class="layout-toggle" id="layout-toggle" role="group" aria-label="Вид списка">
+          <button type="button" data-layout="cards" title="Карточки">▦ Карточки</button>
+          <button type="button" data-layout="table" title="Таблица">☰ Таблица</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="arb-cards" id="arbs-cards" hidden></div>
 
     <div class="table-card" id="arbs-card">
       <table id="arbs-table">
@@ -377,16 +412,28 @@
     Прематч и лайв (лайв обновляется чаще) ·
     Каждая БК обновляется раз в <span id="interval">30</span> с
     <br>
-    Источники: <span class="bk-chip bk-winline">Winline</span>
-    <span class="bk-chip bk-betboom">BetBoom</span>
-    <span class="bk-chip bk-fonbet">Fonbet</span>
-    <span class="bk-chip bk-leon">LeonBet</span>
-    <span class="bk-chip bk-betcity">Betcity</span>
-    <span class="bk-chip bk-melbet">Melbet</span>
-    <span class="bk-chip bk-bcgame">bc.game</span>
-    <span class="bk-chip bk-roobet">Roobet</span>
-    <span class="muted" title="Лига Ставок включается резидентным прокси (LIGASTAVOK_PROXY)">
-      (+ Liga Stavok — по настройке)</span>
+    <span id="sources-all">
+      Источники: <span class="bk-chip bk-winline">Winline</span>
+      <span class="bk-chip bk-betboom">BetBoom</span>
+      <span class="bk-chip bk-fonbet">Fonbet</span>
+      <span class="bk-chip bk-leon">LeonBet</span>
+      <span class="bk-chip bk-betcity">Betcity</span>
+      <span class="bk-chip bk-melbet">Melbet</span>
+      <span class="bk-chip bk-bcgame">bc.game</span>
+      <span class="bk-chip bk-roobet">Roobet</span>
+      <span class="bk-chip bk-onewin">1win</span>
+      <span class="muted" title="Лига Ставок включается резидентным прокси (LIGASTAVOK_PROXY)">
+        (+ Liga Stavok — по настройке)</span>
+    </span>
+    <span id="sources-crypto" hidden>
+      Крипто-площадки: <span class="bk-chip bk-bcgame">bc.game</span>
+      <span class="bk-chip bk-roobet">Roobet</span>
+      <span class="bk-chip bk-onewin">1win</span>
+      <span class="bk-chip bk-stake bk-chip-off"
+            title="Stake закрыт Cloudflare для адресов дата-центров: линия подключится, как только у сервера появится резидентный прокси">Stake</span>
+      <span class="muted">· bc.game и Roobet — одна платформа BetBy, между собой в вилку не сшиваются;
+        1win — своя линия, с ними сшивается</span>
+    </span>
     · БК включаются, выключаются и перезапускаются в <a href="/admin">админке</a>
   </footer>
 
