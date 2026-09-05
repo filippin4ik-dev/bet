@@ -244,9 +244,14 @@ CBR_RATE_URL = os.getenv(
 # БК, которые считают деньги НЕ в рублях, а в долларах/USDT (крипто-БК).
 # Их баланс пересчитывается в рубли курсом, иначе лимит ставки по такой БК
 # оказался бы завышен почти в сто раз.
+#
+# Этот же список задаёт состав страницы «Крипто-вилки» (/crypto): там
+# показываются только вилки, у которых ВСЕ плечи стоят на этих БК. Stake
+# в списке заранее — парсера у него пока нет (сайт закрыт Cloudflare для
+# серверных адресов), но как появится, страница подхватит его сама.
 CRYPTO_BOOKMAKERS = tuple(
     b.strip().lower() for b in os.getenv("CRYPTO_BOOKMAKERS",
-                                         "bc.game,roobet").split(",")
+                                         "bc.game,roobet,1win,stake").split(",")
     if b.strip())
 
 # БК, стоящие на ОДНОЙ платформе-маркетмейкере: линию им считает один и тот
@@ -430,6 +435,55 @@ ROOBET_SPORTS_URL = os.getenv("ROOBET_SPORTS_URL",
 # годится вторым плечом против российских контор, и линии у них всё же
 # разные — Roobet показывает события, которых у bc.game нет.
 ROOBET_ENABLED = os.getenv("ROOBET_ENABLED", "1") not in (
+    "0", "false", "no", "")
+
+# ---- 1win: спортивный раздел на платформе top-parser ----
+# Сайт 1win (one-vv6574.com и прочие зеркала) сам линию не считает: его
+# «Betting_Frame» — виджет платформы top-parser, и данные идут напрямую с
+# её шлюза api-gateway.top-parser.com, БЕЗ авторизации (нужен лишь id
+# партнёра, он же externalPartnerId в адресе websocket'а):
+#   POST /matches/get-many        — список матчей (service: prematch|live)
+#   WS   /push-server-v2/         — socket.io: subscribe-match-odds → полная
+#                                   роспись рынков по списку matchId
+# REST отдаёт названия только по-английски, а websocket с Language=ru-RU —
+# по-русски: имена команд парсер берёт из русских подписей исходов рынка
+# результата, так они и сшиваются с остальными БК (см. parsers/onewin.py).
+# Проверено с адреса дата-центра 2026-09-05: и REST, и websocket отвечают.
+ONEWIN_API_HOST = os.getenv("ONEWIN_API_HOST",
+                            "https://api-gateway.top-parser.com").rstrip("/")
+ONEWIN_WS_URL = os.getenv(
+    "ONEWIN_WS_URL",
+    "wss://api-gateway.top-parser.com/push-server-v2/").strip()
+# id партнёра (площадки 1win) на платформе. Снят с запросов сайта; если
+# площадка его сменит — новый виден в адресе websocket'а во вкладке Network
+# (параметр externalPartnerId).
+ONEWIN_PARTNER_ID = os.getenv("ONEWIN_PARTNER_ID",
+                              "44ba10e5-7df2-47ab-a44d-dc93803c7a6e").strip()
+# Сайт площадки — Origin/Referer запросов и адрес ссылок на событие.
+# Зеркала у 1win меняются; актуальное пришлите переменной окружения.
+ONEWIN_SITE_HOST = os.getenv("ONEWIN_SITE_HOST",
+                             "https://one-vv6574.com").rstrip("/")
+# Язык websocket-подписок: русские названия команд и рынков.
+ONEWIN_LANG = os.getenv("ONEWIN_LANG", "ru-RU")
+# Сколько matchId подписывать одним сообщением. 200 сервер отдаёт за
+# секунду-две, на 500 молчит совсем (проверено на живом фиде).
+ONEWIN_WS_BATCH = int(os.getenv("ONEWIN_WS_BATCH", "150"))
+# Сколько секунд ждать снимки одной пачки, прежде чем идти дальше.
+ONEWIN_WS_BATCH_WAIT = float(os.getenv("ONEWIN_WS_BATCH_WAIT", "12"))
+# Сколько секунд максимум тратить на сбор всей линии за один обход.
+ONEWIN_FEED_TIMEOUT = float(os.getenv("ONEWIN_FEED_TIMEOUT", "120"))
+# Полная роспись (все рынки, ~30-100 КБ на событие) — только у событий,
+# которые начнутся раньше всех: по ним и ставят. Остальные идут с
+# «базовыми» группами рынков (исход, тотал, фора — ~7 КБ на событие).
+# 0 — везде только базовые рынки.
+ONEWIN_FULL_MARKETS_MAX = int(os.getenv("ONEWIN_FULL_MARKETS_MAX", "400"))
+# Минимальная пауза между обходами прематча, сек: линия в 2.5 тыс. событий
+# весит около 20 МБ за обход, гонять её чаще незачем.
+ONEWIN_MIN_REFRESH = float(os.getenv("ONEWIN_MIN_REFRESH", "60"))
+# Включена ли 1win — третья крипто-БК в наборе (деньги в долларах/крипте).
+# Линию считает своя платформа (не BetBy), поэтому с bc.game и Roobet она
+# сшивается в вилку — это и есть основной смысл страницы «Крипто-вилки».
+ONEWIN_ENABLED = os.getenv("ONEWIN_ENABLED", "1") not in (
     "0", "false", "no", "")
 
 # ---- LeonBet: публичный JSON-фид линии ----
