@@ -71,27 +71,28 @@ def test_no_1x2_arb_between_sites_of_one_platform():
     assert find_arbs_1x2(odds) == []
 
 
-def test_the_same_site_still_pairs_with_a_russian_bookmaker():
-    """Запрет касается только пары площадок платформы: против российской БК
-    каждая из них работает как обычно — ради этого они и подключены."""
-    odds = [total("Roobet", 2.30, 1.70), total("Fonbet", 1.80, 2.25)]
+def test_the_same_site_still_pairs_with_another_crypto_bookmaker():
+    """Запрет касается только пары площадок платформы: против крипто-БК с
+    другой платформы (1win) каждая из них работает как обычно — ради этого
+    они и подключены."""
+    odds = [total("Roobet", 2.30, 1.70), total("1win", 1.80, 2.25)]
     arbs = find_arbs(odds)
     assert len(arbs) == 1
-    assert {arbs[0].k1_bookmaker, arbs[0].k2_bookmaker} == {"Roobet", "Fonbet"}
+    assert {arbs[0].k1_bookmaker, arbs[0].k2_bookmaker} == {"Roobet", "1win"}
 
 
 def test_a_third_leg_outside_the_family_saves_a_1x2_arb():
     """В тройке 1X2 запрет срабатывает, только когда ВСЕ плечи из одной
-    платформы: пара «Roobet + Fonbet» вилку по-прежнему даёт."""
+    платформы: пара «Roobet + 1win» вилку по-прежнему даёт."""
     odds = [winner1x2("bc.game", 3.40, 3.60, 3.50),
             winner1x2("Roobet", 3.50, 3.70, 3.40),
-            winner1x2("Fonbet", 4.20, 4.30, 4.10)]
+            winner1x2("1win", 4.20, 4.30, 4.10)]
     arbs = find_arbs_1x2(odds)
     assert arbs, "вилка с участием сторонней БК должна остаться"
     for a in arbs:
         books = {a.k1_bookmaker, a.kx_bookmaker, a.k2_bookmaker}
-        assert "Fonbet" in books, ("вилка целиком внутри платформы не "
-                                   "должна показываться")
+        assert "1win" in books, ("вилка целиком внутри платформы не "
+                                 "должна показываться")
 
 
 # ---------- приметы площадки ----------

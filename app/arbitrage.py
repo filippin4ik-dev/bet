@@ -20,6 +20,7 @@ import re
 from collections import defaultdict
 from typing import Iterable
 
+from . import config
 from .config import (ARB_MAX_PROFIT, ARB_REJECTED_MAX,
                      ARB_UNMATCHED_CANDIDATES_MAX, BANKS, BOOKMAKER_FAMILIES,
                      COMBAT_ROUNDS_DEFAULT_RULE, COMBAT_ROUNDS_RULE_LABELS,
@@ -768,6 +769,26 @@ def same_market_maker(bk1: str, bk2: str) -> bool:
     return a is not None and a == _FAMILY_OF.get(bk2.strip().lower())
 
 
+def is_crypto(bookmaker: str) -> bool:
+    """Крипто-площадка ли это (деньги в USDT, см. CRYPTO_BOOKMAKERS)."""
+    return bookmaker.strip().lower() in config.CRYPTO_BOOKMAKERS
+
+
+def same_money(*bookmakers: str) -> bool:
+    """Лежат ли деньги всех этих БК в одном мире — крипто или рубли.
+
+    Вилка «крипто-БК + рублёвая БК» не ставится без перегона денег между
+    валютами (курс, комиссии, время), поэтому при CRYPTO_SEPARATE движок
+    такие пары не сшивает вовсе: крипто-вилки — только между крипто-БК
+    (страница /crypto), рублёвые — только между рублёвыми (главная).
+    CRYPTO_SEPARATE=0 — смешанные вилки разрешены.
+    """
+    if not config.CRYPTO_SEPARATE:
+        return True
+    kinds = {is_crypto(b) for b in bookmakers}
+    return len(kinds) <= 1
+
+
 def _rounds_rule(bookmaker: str) -> str:
     """По какому правилу БК засчитывает раунд (см. COMBAT_ROUNDS_RULES)."""
     return COMBAT_ROUNDS_RULES.get(bookmaker.strip().lower(),
@@ -1053,6 +1074,8 @@ def find_arbs(odds: Iterable[MarketOdds],
                     continue  # обе стороны из одной БК — не вилка (маржа)
                 if same_market_maker(o1.bookmaker, o2.bookmaker):
                     continue  # линию обеим считает одна платформа
+                if not same_money(o1.bookmaker, o2.bookmaker):
+                    continue  # крипто и рубли не смешиваем
                 margin = 1 / o1.odds + 1 / o2.odds
                 if margin >= 1:
                     continue
@@ -1192,6 +1215,8 @@ def find_arbs_1x2(odds: Iterable[MarketOdds],
             if all(same_market_maker(x, y)
                    for x, y in itertools.combinations(books, 2)):
                 continue  # линию всем трём плечам считает одна платформа
+            if not same_money(*books):
+                continue  # крипто и рубли не смешиваем
             margin = 1 / c1.odds + 1 / cx.odds + 1 / c2.odds
             if margin >= 1:
                 continue

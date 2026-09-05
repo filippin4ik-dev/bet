@@ -160,15 +160,17 @@ def test_draw_no_bet_does_not_pair_with_a_plain_winner():
     движка отдельный ключ доходит целым — канон рынков сводит формы одного
     ключа к одной, и «winner_dnb» легко было бы срезать до «winner»."""
     dnb = _parse({"11": {"": _k(**{"4": 2.1, "5": 1.7})}})[0]
+    # соперник — крипто-БК с другой платформы: рублёвые с крипто движок не
+    # смешивает вовсе (CRYPTO_SEPARATE), и проверка ключа была бы слепой
     rival = MarketOdds(
-        bookmaker="Winline", sport="Футбол", team1="Спартак", team2="Зенит",
+        bookmaker="1win", sport="Футбол", team1="Спартак", team2="Зенит",
         market="Победитель", market_key="winner", outcome1="П1",
         outcome2="П2", k1=1.7, k2=2.1, kind=KIND_PREMATCH,
         start_ts=dnb.start_ts, start_time=dnb.start_time)
     assert dnb.market_key == "winner_dnb"
     assert find_arbs([dnb, rival]) == []
     # а между собой такие рынки сшиваются: вилка по ним настоящая
-    twin = replace(rival, bookmaker="Fonbet", market_key="winner_dnb")
+    twin = replace(rival, market_key="winner_dnb")
     assert len(find_arbs([dnb, twin])) == 1
 
 

@@ -4,17 +4,20 @@
 """
 import logging
 
-from ..config import (BCGAME_ENABLED, BOOKMAKERS_ONLY, LIGASTAVOK_ENABLED,
-                      MELBET_ENABLED, ONEWIN_ENABLED, ROOBET_ENABLED)
+from ..config import (BCGAME_ENABLED, BOOKMAKERS_ONLY, FIVEHUNDRED_ENABLED,
+                      LIGASTAVOK_ENABLED, MELBET_ENABLED, ONEWIN_ENABLED,
+                      RAINBET_ENABLED, ROOBET_ENABLED)
 from .base import BaseParser
 from .bcgame import BCGameParser
 from .betboom import BetBoomParser
 from .betcity import BetcityParser
+from .fivehundred import FiveHundredParser
 from .fonbet import FonbetParser
 from .leon import LeonParser
 from .ligastavok import LigaStavokParser
 from .melbet import MelbetParser
 from .onewin import OneWinParser
+from .rainbet import RainbetParser
 from .roobet import RoobetParser
 from .winline import WinlineParser
 
@@ -31,6 +34,8 @@ BOOKMAKERS = [b for b in
               (["bc.game"] if BCGAME_ENABLED else []) +
               (["Roobet"] if ROOBET_ENABLED else []) +
               (["1win"] if ONEWIN_ENABLED else []) +
+              (["Rainbet"] if RAINBET_ENABLED else []) +
+              (["500.casino"] if FIVEHUNDRED_ENABLED else []) +
               (["Liga Stavok"] if LIGASTAVOK_ENABLED else [])
               if _wanted(b)]
 
@@ -39,11 +44,14 @@ _bc_notice_shown = False
 _mb_notice_shown = False
 _rb_notice_shown = False
 _ow_notice_shown = False
+_rain_notice_shown = False
+_fh_notice_shown = False
 
 
 def get_parsers() -> list[BaseParser]:
     global _ls_notice_shown, _bc_notice_shown, _mb_notice_shown
-    global _rb_notice_shown, _ow_notice_shown
+    global _rb_notice_shown, _ow_notice_shown, _rain_notice_shown
+    global _fh_notice_shown
     parsers: list[BaseParser] = [WinlineParser(), BetBoomParser(),
                                  FonbetParser(), LeonParser(),
                                  BetcityParser()]
@@ -80,6 +88,22 @@ def get_parsers() -> list[BaseParser]:
             "Roobet на странице «Крипто-вилки». ONEWIN_ENABLED=1 — "
             "включить обратно.")
         _ow_notice_shown = True
+    if RAINBET_ENABLED:
+        parsers.append(RainbetParser())
+    elif not _rain_notice_shown:
+        log.info(
+            "Rainbet отключена (RAINBET_ENABLED=0): крипто-БК на платформе "
+            "BetBy (в вилку сшивается с 1win). RAINBET_ENABLED=1 — включить "
+            "обратно.")
+        _rain_notice_shown = True
+    if FIVEHUNDRED_ENABLED:
+        parsers.append(FiveHundredParser())
+    elif not _fh_notice_shown:
+        log.info(
+            "500.casino отключена (FIVEHUNDRED_ENABLED=0): крипто-БК на "
+            "платформе BetBy (в вилку сшивается с 1win). "
+            "FIVEHUNDRED_ENABLED=1 — включить обратно.")
+        _fh_notice_shown = True
     if LIGASTAVOK_ENABLED:
         parsers.append(LigaStavokParser())
     elif not _ls_notice_shown:

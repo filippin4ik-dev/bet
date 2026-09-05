@@ -392,7 +392,9 @@ def index():
 def crypto_index():
     """Страница «Крипто-вилки»: та же разметка, режим выбирает app.js по
     адресу — в списке остаются вилки, у которых все плечи стоят на
-    крипто-площадках (CRYPTO_BOOKMAKERS: bc.game, Roobet, 1win, Stake)."""
+    крипто-площадках (CRYPTO_BOOKMAKERS: 1win, bc.game, Roobet, Rainbet,
+    500.casino, Stake). Главная — зеркально, только рублёвые БК: миры не
+    смешиваются (CRYPTO_SEPARATE, см. arbitrage.same_money)."""
     return FileResponse(STATIC_DIR / "index.html",
                         headers={"Cache-Control": "no-cache"})
 

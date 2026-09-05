@@ -250,28 +250,40 @@ CBR_RATE_URL = os.getenv(
 # в списке заранее — парсера у него пока нет (сайт закрыт Cloudflare для
 # серверных адресов), но как появится, страница подхватит его сама.
 CRYPTO_BOOKMAKERS = tuple(
-    b.strip().lower() for b in os.getenv("CRYPTO_BOOKMAKERS",
-                                         "bc.game,roobet,1win,stake").split(",")
+    b.strip().lower() for b in os.getenv(
+        "CRYPTO_BOOKMAKERS",
+        "bc.game,roobet,1win,rainbet,500.casino,stake").split(",")
     if b.strip())
+
+# Крипто-площадки — отдельный мир: деньги на них лежат в USDT, и вилку
+# «крипто-БК + рублёвая БК» не поставить, не гоняя деньги между валютами
+# (курс, комиссии, время). Поэтому по умолчанию движок вилок крипто-БК с
+# рублёвыми НЕ сшивает: крипто-вилки живут на странице /crypto (все плечи
+# — на CRYPTO_BOOKMAKERS), рублёвые — на главной, и ни одна вилка не
+# смешивает два мира. CRYPTO_SEPARATE=0 — вернуть смешанные вилки (на
+# главной они тогда появятся снова).
+CRYPTO_SEPARATE = os.getenv("CRYPTO_SEPARATE", "1") not in (
+    "0", "false", "no", "")
 
 # БК, стоящие на ОДНОЙ платформе-маркетмейкере: линию им считает один и тот
 # же поставщик, а сайты только накидывают свою маржу поверх. Между такими
 # площадками вилки не бывает — а если арифметически и получится, ставить по
 # ней нельзя: обе ноги лежат в одной книге риска, их вместе и урежут.
 #
-# bc.game и Roobet работают на BetBy (провайдер sptpub) и берут линию из
-# одного фида. Сверено на живой линии: из 16 740 общих двухисходных рынков
-# лучшая пара кэфов не дала прибыли НИ РАЗУ, а 70 % кэфов совпали до
-# сотой — расходятся они только маржой бренда (bc.game выше в 11 596
-# исходах из 14 690 расхождений). Как отдельные БК они полезны — каждая
-# годится вторым плечом против российских контор, — но друг с другом
-# сшиваться не должны.
+# bc.game, Roobet, Rainbet и 500.casino работают на BetBy (провайдер
+# sptpub) и берут линию из одного фида. Сверено на живой линии bc.game и
+# Roobet: из 16 740 общих двухисходных рынков лучшая пара кэфов не дала
+# прибыли НИ РАЗУ, а 70 % кэфов совпали до сотой — расходятся они только
+# маржой бренда (bc.game выше в 11 596 исходах из 14 690 расхождений). Как
+# отдельные БК они полезны — каждая годится вторым плечом против 1win, —
+# но друг с другом сшиваться не должны.
 #
 # Формат: группы через «;», внутри группы имена БК через запятую.
-# Например: ROO916... BOOKMAKER_FAMILIES="bc.game,roobet;melbet,betwinner".
+# Например: BOOKMAKER_FAMILIES="bc.game,roobet;melbet,betwinner".
 BOOKMAKER_FAMILIES = tuple(
     tuple(b.strip().lower() for b in group.split(",") if b.strip())
-    for group in os.getenv("BOOKMAKER_FAMILIES", "bc.game,roobet").split(";")
+    for group in os.getenv("BOOKMAKER_FAMILIES",
+                           "bc.game,roobet,rainbet,500.casino").split(";")
     if group.strip())
 
 # Файл базы данных SQLite (история найденных вилок)
@@ -382,6 +394,64 @@ BETBOOM_LIVE_FEED_TIMEOUT = float(os.getenv("BETBOOM_LIVE_FEED_TIMEOUT", "30"))
 BETBOOM_FULL_MARKETS = os.getenv("BETBOOM_FULL_MARKETS", "1") not in (
     "0", "false", "no")
 
+# ---- Платформа BetBy (bc.game, Roobet, Rainbet, 500.casino): полная роспись ----
+# Общий фид BetBy отдаёт по событию только «верхушку» линии — с десяток
+# рынков (исход, основной тотал, основная фора). Полная роспись лежит в
+# отдельной ручке на событие:
+#   /api/v4/{prematch|live}/brand/<brand>/event/<lang>/<eventId>
+# На живой линии bc.game она давала в 6 раз больше рынков (300 ближайших
+# событий: 2 980 вариантов в общем фиде против 17 735 в полной росписи; у
+# топ-матча футбола — 459 против 28), ответ ~9 КБ и 0.15 c. Именно
+# лестницы тоталов/фор и рынки таймов дают большую часть вилок, поэтому по
+# умолчанию полная роспись включена у всех площадок BetBy. 0 — только
+# верхушка из общего фида (быстро, мало рынков).
+BETBY_FULL_MARKETS = os.getenv("BETBY_FULL_MARKETS", "1") not in (
+    "0", "false", "no")
+# ВАЖНО: ручка события защищена лимитом на адрес. Проверено на живом узле:
+# ~1 800 запросов за минуту (полторы тысячи событий bc.game одним махом и
+# следом ещё две площадки) — и узел на 6 минут отвечает на неё
+# `{"error": "access blocked"}` (503) всем брендам сразу; общий фид и
+# справочник при этом работают. Поэтому запросы росписи идут через ОБЩИЙ
+# для всех площадок BetBy ограничитель темпа (адрес-то у сервера один),
+# порциями за обход, а при блокировке парсер сам делает паузу.
+#
+# У скольких ближайших событий (с рынками в общем фиде) держать полную
+# роспись. У событий без единого рынка в общем фиде полная роспись тоже
+# пуста — их парсер не спрашивает. 600 — столько же ближайших событий с
+# полной росписью держит 1win (ONEWIN_FULL_MARKETS_MAX), а вилка
+# крипто-страницы — это всегда пара «1win + площадка BetBy».
+BETBY_FULL_MARKETS_MAX = int(os.getenv("BETBY_FULL_MARKETS_MAX", "600"))
+# Общий темп запросов росписи всех площадок BetBy, запросов в секунду.
+# 8/с — это 480 в минуту, почти вчетверо ниже порога блокировки.
+BETBY_FULL_MARKETS_RATE = float(os.getenv("BETBY_FULL_MARKETS_RATE", "8"))
+# Сколько запросов росписи максимум делать за один обход одной площадки:
+# кэш наполняется за несколько обходов, зато ни один обход не растягивается
+# и не выедает общий темп у соседних площадок.
+BETBY_FULL_MARKETS_PER_CYCLE = int(os.getenv("BETBY_FULL_MARKETS_PER_CYCLE",
+                                             "150"))
+# Сколько запросов полной росписи слать параллельно (пул потоков).
+BETBY_FULL_MARKETS_WORKERS = int(os.getenv("BETBY_FULL_MARKETS_WORKERS", "4"))
+# Сколько секунд максимум тратить на полную роспись за один обход.
+BETBY_FULL_MARKETS_TIMEOUT = float(os.getenv("BETBY_FULL_MARKETS_TIMEOUT",
+                                             "40"))
+# Полная роспись события кэшируется и перезапрашивается, только когда в
+# общем фиде у события сдвинулся хоть один кэф верхушки (основная линия
+# двигается первой) — или прошло больше этого числа секунд с последнего
+# запроса. Так обход стоит не сотни запросов, а десятки.
+BETBY_FULL_MARKETS_REFRESH = float(os.getenv("BETBY_FULL_MARKETS_REFRESH",
+                                             "600"))
+# Сколько секунд не трогать ручку события после ответа «access blocked»
+# (блокировка держится около шести минут; лишние запросы её продлевают).
+BETBY_FULL_MARKETS_BLOCK_PAUSE = float(os.getenv(
+    "BETBY_FULL_MARKETS_BLOCK_PAUSE", "420"))
+# Полная роспись в ЛАЙВЕ: кэфы там двигаются каждые секунды, отпечаток
+# верхушки меняется у всех событий сразу, и каждый обход (раз в 12 c)
+# стоил бы сотни запросов на площадку — лимит узла это не переживёт. По
+# умолчанию лайв идёт с верхушкой из общего фида (исход, основной тотал,
+# фора); 1 — включить роспись и в лайве (имеет смысл с одной площадкой).
+BETBY_FULL_MARKETS_LIVE = os.getenv("BETBY_FULL_MARKETS_LIVE", "0") in (
+    "1", "true", "yes")
+
 # ---- bc.game: публичный REST-фид BetBy (sptpub) ----
 # bc.game использует спортивную платформу BetBy. Российское «зеркало» фида
 # отдаёт линию без авторизации. Хост/brand периодически меняются: brand_id
@@ -399,13 +469,13 @@ BCGAME_LANG = os.getenv("BCGAME_LANG", "ru")
 # Сайт площадки: Origin/Referer запросов к фиду и адрес ссылок на событие.
 BCGAME_SITE_HOST = os.getenv("BCGAME_SITE_HOST",
                              "https://bc.game").rstrip("/")
-# Включена ли bc.game — единственная крипто-БК в наборе (платформа BetBy,
-# деньги в USDT). Её линия сшивается с российскими БК по русским
-# названиям команд из того же фида, и с разбором рынка «Исход 1X2»
-# (см. app/parsers/bcgame.py) она даёт вилки по самому частому рынку
-# футбола и хоккея. Названия у зарубежной площадки всё же расходятся с БК
-# РФ чаще прочих, поэтому спорные склейки уходят на вкладку «Отсеянные», а
-# саму БК можно выключить в админке или переменной BCGAME_ENABLED=0.
+# Включена ли bc.game — первая крипто-БК в наборе (платформа BetBy, деньги
+# в USDT). Её линия сшивается с 1win по русским названиям команд из того
+# же фида, и с разбором рынка «Исход 1X2» (см. app/parsers/betby.py) она
+# даёт вилки по самому частому рынку футбола и хоккея. Названия у
+# зарубежной площадки расходятся с чужими чаще прочих, поэтому спорные
+# склейки уходят на вкладку «Отсеянные», а саму БК можно выключить в
+# админке или переменной BCGAME_ENABLED=0.
 BCGAME_ENABLED = os.getenv("BCGAME_ENABLED", "1") not in (
     "0", "false", "no", "")
 
@@ -432,9 +502,52 @@ ROOBET_SPORTS_URL = os.getenv("ROOBET_SPORTS_URL",
                               "https://roo916.com/sports").rstrip("/")
 # Включена ли Roobet. Вторая крипто-БК на той же платформе, что и bc.game:
 # между собой они в вилку НЕ сшиваются (см. BOOKMAKER_FAMILIES), но каждая
-# годится вторым плечом против российских контор, и линии у них всё же
-# разные — Roobet показывает события, которых у bc.game нет.
+# годится вторым плечом против 1win, и линии у них всё же разные — Roobet
+# показывает события, которых у bc.game нет.
 ROOBET_ENABLED = os.getenv("ROOBET_ENABLED", "1") not in (
+    "0", "false", "no", "")
+
+# ---- Rainbet (rainbet.com): тот же фид BetBy, свой бренд ----
+# Сайт и его API (services.rainbet.com) закрыты Cloudflare для адресов
+# дата-центров («Checking your browser…»), собственный узел виджета
+# rainbet.sportsbookcdn.com линию не отдаёт (404) — а общий узел платформы
+# отдаёт бренд Rainbet спокойно, как и остальных (проверено 2026-09-05:
+# ~2 200 матчей прематча, ~230 лайв). brand_id снят с бандла сайта
+# (initialize({brand_id: …}) в чанке страницы /sportsbook).
+RAINBET_API_HOST = os.getenv("RAINBET_API_HOST",
+                             "https://cocoesports.com").rstrip("/")
+RAINBET_BRAND_ID = os.getenv("RAINBET_BRAND_ID", "2374656571012681728")
+RAINBET_LANG = os.getenv("RAINBET_LANG", "ru")
+RAINBET_SITE_HOST = os.getenv("RAINBET_SITE_HOST",
+                              "https://rainbet.com").rstrip("/")
+# Страница спортивного раздела (виджет BetBy живёт по адресу /ru/sportsbook).
+RAINBET_SPORTS_URL = os.getenv("RAINBET_SPORTS_URL",
+                               "https://rainbet.com/ru/sportsbook").rstrip("/")
+# Включена ли Rainbet — крипто-БК на платформе BetBy: с bc.game, Roobet и
+# 500.casino в вилку не сшивается (BOOKMAKER_FAMILIES), с 1win — сшивается.
+RAINBET_ENABLED = os.getenv("RAINBET_ENABLED", "1") not in (
+    "0", "false", "no", "")
+
+# ---- 500.casino (500.casino/ru/sports): тот же фид BetBy, свой бренд ----
+# Площадка сама отдаёт brand_id BetBy в JSON-ручке /api/boot
+# (siteSettings.betbyBrandId) — оттуда парсер его и обновляет; ручка
+# отвечает JSON только браузеру с пройденной Cloudflare-проверкой, поэтому
+# при неудаче берётся значение отсюда. Свой узел виджета
+# csgo500.sptpub.com на адреса дата-центров отвечает «access blocked»,
+# общий узел платформы отдаёт бренд без вопросов (проверено 2026-09-05:
+# ~2 100 матчей прематча, ~260 лайв).
+FIVEHUNDRED_API_HOST = os.getenv("FIVEHUNDRED_API_HOST",
+                                 "https://cocoesports.com").rstrip("/")
+FIVEHUNDRED_BRAND_ID = os.getenv("FIVEHUNDRED_BRAND_ID", "2195256717934206976")
+FIVEHUNDRED_BOOT_URL = os.getenv("FIVEHUNDRED_BOOT_URL",
+                                 "https://500.casino/api/boot").strip()
+FIVEHUNDRED_LANG = os.getenv("FIVEHUNDRED_LANG", "ru")
+FIVEHUNDRED_SITE_HOST = os.getenv("FIVEHUNDRED_SITE_HOST",
+                                  "https://500.casino").rstrip("/")
+FIVEHUNDRED_SPORTS_URL = os.getenv("FIVEHUNDRED_SPORTS_URL",
+                                   "https://500.casino/ru/sports").rstrip("/")
+# Включена ли 500.casino — ещё одна крипто-БК на BetBy (см. Rainbet выше).
+FIVEHUNDRED_ENABLED = os.getenv("FIVEHUNDRED_ENABLED", "1") not in (
     "0", "false", "no", "")
 
 # ---- 1win: спортивный раздел на платформе top-parser ----
@@ -478,8 +591,12 @@ ONEWIN_FEED_TIMEOUT = float(os.getenv("ONEWIN_FEED_TIMEOUT", "120"))
 # Полная роспись (все рынки, ~30-100 КБ на событие) — только у событий,
 # которые начнутся раньше всех: по ним и ставят. Остальные идут с
 # «базовыми» группами рынков (исход, тотал, фора — ~7 КБ на событие).
+# 600 — столько же, сколько полной росписи держат площадки BetBy
+# (BETBY_FULL_MARKETS_MAX): вилка крипто-страницы — всегда пара «1win +
+# площадка BetBy», и глубокие рынки нужны у обеих ног сразу. Обход при
+# этом укладывается в полминуты (проверено: 2 500 событий за 23 c при 400).
 # 0 — везде только базовые рынки.
-ONEWIN_FULL_MARKETS_MAX = int(os.getenv("ONEWIN_FULL_MARKETS_MAX", "400"))
+ONEWIN_FULL_MARKETS_MAX = int(os.getenv("ONEWIN_FULL_MARKETS_MAX", "600"))
 # Минимальная пауза между обходами прематча, сек: линия в 2.5 тыс. событий
 # весит около 20 МБ за обход, гонять её чаще незачем.
 ONEWIN_MIN_REFRESH = float(os.getenv("ONEWIN_MIN_REFRESH", "60"))

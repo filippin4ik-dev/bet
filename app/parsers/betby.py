@@ -29,6 +29,21 @@ Roobet и другие. Сайт у каждого свой, а линию вс�
 versions, ...}. Забираем ВСЕ перечисленные чанки и склеиваем — получаем
 полный текущий срез линии (несколько тысяч событий за пару секунд).
 
+Чанки несут по событию только ВЕРХУШКУ линии — с десяток рынков (исход,
+основной тотал, основная фора). Полная роспись — отдельной ручкой на
+событие (снята с бандла виджета, действие `getEvent`):
+
+    /api/v4/<section>/brand/<brand>/event/<lang>/<eventId>
+
+Ответ той же формы, что чанк (sports/…/events), но у события — все рынки:
+у топ-матча футбола 459 вариантов против 28 в чанке, у рядового — 130
+против 19. Именно там лестницы тоталов/фор и рынки таймов, из которых
+складывается большая часть вилок, поэтому парсер забирает роспись у
+BETBY_FULL_MARKETS_MAX ближайших событий пулом потоков. Роспись кэшируется
+по событию и перезапрашивается, лишь когда в чанке сдвинулся кэф верхушки
+(основная линия двигается первой) или кэш старше BETBY_FULL_MARKETS_REFRESH
+секунд — иначе каждый обход стоил бы полторы тысячи запросов.
+
 Рынки BetBy — стандартные (Betradar-подобные) id с русскими названиями из
 справочника. Разбираем ВСЕ двухисходные рынки: победитель, тоталы, форы
 (в т.ч. по геймам/сетам), «обе забьют», чет/нечет, индивидуальные тоталы —
@@ -55,12 +70,21 @@ brand_id площадки периодически меняется — парс
 с самого сайта (_discover_brand), а при неудаче берёт значение по умолчанию
 из config.
 """
+import json
 import logging
 import re
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urlencode
 
-from ..config import HTTP_TIMEOUT
+import requests.adapters
+
+from ..config import (BETBY_FULL_MARKETS, BETBY_FULL_MARKETS_BLOCK_PAUSE,
+                      BETBY_FULL_MARKETS_LIVE, BETBY_FULL_MARKETS_MAX,
+                      BETBY_FULL_MARKETS_PER_CYCLE, BETBY_FULL_MARKETS_RATE,
+                      BETBY_FULL_MARKETS_REFRESH, BETBY_FULL_MARKETS_TIMEOUT,
+                      BETBY_FULL_MARKETS_WORKERS, HTTP_TIMEOUT)
 from ..models import KIND_LIVE, KIND_PREMATCH, MarketOdds
 from .base import BaseParser
 from .html_utils import (fmt_hcap, fmt_total, format_start, market_scope,
@@ -70,6 +94,44 @@ log = logging.getLogger("parsers.betby")
 
 # Как часто обновлять справочник рынков (он большой ~700 КБ и меняется редко)
 _MARKETS_TTL = 3600.0
+
+
+class _Throttle:
+    """Общий для всех площадок BetBy темп запросов полной росписи.
+
+    Узел считает запросы на адрес, а не на бренд, поэтому ограничитель
+    один на процесс: запросы всех парсеров (и прематча, и лайва) выходят
+    не чаще BETBY_FULL_MARKETS_RATE в секунду. После ответа «access
+    blocked» ручка события не трогается BETBY_FULL_MARKETS_BLOCK_PAUSE
+    секунд — лишние запросы только продлевают блокировку.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._next = 0.0
+        self.blocked_until = 0.0
+
+    def wait(self) -> None:
+        with self._lock:
+            now = time.monotonic()
+            slot = max(now, self._next)
+            self._next = slot + 1.0 / max(BETBY_FULL_MARKETS_RATE, 0.1)
+        if slot > now:
+            time.sleep(slot - now)
+
+    def blocked(self) -> bool:
+        return time.monotonic() < self.blocked_until
+
+    def block(self) -> bool:
+        """Отмечает блокировку; True, если она только что началась."""
+        with self._lock:
+            fresh = not self.blocked()
+            self.blocked_until = time.monotonic() + \
+                BETBY_FULL_MARKETS_BLOCK_PAUSE
+            return fresh
+
+
+_THROTTLE = _Throttle()
 
 # id исходов BetBy (одинаковы во всех видах спорта, из справочника рынков):
 OUT_C1, OUT_C2 = "4", "5"          # победитель: команда 1 / команда 2
@@ -124,6 +186,10 @@ class BetByParser(BaseParser):
 
     def __init__(self) -> None:
         super().__init__()
+        # полная роспись идёт пулом потоков — пул соединений под него
+        pool = max(10, BETBY_FULL_MARKETS_WORKERS)
+        self.session.mount("https://", requests.adapters.HTTPAdapter(
+            pool_connections=pool, pool_maxsize=pool))
         self._brand_id: str | None = None
         self._markets: dict[str, dict] = {}
         self._markets_at = 0.0
@@ -132,6 +198,9 @@ class BetByParser(BaseParser):
         # каждое событие: рынков две тысячи, событий — тысячи, и тройка от
         # события не зависит.
         self._result3: dict[str, tuple[str, str, str] | None] = {}
+        # Кэш полной росписи: (секция, id события) → (отпечаток верхушки
+        # из чанка, момент запроса, markets полной росписи).
+        self._full: dict[tuple[str, str], tuple[str, float, dict]] = {}
 
     # ---------- сетевые помощники ----------
 
@@ -238,6 +307,11 @@ class BetByParser(BaseParser):
             events.update(chunk.get("events") or {})
 
         now = time.time()
+        full_stats = ""
+        if BETBY_FULL_MARKETS and (BETBY_FULL_MARKETS_LIVE or not live):
+            full_stats = self._merge_full_markets(brand, section, events,
+                                                  live, now)
+
         by_key: dict[str, MarketOdds] = {}
         for eid, ev in events.items():
             for o in self._parse_event(eid, ev, sports, categories,
@@ -246,9 +320,141 @@ class BetByParser(BaseParser):
         odds = list(by_key.values())
         three = sum(1 for o in odds if o.market_key.startswith("winner1x2"))
         log.info("%s: %s — %d котировок на %d событий, из них исход "
-                 "1X2: %d", self.name, section, len(odds),
-                 len({o.event_key for o in odds}), three)
+                 "1X2: %d%s", self.name, section, len(odds),
+                 len({o.event_key for o in odds}), three, full_stats)
         return odds
+
+    # ---------- полная роспись события ----------
+
+    def _wants_full(self, ev: dict, live: bool, now: float) -> bool:
+        """Есть ли смысл спрашивать полную роспись этого события."""
+        desc = ev.get("desc") or {}
+        if desc.get("type") != "match" or len(desc.get("competitors")
+                                             or []) < 2:
+            return False
+        if not live:
+            scheduled = desc.get("scheduled")
+            if not scheduled or float(scheduled) <= now:
+                return False
+        # у события без единого рынка в чанке пуста и полная роспись
+        # (проверено на живом фиде) — запрос впустую
+        return any(isinstance(v, dict) and v
+                   for v in (ev.get("markets") or {}).values())
+
+    @staticmethod
+    def _fingerprint(ev: dict) -> str:
+        """Отпечаток верхушки линии события: все кэфы из чанка."""
+        return json.dumps(ev.get("markets") or {}, sort_keys=True,
+                          separators=(",", ":"))
+
+    def _merge_full_markets(self, brand: str, section: str, events: dict,
+                            live: bool, now: float) -> str:
+        """Подменяет рынки событий полной росписью (из кэша или с фида).
+
+        Возвращает строку для лога: сколько событий с полной росписью,
+        сколько из них запрошено сейчас."""
+        wanted = [(eid, ev) for eid, ev in events.items()
+                  if self._wants_full(ev, live, now)]
+        if not live:
+            wanted.sort(key=lambda x: float(
+                (x[1].get("desc") or {}).get("scheduled") or 0))
+        wanted = wanted[:BETBY_FULL_MARKETS_MAX]
+
+        mono = time.monotonic()
+        fetch: list[tuple[str, str]] = []
+        for eid, ev in wanted:
+            cached = self._full.get((section, eid))
+            fp = self._fingerprint(ev)
+            if cached and cached[0] == fp and \
+                    mono - cached[1] < BETBY_FULL_MARKETS_REFRESH:
+                continue
+            fetch.append((eid, fp))
+        # порция за обход: ближайшие — первыми, остальное доберут следующие
+        # обходы (список уже упорядочен по началу)
+        fetch = fetch[:BETBY_FULL_MARKETS_PER_CYCLE]
+
+        fetched = failed = 0
+        if fetch and _THROTTLE.blocked():
+            log.info("%s: %s — ручка росписи заблокирована узлом, ждём ещё "
+                     "%.0f с", self.name, section,
+                     _THROTTLE.blocked_until - mono)
+            fetch = []
+        if fetch:
+            deadline = mono + BETBY_FULL_MARKETS_TIMEOUT
+
+            def one(item: tuple[str, str]) -> tuple[str, str, dict | None]:
+                eid, fp = item
+                if time.monotonic() > deadline or _THROTTLE.blocked():
+                    return eid, fp, None
+                _THROTTLE.wait()
+                if _THROTTLE.blocked():
+                    return eid, fp, None
+                markets, blocked = self._event_markets(brand, section, eid)
+                if blocked and _THROTTLE.block():
+                    log.warning(
+                        "%s: узел BetBy закрыл ручку полной росписи "
+                        "(«access blocked») — пауза %.0f с; общий фид "
+                        "работает, линия идёт с верхушкой рынков",
+                        self.name, BETBY_FULL_MARKETS_BLOCK_PAUSE)
+                return eid, fp, markets
+
+            workers = max(1, min(BETBY_FULL_MARKETS_WORKERS, len(fetch)))
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                for eid, fp, markets in pool.map(one, fetch):
+                    if markets is None:
+                        failed += 1
+                        continue
+                    fetched += 1
+                    self._full[(section, eid)] = (fp, time.monotonic(),
+                                                  markets)
+
+        # кэш живёт только по событиям текущей линии
+        alive = {(section, eid) for eid, _ in wanted}
+        for key in [k for k in self._full if k[0] == section
+                    and k not in alive]:
+            del self._full[key]
+
+        merged = 0
+        for eid, ev in wanted:
+            cached = self._full.get((section, eid))
+            if not cached:
+                continue
+            # верхушка из чанка свежее кэша — она поверх полной росписи
+            markets = dict(cached[2])
+            for mid, variants in (ev.get("markets") or {}).items():
+                if isinstance(variants, dict):
+                    markets[mid] = {**(markets.get(mid) or {}), **variants}
+            ev["markets"] = markets
+            merged += 1
+        if failed:
+            log.info("%s: %s — полная роспись не пришла у %d событий",
+                     self.name, section, failed)
+        return (f"; полная роспись у {merged} из {len(wanted)} событий "
+                f"(запрошено {fetched}, из кэша {merged - fetched})")
+
+    def _event_markets(self, brand: str, section: str,
+                       eid: str) -> tuple[dict | None, bool]:
+        """Рынки полной росписи события: (markets, заблокирован ли узел)."""
+        url = (f"{self.api_host}/api/v4/{section}/brand/{brand}/event/"
+               f"{self.lang}/{eid}")
+        try:
+            resp = self.session.get(url, headers=self._headers(),
+                                    timeout=HTTP_TIMEOUT)
+        except Exception as exc:  # noqa: BLE001
+            log.debug("%s: %s не ответил (%s)", self.name, url, exc)
+            return None, False
+        if resp.status_code != 200:
+            blocked = resp.status_code == 503 and \
+                "access blocked" in resp.text[:200]
+            return None, blocked
+        try:
+            data = resp.json()
+        except ValueError:
+            return None, False
+        ev = ((data or {}).get("events") or {}).get(eid) \
+            if isinstance(data, dict) else None
+        markets = (ev or {}).get("markets")
+        return (markets if isinstance(markets, dict) else None), False
 
     def _parse_event(self, eid: str, ev: dict, sports: dict,
                      categories: dict, tournaments: dict,
