@@ -48,8 +48,10 @@ externalPartnerId в адресе websocket'а сайта. Проверено с
 Базовые группы (isBaseOddsGroups=true: исход, тотал, фора — ~7 КБ на
 событие) берём у всей линии, полную роспись (~30-100 КБ) — у
 ONEWIN_FULL_MARKETS_MAX ближайших событий: по ним и ставят, а всю линию
-целиком качать незачем. Подписка идёт пачками по ONEWIN_WS_BATCH id (на
-пятистах сервер молчит) в одном соединении за обход.
+целиком качать незачем. Подписка идёт пачками по ONEWIN_WS_BATCH id,
+каждая — в своём соединении: на одном сокете сервер обслуживает около
+двухсот подписок и дальше молчит. Вся линия (2.5 тыс. событий) собирается
+за ~25 секунд.
 """
 import json
 import logging
@@ -237,66 +239,89 @@ class OneWinParser(BaseParser):
                         deadline: float) -> dict[int, dict[str, dict]]:
         """matchId → {groupId → группа рынков (oddsList — словарь по id)}.
 
-        Одно соединение на обход; подписки уходят пачками, каждая ждётся
-        до ONEWIN_WS_BATCH_WAIT секунд. Дельты (match-odds) применяются к
-        уже полученным снимкам — за долгий обход кэфы ближайших матчей
-        успевают сдвинуться."""
+        На КАЖДУЮ пачку — своё соединение: сервер держит на одном сокете
+        около двухсот подписок, дальше на новые subscribe молчит (проверено
+        на живом фиде: третья пачка в том же соединении не получала ни
+        одного снимка). Соединение и рукопожатие занимают доли секунды,
+        снимок пачки в 150 событий приходит за секунду. Каждая пачка
+        ждётся до ONEWIN_WS_BATCH_WAIT секунд; дельты (match-odds)
+        применяются к уже полученным снимкам."""
         snaps: dict[int, dict[str, dict]] = {}
-        try:
-            ws = websocket.create_connection(
-                self._ws_url(), timeout=10, origin=ONEWIN_SITE_HOST,
-                header=[f"User-Agent: {super()._headers()['User-Agent']}"])
-        except Exception as exc:  # noqa: BLE001
-            log.warning("1win: websocket платформы недоступен: %s", exc)
-            self.status_note = f"websocket платформы недоступен: {exc}"
-            return snaps
+        plan = [(full_ids, False), (base_ids, True)]
+        batches = [(ids[i:i + ONEWIN_WS_BATCH], base)
+                   for ids, base in plan
+                   for i in range(0, len(ids), ONEWIN_WS_BATCH)]
+        failures = 0
+        for batch, base in batches:
+            if time.monotonic() > deadline:
+                log.info("1win: дедлайн обхода истёк, снимков %d", len(snaps))
+                break
+            try:
+                got = self._subscribe_batch(batch, base, deadline, snaps)
+            except Exception as exc:  # noqa: BLE001
+                failures += 1
+                log.warning("1win: websocket платформы (%d id): %s",
+                            len(batch), exc)
+                if not snaps and failures >= 2:
+                    self.status_note = f"websocket платформы недоступен: {exc}"
+                    break
+                continue
+            if got < len(batch):
+                log.debug("1win: пачка %d id — без снимка %d",
+                          len(batch), len(batch) - got)
+        return snaps
+
+    def _subscribe_batch(self, batch: list[int], base: bool, deadline: float,
+                         snaps: dict[int, dict[str, dict]]) -> int:
+        """Подписка одной пачки в новом соединении; сколько снимков пришло."""
+        ws = websocket.create_connection(
+            self._ws_url(), timeout=10, origin=ONEWIN_SITE_HOST,
+            header=[f"User-Agent: {super()._headers()['User-Agent']}"])
         try:
             # рукопожатие socket.io v4: 0{...} → 40 → 40{...}
             self._recv_until(ws, lambda m: m.startswith("0"), 10, snaps)
             ws.send("40")
             self._recv_until(ws, lambda m: m.startswith("40"), 10, snaps)
-
-            plan = [(full_ids, False), (base_ids, True)]
-            for ids, base in plan:
-                for i in range(0, len(ids), ONEWIN_WS_BATCH):
-                    if time.monotonic() > deadline:
-                        log.info("1win: дедлайн обхода истёк, снимков %d",
-                                 len(snaps))
-                        return snaps
-                    batch = ids[i:i + ONEWIN_WS_BATCH]
-                    ws.send('42["subscribe",' + json.dumps({
-                        "messageType": "subscribe-match-odds",
-                        "data": {"matchIds": batch,
-                                 "isBaseOddsGroups": base}}) + "]")
-                    want = set(batch)
-                    self._recv_until(
-                        ws, lambda _m: want <= snaps.keys(),
-                        min(ONEWIN_WS_BATCH_WAIT,
-                            max(1.0, deadline - time.monotonic())), snaps)
-                    missing = len(want - snaps.keys())
-                    if missing:
-                        log.debug("1win: пачка %d id — без снимка %d",
-                                  len(batch), missing)
-        except Exception as exc:  # noqa: BLE001
-            log.warning("1win: обрыв websocket'а после %d снимков: %s",
-                        len(snaps), exc)
+            ws.send('42["subscribe",' + json.dumps({
+                "messageType": "subscribe-match-odds",
+                "data": {"matchIds": batch,
+                         "isBaseOddsGroups": base}}) + "]")
+            want = set(batch)
+            before = len(want & snaps.keys())
+            # Снимки пачки приходят одной очередью за секунду-две; у событий
+            # без рынков снимка не бывает вовсе, поэтому ждём не «все», а
+            # «поток иссяк» — иначе каждая пачка стояла бы полный таймаут.
+            self._recv_until(
+                ws, lambda _m: want <= snaps.keys(),
+                min(ONEWIN_WS_BATCH_WAIT,
+                    max(1.0, deadline - time.monotonic())), snaps, idle=2.0)
+            return len(want & snaps.keys()) - before
         finally:
             try:
                 ws.close()
             except Exception:  # noqa: BLE001
                 pass
-        return snaps
 
     def _recv_until(self, ws, done, wait: float,
-                    snaps: dict[int, dict[str, dict]]) -> None:
+                    snaps: dict[int, dict[str, dict]],
+                    idle: float | None = None) -> None:
         """Читает кадры, пока done(последний кадр) не станет истиной или не
-        выйдет время; снимки и дельты складывает в snaps."""
+        выйдет время; снимки и дельты складывает в snaps. С idle выходит
+        и тогда, когда после первого снимка новых не было idle секунд."""
         end = time.monotonic() + wait
+        last_progress = None
         while True:
-            left = end - time.monotonic()
+            now = time.monotonic()
+            left = end - now
             if left <= 0:
                 return
-            ws.settimeout(min(left, 5.0))
+            if idle and last_progress is not None \
+                    and now - last_progress >= idle:
+                return
+            step = min(left, 5.0)
+            if idle and last_progress is not None:
+                step = min(step, idle - (now - last_progress))
+            ws.settimeout(max(step, 0.05))
             try:
                 msg = ws.recv()
             except websocket.WebSocketTimeoutException:
@@ -307,7 +332,10 @@ class OneWinParser(BaseParser):
                 ws.send("3")
                 continue
             if msg.startswith("42"):
+                n = len(snaps)
                 self._apply_frame(msg, snaps)
+                if len(snaps) != n:
+                    last_progress = time.monotonic()
             if done(msg):
                 return
 
@@ -456,11 +484,14 @@ class OneWinParser(BaseParser):
         text = self._fold(name)
         if _SKIP_MARKET_RE.search(text):
             return None
-        text = re.sub(r"\([^)]*\)", " ", text)
-        text = _MAP_N_RE.sub(lambda mm: f"{mm.group(2)}-й {mm.group(1)}", text)
+        # имена команд убираем ДО скобок: у кибер-баскетбола игрок пишется
+        # в скобках прямо в имени («Денвер Наггетс (Polub)»)
         for team in (base["team1"], base["team2"]):
             if team:
                 text = text.replace(team, " ")
+                text = text.replace(re.sub(r"\([^)]*\)", "", team).strip(), " ")
+        text = re.sub(r"\([^)]*\)", " ", text)
+        text = _MAP_N_RE.sub(lambda mm: f"{mm.group(2)}-й {mm.group(1)}", text)
         text = _MARKET_WORDS_RE.sub(" ", text)
         return market_scope(text)
 

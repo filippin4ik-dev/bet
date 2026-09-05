@@ -388,6 +388,15 @@ def index():
                         headers={"Cache-Control": "no-cache"})
 
 
+@app.get("/crypto")
+def crypto_index():
+    """Страница «Крипто-вилки»: та же разметка, режим выбирает app.js по
+    адресу — в списке остаются вилки, у которых все плечи стоят на
+    крипто-площадках (CRYPTO_BOOKMAKERS: bc.game, Roobet, 1win, Stake)."""
+    return FileResponse(STATIC_DIR / "index.html",
+                        headers={"Cache-Control": "no-cache"})
+
+
 @app.get("/admin")
 def admin_page():
     return FileResponse(STATIC_DIR / "admin.html",
