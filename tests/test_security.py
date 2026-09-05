@@ -92,6 +92,17 @@ def test_login_redirect_remembers_where_the_visitor_was_going():
     assert "next=%2Fprofile%3Ftab%3Dbets" in resp.headers["location"]
 
 
+def test_crypto_page_is_closed_like_the_main_one():
+    """Страница «Крипто-вилки» — тот же сайт: без входа её не видно, а
+    после входа на неё возвращают ровно туда, куда шёл человек."""
+    _reset()
+    resp = _gate(_FakeRequest("/crypto"))
+    assert resp.status_code in (302, 307)
+    assert resp.headers["location"] == "/login?next=%2Fcrypto"
+    routes = {getattr(r, "path", None) for r in main.app.routes}
+    assert "/crypto" in routes and "/" in routes
+
+
 def test_api_without_session_answers_401_and_not_a_redirect():
     """Страницу можно увести на форму входа, а вот опрос вилок должен
     получить именно 401: по нему открытая вкладка понимает, что сессия

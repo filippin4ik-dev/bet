@@ -5,7 +5,7 @@
 import logging
 
 from ..config import (BCGAME_ENABLED, BOOKMAKERS_ONLY, LIGASTAVOK_ENABLED,
-                      MELBET_ENABLED, ROOBET_ENABLED)
+                      MELBET_ENABLED, ONEWIN_ENABLED, ROOBET_ENABLED)
 from .base import BaseParser
 from .bcgame import BCGameParser
 from .betboom import BetBoomParser
@@ -14,6 +14,7 @@ from .fonbet import FonbetParser
 from .leon import LeonParser
 from .ligastavok import LigaStavokParser
 from .melbet import MelbetParser
+from .onewin import OneWinParser
 from .roobet import RoobetParser
 from .winline import WinlineParser
 
@@ -29,6 +30,7 @@ BOOKMAKERS = [b for b in
               (["Melbet"] if MELBET_ENABLED else []) +
               (["bc.game"] if BCGAME_ENABLED else []) +
               (["Roobet"] if ROOBET_ENABLED else []) +
+              (["1win"] if ONEWIN_ENABLED else []) +
               (["Liga Stavok"] if LIGASTAVOK_ENABLED else [])
               if _wanted(b)]
 
@@ -36,11 +38,12 @@ _ls_notice_shown = False
 _bc_notice_shown = False
 _mb_notice_shown = False
 _rb_notice_shown = False
+_ow_notice_shown = False
 
 
 def get_parsers() -> list[BaseParser]:
     global _ls_notice_shown, _bc_notice_shown, _mb_notice_shown
-    global _rb_notice_shown
+    global _rb_notice_shown, _ow_notice_shown
     parsers: list[BaseParser] = [WinlineParser(), BetBoomParser(),
                                  FonbetParser(), LeonParser(),
                                  BetcityParser()]
@@ -68,6 +71,15 @@ def get_parsers() -> list[BaseParser]:
             "сшиваются, см. BOOKMAKER_FAMILIES). ROOBET_ENABLED=1 — "
             "включить обратно.")
         _rb_notice_shown = True
+    if ONEWIN_ENABLED:
+        parsers.append(OneWinParser())
+    elif not _ow_notice_shown:
+        log.info(
+            "1win отключена (ONEWIN_ENABLED=0): крипто-БК на платформе "
+            "top-parser — единственная, что сшивается в вилку с bc.game и "
+            "Roobet на странице «Крипто-вилки». ONEWIN_ENABLED=1 — "
+            "включить обратно.")
+        _ow_notice_shown = True
     if LIGASTAVOK_ENABLED:
         parsers.append(LigaStavokParser())
     elif not _ls_notice_shown:

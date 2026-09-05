@@ -176,6 +176,42 @@ header h1 {
 
 .header-actions { margin-left: auto; display: flex; gap: 8px; align-items: center; }
 
+/* Переключатель разделов сайта: «Все БК» и «Крипто» — две страницы одного
+   сканера (одна разметка, режим выбирает app.js по адресу). */
+.page-nav {
+  display: inline-flex;
+  gap: 3px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 3px;
+}
+.page-nav a {
+  color: var(--muted);
+  text-decoration: none;
+  font-size: 0.82rem;
+  font-weight: 650;
+  padding: 4px 12px;
+  border-radius: 999px;
+  white-space: nowrap;
+  transition: color .15s, background .15s;
+}
+.page-nav a:hover { color: var(--text); background: var(--panel-hover); }
+.page-nav a.active {
+  color: var(--accent);
+  background: var(--accent-soft);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 35%, transparent);
+}
+/* На крипто-странице акцент — оранжевый биткоина: чтобы по цвету шапки
+   было сразу видно, в каком разделе находишься. */
+[data-page="crypto"] .page-nav a.active,
+[data-page="crypto"] .accent { color: #f7931a; }
+[data-page="crypto"] .page-nav a.active {
+  background: rgba(247, 147, 26, 0.14);
+  box-shadow: inset 0 0 0 1px rgba(247, 147, 26, 0.4);
+}
+[data-page="crypto"] .logo { background: linear-gradient(140deg, #f7931a, #fbbf24); }
+
 .icon-btn, .ghost-btn {
   background: var(--panel);
   color: var(--text-dim);
@@ -408,6 +444,178 @@ input[type="checkbox"] { accent-color: var(--accent); width: 15px; height: 15px;
   margin: 0 0 8px 2px;
 }
 
+/* ---------------------------------- вид списка: таблица / карточки --- */
+
+.view-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px 16px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+.view-bar .table-meta { margin: 0 0 0 2px; }
+.view-tools { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-left: auto; }
+.cards-sort-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--muted);
+  font-size: 0.84rem;
+  white-space: nowrap;
+}
+.cards-sort-label select { padding: 5px 9px; font-size: 0.84rem; }
+.hide-details-toggle { font-size: 0.86rem; white-space: nowrap; }
+.layout-toggle {
+  display: inline-flex;
+  gap: 3px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 3px;
+}
+.layout-toggle button {
+  background: transparent;
+  color: var(--muted);
+  border: 0;
+  border-radius: 7px;
+  padding: 5px 11px;
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.82rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.layout-toggle button:hover { color: var(--text); background: var(--panel-hover); }
+.layout-toggle button.active {
+  color: var(--accent);
+  background: var(--accent-soft);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 35%, transparent);
+}
+
+/* Режим «скрыть детали»: всё, что выдаёт саму ставку (матч, рынок, кэфы,
+   БК, время начала), размывается; доходность и суммы остаются резкими —
+   ровно то, что нужно оставить на скриншоте. Размытый текст не выделить
+   и не скопировать: иначе он читался бы через выделение. */
+.hide-details .sens,
+.arb-card.blurred .sens {
+  filter: blur(7px);
+  user-select: none;
+  pointer-events: none;
+  opacity: 0.85;
+  transition: filter .18s;
+}
+.arb-card.revealed .sens { filter: none; user-select: auto; pointer-events: auto; opacity: 1; }
+
+/* ---- карточки вилок ---- */
+
+.arb-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(330px, 1fr));
+  gap: 14px;
+}
+.arb-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-sm);
+  padding: 14px 16px 12px;
+  cursor: pointer;
+  transition: border-color .15s, transform .15s, box-shadow .15s;
+}
+.arb-card:hover { border-color: var(--muted); transform: translateY(-1px); box-shadow: var(--shadow); }
+.arb-card.hot { border-color: color-mix(in srgb, var(--hot) 60%, transparent); background: color-mix(in srgb, var(--hot) 6%, var(--panel)); }
+.arb-card.pinned { border-color: color-mix(in srgb, var(--accent) 70%, transparent); box-shadow: inset 3px 0 0 var(--accent), var(--shadow-sm); }
+.arb-card.pinned.hot { box-shadow: inset 3px 0 0 var(--hot), var(--shadow-sm); }
+.arb-cards > .empty {
+  grid-column: 1 / -1;
+  text-align: center;
+  color: var(--muted);
+  padding: 44px 20px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.card-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.card-head .profit { font-size: 1.05rem; padding: 4px 12px; }
+.card-head .arb-age { font-size: 0.8rem; }
+.card-head .arb-age::before { content: "⏱ "; }
+.card-tools { margin-left: auto; display: inline-flex; gap: 4px; }
+.eye-btn, .pin-btn {
+  background: var(--panel-2);
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs);
+  padding: 2px 7px;
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.82rem;
+  line-height: 1.4;
+}
+.eye-btn:hover, .pin-btn:hover { color: var(--text); border-color: var(--muted); }
+.arb-card.pinned .pin-btn { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 50%, transparent); }
+
+.card-event { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.card-sport { color: var(--muted); font-size: 0.8rem; }
+.card-match { font-size: 1.04rem; font-weight: 700; letter-spacing: -0.005em; line-height: 1.3; }
+.card-market { color: var(--text-dim); font-size: 0.88rem; }
+
+.card-legs { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.card-legs.legs-3 { grid-template-columns: repeat(3, 1fr); }
+.card-leg {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  background: var(--panel-2);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  padding: 9px 11px;
+  min-width: 0;
+}
+.leg-top { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.leg-top .out { margin-right: 0; }
+.leg-top .coef { font-size: 1.02rem; }
+.leg-bk .bk-chip { max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+.leg-stake {
+  margin-top: auto;
+  font-size: 1.12rem;
+  font-weight: 750;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.leg-stake-label { display: block; color: var(--muted); font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.05em; }
+
+.card-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px 16px;
+  flex-wrap: wrap;
+  padding-top: 10px;
+  border-top: 1px solid var(--border-soft);
+}
+.card-sum, .card-profit { display: flex; flex-direction: column; gap: 1px; }
+.card-foot .lbl { color: var(--muted); font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.05em; }
+.card-foot b { font-size: 1.05rem; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.card-profit b { color: var(--accent); }
+.arb-card.hot .card-profit b { color: var(--hot); }
+/* «Горячая» вилка (выше звукового порога) — в тон строке таблицы */
+.arb-card.hot .profit { background: var(--hot-soft); color: var(--hot); }
+.arb-card.hot .profit.p-mid { background: color-mix(in srgb, var(--hot) 24%, transparent); }
+.arb-card.hot .profit.p-high { background: var(--hot); color: var(--accent-ink); }
+.card-foot .bet-btn, .card-foot .bet3-btn { margin-left: auto; padding: 8px 14px; }
+/* На скриншоте кнопка и служебные значки лишние */
+.arb-card.blurred .bet-btn, .arb-card.blurred .bet3-btn, .arb-card.blurred .pin-btn { visibility: hidden; }
+
+@media (max-width: 480px) {
+  .card-legs, .card-legs.legs-3 { grid-template-columns: 1fr; }
+  .arb-cards { grid-template-columns: 1fr; }
+}
+
 table {
   width: 100%;
   border-collapse: collapse;
@@ -552,7 +760,12 @@ tr.hot .profit.p-high { background: var(--hot); color: var(--accent-ink); }
 .bk-leon    { color: #eab308; }   /* LeonBet — жёлтый */
 .bk-betcity { color: #22d3ee; }   /* Betcity — голубой (циан) */
 .bk-melbet  { color: #f472b6; }   /* Melbet — розовый */
+.bk-onewin  { color: #a3e635; }   /* 1win — лаймовый */
+.bk-stake   { color: #93c5fd; }   /* Stake — светло-синий */
 .bk-other   { color: var(--muted); }
+/* Площадка, которой в наборе пока нет (Stake за Cloudflare): чип есть,
+   но пунктирный и блёклый — чтобы не выглядела подключённой. */
+.bk-chip-off { border-style: dashed; opacity: 0.6; background: transparent; }
 
 /* На светлом фоне те же цвета теряются (жёлтый LeonBet почти не читается) —
    берём более тёмные оттенки той же гаммы. */
@@ -565,6 +778,8 @@ tr.hot .profit.p-high { background: var(--hot); color: var(--accent-ink); }
 [data-theme="light"] .bk-leon    { color: #a16207; }
 [data-theme="light"] .bk-betcity { color: #0e7490; }
 [data-theme="light"] .bk-melbet  { color: #be185d; }
+[data-theme="light"] .bk-onewin  { color: #4d7c0f; }
+[data-theme="light"] .bk-stake   { color: #1e40af; }
 
 .bk-chip {
   display: inline-block;
