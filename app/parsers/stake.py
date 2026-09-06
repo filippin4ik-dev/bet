@@ -38,17 +38,20 @@ Betradar, одинаковые во всех видах спорта: 1/2/3 — 
 import json
 import logging
 import os
+import random
 import re
 import shutil
 import subprocess
 import threading
 import time
 from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from urllib.parse import urlsplit
 
 import requests
 
 from ..config import (STAKE_FEED_TIMEOUT, STAKE_FIXTURES_PER_TOURNAMENT,
+                      STAKE_FULL_MARKETS_MAX, STAKE_FULL_MARKETS_REFRESH,
                       STAKE_LANG, STAKE_MAX_PAGES, STAKE_MIN_REFRESH,
                       STAKE_PROXY, STAKE_SESSION_FILE, STAKE_SITE_URL,
                       STAKE_SOLVE_COOLDOWN, STAKE_SOLVE_TIMEOUT, STAKE_SPORTS,
@@ -78,12 +81,19 @@ _SKIP_MARKET_RE = re.compile(
     r"(?i)оставш|остаток|точн|гонк|следующ|первый гол|первого гола|"
     r"последн|двойной шанс|мультигол|интервал|минут|с разницей|"
     r"3 исхода|три исхода|3-way|досрочн|выигра[её]т хотя бы|"
-    r"буллит|пенальти|серия|заб[ьи]т.*оба тайма|в обоих таймах")
+    r"буллит|пенальти|серия|заб[ьи]т.*оба тайма|в обоих таймах|"
+    r"1up|2up|\bи\b|&|монет|лучш")
+# Betradar market id «ставки без ничьей» (draw no bet): у Stake рынок так и
+# называется «Ничья ставок нет», исходы те же 4/5, что у победителя, — по
+# id надёжнее, чем по формулировке.
+_DNB_IDS = {"11", "64", "86"}     # матч, 1-я и 2-я половина
+_DNB_NAME_RE = re.compile(r"без ничьей|ничья\s+став\w*\s+нет|draw no bet")
 # Слова вида рынка — не предмет; убираем перед market_scope
 _MARKET_WORDS_RE = re.compile(
     r"(?i)победитель|исход|тотал|фора|гандикап|ставка без ничьей|"
-    r"обе команды забьют|обе забьют|чет/нечет|чёт/нечет|нечет/чет|"
-    r"больше/меньше|1x2|1х2|вкл\.?|включая|овертайм")
+    r"ничья\s+став\w*\s+нет|без ничьей|обе команды забьют|обе забьют|"
+    r"чет/нечет|чёт/нечет|нечет/чет|больше/меньше|1x2|1х2|вкл\.?|включая|"
+    r"овертайм")
 
 # Спецификаторы периода Betradar → слово периода для market_scope
 _SPEC_PERIODS = {
@@ -92,45 +102,78 @@ _SPEC_PERIODS = {
     "framenr": "партия", "roundnr": "раунд",
 }
 
+# Плейсхолдер id липкой сессии в STAKE_PROXY (см. config)
+SESSION_TOKEN = "{session}"
+
 # Сколько ждать между кликами по галочке Turnstile
 _CLICK_EVERY = 6.0
-# Значения SportSearchEnum для прематча — проверено только «popular»
-# и «live»; «upcoming» — как страница /sports/upcoming сайта. Пробуем по
-# порядку, пока GraphQL не примет.
-_PREMATCH_TYPES = ("upcoming", "all", "popular")
+# SportSearchEnum: «upcoming» — прематч (проверено: только матчи, без
+# аутрайтов), «live» — лайв. Есть ещё «all» (с аутрайтами) и «popular».
+_PREMATCH_TYPE = "upcoming"
 
-_FIXTURES_QUERY = """
-query ArbFixtures($sport: String!, $type: SportSearchEnum!, $tl: Int!,
-                  $to: Int!, $fl: Int!) {
-  slugSport(sport: $sport) {
-    id name slug
-    tournamentList(type: $type, limit: $tl, offset: $to) {
-      id name slug
-      category { id name slug sport { id name slug } }
-      fixtureList(type: $type, limit: $fl) {
-        id name slug status provider extId
+# Группы рынков Stake (slugSport.allGroups) — свои у каждого вида спорта.
+# «Лёгкий» обход берёт у всех событий только основные группы: исход,
+# тоталы, форы, обе забьют — по названию группы без учёта регистра.
+_LIGHT_GROUPS = {"winner", "total", "handicap", "both teams to score"}
+# Группы, которые не нужны и в полной росписи: игроки, авторы голов,
+# спецставки, интервалы, комбинации, аутрайты.
+_SKIP_GROUPS_RE = re.compile(
+    r"(?i)player|goalscorer|special|minute|interval|sure sub|1up|outright|"
+    r"qualify|combo|fast bets|on the mound|other|strikes|point|competitor|"
+    r"penalty|игрок|автор|специальн|интервал|комбинац|быстр|очки|удар|"
+    r"прочее|буллит")
+# Как часто перечитывать список групп вида спорта
+_GROUPS_TTL = 3600.0
+
+_FIXTURE_FIELDS = """
+        id slug status
         data {
           __typename
           ... on SportFixtureDataMatch {
             startTime isOutright
-            competitors { name abbreviation extId }
             teams { name qualifier }
+            competitors { name }
           }
           ... on SportFixtureDataOutright { isOutright }
-        }
-        groups {
-          name translation
+        }"""
+_GROUP_FIELDS = """
+        groups(groups: $groups, status: [active]) {
+          name
           templates(includeEmpty: false) {
-            name extId
             markets {
-              id name status extId specifiers templateExtId
-              outcomes { id active odds name extId }
+              name status specifiers templateExtId
+              outcomes { active odds extId }
             }
           }
-        }
+        }"""
+
+_FIXTURES_QUERY = """
+query ArbLine($sport: String!, $type: SportSearchEnum!, $tl: Int!,
+              $to: Int!, $fl: Int!, $groups: [String!]!) {
+  slugSport(sport: $sport) {
+    name slug
+    tournamentList(type: $type, limit: $tl, offset: $to) {
+      name slug
+      category { name slug sport { name slug } }
+      fixtureList(type: $type, limit: $fl) {""" + _FIXTURE_FIELDS + _GROUP_FIELDS + """
       }
     }
   }
+}
+"""
+_TOURNAMENT_QUERY = """
+query ArbTournament($sport: String!, $category: String!, $tournament: String!,
+                    $type: SportSearchEnum!, $fl: Int!, $groups: [String!]!) {
+  slugTournament(sport: $sport, category: $category, tournament: $tournament) {
+    fixtureList(type: $type, limit: $fl) {
+      id""" + _GROUP_FIELDS + """
+    }
+  }
+}
+"""
+_GROUPS_QUERY = """
+query ArbGroups($sport: String!) {
+  slugSport(sport: $sport) { allGroups { name translation } }
 }
 """
 _SPORTS_QUERY = "{ sportList { id name slug } }"
@@ -147,17 +190,44 @@ class StakeParser(BaseParser):
     def __init__(self) -> None:
         super().__init__()
         self.site = STAKE_SITE_URL
-        self.proxy = STAKE_PROXY
-        if self.proxy:
-            self.session.proxies.update({"http": self.proxy,
-                                         "https": self.proxy})
         self._lock = threading.Lock()
         self._ua = ""
         self._cookies: dict[str, str] = {}
         self._solve_after = 0.0       # раньше этого момента челлендж не гоняем
-        self._prematch_type: str | None = None
         self._xvfb: subprocess.Popen | None = None
+        # группы рынков вида спорта: slug → (момент, [имена])
+        self._groups: dict[str, tuple[float, list[str]]] = {}
+        # кэш полной росписи турнира: путь турнира → (отпечаток основной
+        # линии его событий, момент запроса, {id события: группы})
+        self._full: dict[tuple[str, str, str], tuple[str, float, dict]] = {}
+        # id липкой сессии прокси (подставляется вместо {session} в
+        # STAKE_PROXY). Хранится вместе с cf_clearance: cookie привязана к IP
+        # выхода, а выход — к этому id.
+        self._session_id = _new_session_id()
         self._load_session()
+        self._apply_proxy()
+
+    # ---------- прокси ----------
+
+    @property
+    def proxy(self) -> str:
+        """Адрес прокси с подставленным id липкой сессии ("" — без прокси)."""
+        return STAKE_PROXY.replace(SESSION_TOKEN, self._session_id)
+
+    def _apply_proxy(self) -> None:
+        proxy = self.proxy
+        self.session.proxies = ({"http": proxy, "https": proxy} if proxy
+                                else {})
+
+    def _rotate_exit(self, why: str) -> None:
+        """Новый id липкой сессии = новый IP выхода у прокси. Есть смысл,
+        только если в STAKE_PROXY стоит {session}."""
+        if SESSION_TOKEN not in STAKE_PROXY:
+            return
+        self._session_id = _new_session_id()
+        self._apply_proxy()
+        log.info("%s: %s — меняю выход прокси (сессия %s)", self.name, why,
+                 self._session_id)
 
     # ---------- HTTP ----------
 
@@ -217,6 +287,8 @@ class StakeParser(BaseParser):
         if saved.get("ua") and cookies.get("cf_clearance"):
             self._ua = saved["ua"]
             self._cookies = {str(k): str(v) for k, v in cookies.items()}
+            if saved.get("proxy_session"):
+                self._session_id = str(saved["proxy_session"])
             log.info("%s: подхватил сохранённую сессию Cloudflare (%s)",
                      self.name, STAKE_SESSION_FILE)
 
@@ -225,6 +297,7 @@ class StakeParser(BaseParser):
             tmp = STAKE_SESSION_FILE + ".tmp"
             with open(tmp, "w", encoding="utf-8") as fh:
                 json.dump({"ua": self._ua, "cookies": self._cookies,
+                           "proxy_session": self._session_id,
                            "saved_at": time.time()}, fh)
             os.replace(tmp, STAKE_SESSION_FILE)
         except OSError as exc:
@@ -257,6 +330,10 @@ class StakeParser(BaseParser):
             if ok:
                 self.status_note = ""
                 self._save_session()
+            else:
+                # Cloudflare крутит спиннер бесконечно на выходах с плохой
+                # репутацией — следующий раз пробуем с другого IP
+                self._rotate_exit("челлендж не пройден")
             return ok
 
     def _solve_in_browser(self) -> bool:
@@ -273,8 +350,7 @@ class StakeParser(BaseParser):
         if server:
             options.add_argument(f"--proxy-server={server}")
         for arg in ("--no-sandbox", "--disable-dev-shm-usage",
-                    "--lang=ru-RU", "--window-size=1366,768",
-                    "--blink-settings=imagesEnabled=false"):
+                    "--lang=ru-RU", "--window-size=1366,768"):
             options.add_argument(arg)
         binary = _chrome_binary()
         if binary:
@@ -314,9 +390,14 @@ class StakeParser(BaseParser):
                     if _click_turnstile(driver):
                         last_click = time.monotonic()
             self.status_note = "челлендж Cloudflare не пройден за отведённое время"
+            shot = STAKE_SESSION_FILE + ".fail.png"
+            try:
+                driver.save_screenshot(shot)
+            except Exception:  # noqa: BLE001
+                shot = "снимок не сохранился"
             log.warning("%s: челлендж Cloudflare не пройден за %.0f с "
-                        "(заголовок: %r)", self.name, STAKE_SOLVE_TIMEOUT,
-                        driver.title)
+                        "(заголовок: %r, снимок: %s)", self.name,
+                        STAKE_SOLVE_TIMEOUT, driver.title, shot)
             return False
         finally:
             try:
@@ -358,20 +439,28 @@ class StakeParser(BaseParser):
         sports = self._sports()
         now = time.time()
         out: list[MarketOdds] = []
-        events = 0
+        events = full = 0
         for slug in sports:
             if time.monotonic() > deadline:
                 log.warning("%s: обход не уложился в %.0f с — остальные виды "
                             "спорта в следующий раз", self.name,
                             STAKE_FEED_TIMEOUT)
                 break
-            for fixture in self._fixtures(slug, live, deadline):
+            all_groups = self._sport_groups(slug)
+            light = [g for g in all_groups if g.lower() in _LIGHT_GROUPS] \
+                or ["main"]
+            fixtures = self._fixtures(slug, live, light, deadline)
+            if not live and STAKE_FULL_MARKETS_MAX > 0:
+                deep = [g for g in all_groups if not _SKIP_GROUPS_RE.search(g)]
+                full += self._merge_full(slug, fixtures, deep, now, deadline)
+            for fixture in fixtures:
                 events += 1
                 out.extend(self._parse_fixture(fixture, live, now))
         n1x2 = sum(1 for o in out if o.market_key.startswith("winner1x2"))
-        log.info("%s: %s — %d котировок на %d событий, из них исход 1X2: %d",
-                 self.name, "лайв" if live else "прематч", len(out), events,
-                 n1x2)
+        log.info("%s: %s — %d котировок на %d событий, из них исход 1X2: %d"
+                 "%s", self.name, "лайв" if live else "прематч", len(out),
+                 events, n1x2,
+                 f"; полная роспись у {full} событий" if not live else "")
         return out
 
     def _sports(self) -> list[str]:
@@ -382,16 +471,31 @@ class StakeParser(BaseParser):
             slugs = [s for s in slugs if s in STAKE_SPORTS]
         return slugs
 
-    def _fixtures(self, sport: str, live: bool, deadline: float) -> list[dict]:
+    def _sport_groups(self, sport: str) -> list[str]:
+        """Имена групп рынков вида спорта (кэш на час)."""
+        cached = self._groups.get(sport)
+        if cached and time.monotonic() - cached[0] < _GROUPS_TTL:
+            return cached[1]
+        data = self._gql_retry(_GROUPS_QUERY, {"sport": sport})
+        groups = [str(g.get("name") or "") for g in
+                  ((data.get("slugSport") or {}).get("allGroups") or [])]
+        groups = [g for g in groups if g]
+        self._groups[sport] = (time.monotonic(), groups)
+        return groups
+
+    def _fixtures(self, sport: str, live: bool, groups: list[str],
+                  deadline: float) -> list[dict]:
         found: list[dict] = []
         for page in range(STAKE_MAX_PAGES):
             if time.monotonic() > deadline:
                 break
-            variables = {"sport": sport, "type": "live" if live else None,
+            variables = {"sport": sport,
+                         "type": "live" if live else _PREMATCH_TYPE,
                          "tl": STAKE_TOURNAMENTS_PER_PAGE,
                          "to": page * STAKE_TOURNAMENTS_PER_PAGE,
-                         "fl": STAKE_FIXTURES_PER_TOURNAMENT}
-            data = self._page(variables, live)
+                         "fl": STAKE_FIXTURES_PER_TOURNAMENT,
+                         "groups": groups}
+            data = self._gql_retry(_FIXTURES_QUERY, variables)
             tournaments = ((data.get("slugSport") or {})
                            .get("tournamentList") or [])
             for tour in tournaments:
@@ -402,29 +506,80 @@ class StakeParser(BaseParser):
                 break
         return found
 
-    def _page(self, variables: dict, live: bool) -> dict:
-        if live:
-            return self._gql_retry(_FIXTURES_QUERY, variables)
-        candidates = ([self._prematch_type] if self._prematch_type
-                      else list(_PREMATCH_TYPES))
-        last: Exception | None = None
-        for kind in candidates:
-            variables["type"] = kind
-            try:
-                data = self._gql_retry(_FIXTURES_QUERY, variables)
-            except ValueError as exc:
-                if "SportSearchEnum" not in str(exc) and \
-                        "does not exist" not in str(exc):
+    # ---------- полная роспись ближайших событий ----------
+
+    def _merge_full(self, sport: str, fixtures: list[dict], groups: list[str],
+                    now: float, deadline: float) -> int:
+        """Дописать событиям, что начнутся раньше всех, остальные группы
+        рынков. Запрос идёт по турниру (он отдаёт все свои события разом)
+        и кэшируется: пока основная линия событий турнира не сдвинулась и
+        кэш моложе STAKE_FULL_MARKETS_REFRESH, повторно не спрашиваем.
+        Возвращает число событий, получивших полную роспись."""
+        if not groups:
+            return 0
+        soon = sorted(
+            (fx for fx in fixtures if self._starts(fx) and self._starts(fx) > now),
+            key=self._starts)[:STAKE_FULL_MARKETS_MAX]
+        by_tour: dict[tuple[str, str, str], list[dict]] = {}
+        for fx in soon:
+            tour = fx.get("_tournament") or {}
+            cat = tour.get("category") or {}
+            path = (sport, str(cat.get("slug") or ""), str(tour.get("slug") or ""))
+            if all(path):
+                by_tour.setdefault(path, []).append(fx)
+        merged = 0
+        for path, group_fx in by_tour.items():
+            if time.monotonic() > deadline:
+                break
+            fingerprint = "|".join(sorted(self._fingerprint(fx) for fx in group_fx))
+            cached = self._full.get(path)
+            if cached and cached[0] == fingerprint and \
+                    now - cached[1] < STAKE_FULL_MARKETS_REFRESH:
+                full = cached[2]
+            else:
+                try:
+                    data = self._gql_retry(_TOURNAMENT_QUERY, {
+                        "sport": path[0], "category": path[1],
+                        "tournament": path[2], "type": _PREMATCH_TYPE,
+                        "fl": STAKE_FIXTURES_PER_TOURNAMENT, "groups": groups})
+                except _Challenge:
                     raise
-                last = exc
-                continue
-            if self._prematch_type != kind:
-                self._prematch_type = kind
-                log.info("%s: прематч запрашивается как type=%s",
-                         self.name, kind)
-            return data
-        raise ValueError(f"ни одно значение SportSearchEnum для прематча не "
-                         f"подошло: {last}")
+                except Exception as exc:  # noqa: BLE001 — турнир пропускаем
+                    log.debug("%s: роспись турнира %s не пришла: %s",
+                              self.name, "/".join(path), exc)
+                    continue
+                full = {str(fx.get("id")): fx.get("groups") or []
+                        for fx in ((data.get("slugTournament") or {})
+                                   .get("fixtureList") or [])}
+                self._full[path] = (fingerprint, now, full)
+            for fx in group_fx:
+                extra = full.get(str(fx.get("id")))
+                if extra:
+                    # свежие основные группы — первыми: при совпадении
+                    # ключа рынка побеждает первый (см. _parse_fixture)
+                    fx["groups"] = list(fx.get("groups") or []) + list(extra)
+                    merged += 1
+        return merged
+
+    @staticmethod
+    def _starts(fx: dict) -> float | None:
+        cached = fx.get("_start_ts")
+        if cached is None:
+            cached = _parse_time((fx.get("data") or {}).get("startTime")) or 0.0
+            fx["_start_ts"] = cached
+        return cached or None
+
+    @staticmethod
+    def _fingerprint(fx: dict) -> str:
+        """Отпечаток основной линии события: все кэфы лёгких групп."""
+        parts = [str(fx.get("id"))]
+        for group in fx.get("groups") or []:
+            for template in group.get("templates") or []:
+                for market in template.get("markets") or []:
+                    parts.append(str(market.get("specifiers") or ""))
+                    parts.extend(str(o.get("odds")) for o in
+                                 market.get("outcomes") or [])
+        return str(hash("|".join(parts)))
 
     # ---------- разбор ----------
 
@@ -436,7 +591,7 @@ class StakeParser(BaseParser):
         team1, team2 = self._teams(data)
         if not team1 or not team2 or team1 == team2:
             return []
-        start_ts = _parse_time(data.get("startTime"))
+        start_ts = self._starts(fx)
         if live:
             kind = KIND_LIVE
         else:
@@ -522,7 +677,8 @@ class StakeParser(BaseParser):
                               k1=k1, k2=k2, k3=kx, **base)
         # --- Ставка без ничьей / победитель ---
         if ids >= {OUT_C1, OUT_C2}:
-            if "без ничьей" in low:
+            if str(market.get("templateExtId")) in _DNB_IDS \
+                    or _DNB_NAME_RE.search(low):
                 return MarketOdds(market=tag("Ставка без ничьей"),
                                   market_key=key("winner_dnb"),
                                   outcome1="П1", outcome2="П2",
@@ -627,8 +783,9 @@ def _num(v) -> float | None:
 
 
 def _parse_time(value) -> float | None:
-    """ISO-8601 («2026-09-06T18:00:00Z», с миллисекундами или смещением)
-    или unix-время (секунды/миллисекунды) → unix-время."""
+    """Время начала → unix-время. Stake отдаёт RFC 2822 («Sun, 06 Sep 2026
+    13:00:00 GMT»); на всякий случай понимаем и ISO-8601, и unix-время
+    (секунды/миллисекунды)."""
     if value in (None, ""):
         return None
     if isinstance(value, (int, float)):
@@ -639,10 +796,18 @@ def _parse_time(value) -> float | None:
     try:
         dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
     except ValueError:
-        return None
+        try:
+            dt = parsedate_to_datetime(text)
+        except (TypeError, ValueError, IndexError):
+            return None
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt.timestamp()
+
+
+def _new_session_id() -> str:
+    return "arb" + "".join(random.choices("abcdefghijklmnopqrstuvwxyz0123456789",
+                                          k=8))
 
 
 def _mask(proxy_url: str) -> str:

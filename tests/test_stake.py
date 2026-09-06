@@ -100,12 +100,24 @@ def test_1x2_total_handicap_from_betradar_ids(parser):
 def test_two_way_winner_and_draw_no_bet_are_different_markets(parser):
     fx = fixture([
         market("186", "Победитель", [outcome("4", 1.7), outcome("5", 2.2)]),
-        market("11", "Ставка без ничьей", [outcome("4", 1.5),
-                                           outcome("5", 2.6)]),
+        # так рынок и называется у Stake; узнаём по Betradar id 11
+        market("11", "Ничья ставок нет", [outcome("4", 1.5),
+                                          outcome("5", 2.6)]),
     ])
     got = by_key(parser._parse_fixture(fx, live=False, now=NOW))
     assert set(got) == {"winner", "winner_dnb"}
     assert got["winner"].k1 == 1.7 and got["winner_dnb"].k2 == 2.6
+
+
+def test_half_draw_no_bet_is_scoped_and_not_a_winner(parser):
+    fx = fixture([
+        market("64", "1-я половина - ничья ставки нет",
+               [outcome("4", 1.9), outcome("5", 1.9)]),
+        market("86", "2ая половина - ничья ставки нет",
+               [outcome("4", 2.1), outcome("5", 1.75)]),
+    ])
+    got = by_key(parser._parse_fixture(fx, live=False, now=NOW))
+    assert set(got) == {"winner_dnb:half1", "winner_dnb:half2"}
 
 
 def test_team_total_both_score_odd_even(parser):
@@ -157,6 +169,10 @@ def test_exotic_markets_with_the_same_outcome_ids_are_skipped(parser):
                                          outcome("1713", 3.0)], "hcp=1"),
         market("62", "Тотал — с 1-й по 15-ю минуту",
                [outcome("12", 3.0), outcome("13", 1.3)], "total=0.5"),
+        market("1601", "1x2 (1up)", [outcome("1", 2.3), outcome("2", 3.4),
+                                     outcome("3", 3.3)]),
+        market("35", "1x2 и обе команды забьют",
+               [outcome("1", 4.0), outcome("2", 6.0), outcome("3", 6.0)]),
     ])
     assert parser._parse_fixture(fx, live=False, now=NOW) == []
 
@@ -199,6 +215,7 @@ def test_same_market_appears_once(parser):
 
 
 def test_start_time_formats():
+    assert stake._parse_time("Sun, 06 Sep 2026 18:00:00 GMT") == 1788717600.0
     assert stake._parse_time("2026-09-06T18:00:00Z") == 1788717600.0
     assert stake._parse_time("2026-09-06T18:00:00.000+00:00") == 1788717600.0
     assert stake._parse_time(1788717600) == 1788717600.0
@@ -296,40 +313,115 @@ def test_no_clearance_and_no_solve_means_no_requests(parser, monkeypatch):
     assert parser.fetch_odds() == []
 
 
-def test_prematch_type_falls_back_until_graphql_accepts(parser, monkeypatch):
-    asked = []
-
-    def gql(query, variables=None, timeout=None):
-        asked.append(variables["type"])
-        if variables["type"] == "upcoming":
-            raise ValueError('GraphQL: Value "upcoming" does not exist in '
-                             '"SportSearchEnum" enum.')
-        return {"slugSport": {"tournamentList": []}}
-
-    monkeypatch.setattr(parser, "_gql_retry", gql)
-    assert parser._fixtures("soccer", live=False, deadline=time.monotonic() + 10) == []
-    assert asked == ["upcoming", "all"]
-    assert parser._prematch_type == "all"
-    parser._fixtures("tennis", live=False, deadline=time.monotonic() + 10)
-    assert asked[-1] == "all"           # запомнили, больше не перебираем
-
-
 def test_fixtures_paginate_tournaments(parser, monkeypatch):
     monkeypatch.setattr(stake, "STAKE_TOURNAMENTS_PER_PAGE", 2)
     pages = {0: [{"fixtureList": [{"id": 1}]}, {"fixtureList": [{"id": 2}, {"id": 3}]}],
              2: [{"fixtureList": [{"id": 4}]}]}
-    offsets = []
+    asked = []
 
     def gql(query, variables=None, timeout=None):
-        offsets.append(variables["to"])
+        asked.append(variables)
         return {"slugSport": {"tournamentList": pages.get(variables["to"], [])}}
 
     monkeypatch.setattr(parser, "_gql_retry", gql)
-    parser._prematch_type = "upcoming"
-    got = parser._fixtures("soccer", live=False, deadline=time.monotonic() + 10)
+    got = parser._fixtures("soccer", False, ["winner", "Total"],
+                           deadline=time.monotonic() + 10)
     assert [f["id"] for f in got] == [1, 2, 3, 4]
-    assert offsets == [0, 2]            # вторая страница неполная — стоп
+    assert [v["to"] for v in asked] == [0, 2]      # вторая страница неполная — стоп
+    assert asked[0]["type"] == "upcoming" and asked[0]["groups"] == ["winner", "Total"]
     assert all("_tournament" in f for f in got)
+    parser._fixtures("soccer", True, ["main"], deadline=time.monotonic() + 10)
+    assert asked[-1]["type"] == "live"
+
+
+def test_light_groups_are_picked_per_sport_case_insensitively(parser, monkeypatch):
+    monkeypatch.setattr(parser, "_gql_retry", lambda q, v=None, t=None: {
+        "slugSport": {"allGroups": [
+            {"name": "main"}, {"name": "sets"}, {"name": "player"},
+            {"name": "total"}, {"name": "winner"}, {"name": "Outright"}]}})
+    groups = parser._sport_groups("tennis")
+    assert groups == ["main", "sets", "player", "total", "winner", "Outright"]
+    light = [g for g in groups if g.lower() in stake._LIGHT_GROUPS]
+    assert light == ["total", "winner"]
+    deep = [g for g in groups if not stake._SKIP_GROUPS_RE.search(g)]
+    assert deep == ["main", "sets", "total", "winner"]
+    # кэш: второй вызов сеть не дёргает
+    monkeypatch.setattr(parser, "_gql_retry",
+                        lambda *a, **k: pytest.fail("должен взять из кэша"))
+    assert parser._sport_groups("tennis") == groups
+
+
+def _light_fixture(fid, start, tour="premier-league", odds=1.9):
+    fx = fixture([market("18", "Тотал", [outcome("12", odds), outcome("13", 1.95)],
+                         "total=2.5")], start=start)
+    fx["id"] = fid
+    fx["_tournament"]["slug"] = tour
+    return fx
+
+
+def test_full_markets_go_to_the_soonest_events_per_tournament(parser, monkeypatch):
+    monkeypatch.setattr(stake, "STAKE_FULL_MARKETS_MAX", 2)
+    fixtures = [_light_fixture("a", "Sun, 06 Sep 2026 13:00:00 GMT"),
+                _light_fixture("b", "Sun, 06 Sep 2026 12:00:00 GMT", tour="la-liga"),
+                _light_fixture("c", "Mon, 07 Sep 2026 12:00:00 GMT")]
+    asked = []
+    full_groups = [{"name": "goals", "templates": [{"markets": [
+        market("68", "1ая половина - тотал", [outcome("12", 2.0), outcome("13", 1.8)],
+               "total=0.5")]}]}]
+
+    def gql(query, variables=None, timeout=None):
+        asked.append(variables)
+        ids = {"premier-league": ["a", "c"], "la-liga": ["b"]}[variables["tournament"]]
+        return {"slugTournament": {"fixtureList": [
+            {"id": i, "groups": full_groups} for i in ids]}}
+
+    monkeypatch.setattr(parser, "_gql_retry", gql)
+    now = 1788600000.0                                  # 05.09.2026
+    merged = parser._merge_full("soccer", fixtures, ["main", "goals"], now,
+                                time.monotonic() + 10)
+    assert merged == 2
+    assert sorted(v["tournament"] for v in asked) == ["la-liga", "premier-league"]
+    assert asked[0]["groups"] == ["main", "goals"]
+    assert len(fixtures[0]["groups"]) == 2 and len(fixtures[1]["groups"]) == 2
+    assert len(fixtures[2]["groups"]) == 1              # третье — не ближайшее
+    keys = {o.market_key for o in parser._parse_fixture(fixtures[0], False, now)}
+    assert keys == {"total:2.5", "total:half1:0.5"}
+
+
+def test_full_markets_are_cached_until_the_main_line_moves(parser, monkeypatch):
+    calls = []
+
+    def gql(query, variables=None, timeout=None):
+        calls.append(1)
+        return {"slugTournament": {"fixtureList": [{"id": "a", "groups": [
+            {"name": "goals", "templates": []}]}]}}
+
+    monkeypatch.setattr(parser, "_gql_retry", gql)
+    now = 1788600000.0
+    start = "Sun, 06 Sep 2026 13:00:00 GMT"
+    assert parser._merge_full("soccer", [_light_fixture("a", start)], ["goals"],
+                              now, time.monotonic() + 10) == 1
+    parser._merge_full("soccer", [_light_fixture("a", start)], ["goals"],
+                       now + 60, time.monotonic() + 10)
+    assert calls == [1]                                 # из кэша
+    parser._merge_full("soccer", [_light_fixture("a", start, odds=2.05)],
+                       ["goals"], now + 120, time.monotonic() + 10)
+    assert calls == [1, 1]                              # кэф сдвинулся — заново
+    parser._merge_full("soccer", [_light_fixture("a", start, odds=2.05)],
+                       ["goals"], now + 120 + 601, time.monotonic() + 10)
+    assert calls == [1, 1, 1]                           # кэш состарился
+
+
+def test_full_markets_disabled(parser, monkeypatch):
+    monkeypatch.setattr(stake, "STAKE_FULL_MARKETS_MAX", 0)
+    monkeypatch.setattr(parser, "_sports", lambda: ["soccer"])
+    monkeypatch.setattr(parser, "_sport_groups", lambda s: ["winner", "goals"])
+    monkeypatch.setattr(parser, "_fixtures", lambda *a, **k: [
+        _light_fixture("a", "Sun, 06 Sep 2026 13:00:00 GMT")])
+    monkeypatch.setattr(parser, "_merge_full",
+                        lambda *a, **k: pytest.fail("роспись выключена"))
+    monkeypatch.setattr(stake.time, "time", lambda: 1788600000.0)
+    assert len(parser.fetch_odds()) == 1
 
 
 def test_sports_filter_and_specials(parser, monkeypatch):
