@@ -762,6 +762,8 @@ tr.hot .profit.p-high { background: var(--hot); color: var(--accent-ink); }
 .bk-melbet  { color: #f472b6; }   /* Melbet — розовый */
 .bk-onewin  { color: #a3e635; }   /* 1win — лаймовый */
 .bk-stake   { color: #93c5fd; }   /* Stake — светло-синий */
+.bk-rainbet { color: #a5b4fc; }   /* Rainbet — индиго */
+.bk-500     { color: #fbbf24; }   /* 500.casino — золотой */
 .bk-other   { color: var(--muted); }
 /* Площадка, которой в наборе пока нет (Stake за Cloudflare): чип есть,
    но пунктирный и блёклый — чтобы не выглядела подключённой. */
@@ -780,6 +782,8 @@ tr.hot .profit.p-high { background: var(--hot); color: var(--accent-ink); }
 [data-theme="light"] .bk-melbet  { color: #be185d; }
 [data-theme="light"] .bk-onewin  { color: #4d7c0f; }
 [data-theme="light"] .bk-stake   { color: #1e40af; }
+[data-theme="light"] .bk-rainbet { color: #4338ca; }
+[data-theme="light"] .bk-500     { color: #b45309; }
 
 .bk-chip {
   display: inline-block;

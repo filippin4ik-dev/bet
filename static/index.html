@@ -17,11 +17,12 @@
         Сканер <span class="accent">вилок</span>
         <span class="sub" id="mode-sub">прематч и лайв</span>
       </h1>
-      <!-- Две страницы одного сканера: все БК и только крипто-площадки
-           (bc.game, Roobet, 1win, Stake) — там вилки, обе ноги которых
-           ставятся в крипте. Активную подсвечивает app.js. -->
+      <!-- Две страницы одного сканера: рублёвые БК и крипто-площадки
+           (1win, bc.game, Roobet, Rainbet, 500.casino, Stake) — там вилки,
+           все ноги которых ставятся в крипте. Миры не смешиваются
+           (CRYPTO_SEPARATE); подписи и активную страницу ставит app.js. -->
       <nav class="page-nav" id="page-nav" aria-label="Разделы">
-        <a href="/" data-page="all">Все БК</a>
+        <a href="/" data-page="all">₽ Рублёвые БК</a>
         <a href="/crypto" data-page="crypto">₿ Крипто</a>
       </nav>
       <div class="header-actions">
@@ -419,20 +420,26 @@
       <span class="bk-chip bk-leon">LeonBet</span>
       <span class="bk-chip bk-betcity">Betcity</span>
       <span class="bk-chip bk-melbet">Melbet</span>
+      <!-- крипто-чипы ниже app.js скрывает, пока миры разведены (CRYPTO_SEPARATE) -->
       <span class="bk-chip bk-bcgame">bc.game</span>
       <span class="bk-chip bk-roobet">Roobet</span>
       <span class="bk-chip bk-onewin">1win</span>
+      <span class="bk-chip bk-rainbet">Rainbet</span>
+      <span class="bk-chip bk-500">500.casino</span>
       <span class="muted" title="Лига Ставок включается резидентным прокси (LIGASTAVOK_PROXY)">
         (+ Liga Stavok — по настройке)</span>
+      <span class="muted" id="crypto-note">· крипто-площадки — на странице <a href="/crypto">₿ Крипто</a>, с рублёвыми они не сшиваются</span>
     </span>
     <span id="sources-crypto" hidden>
-      Крипто-площадки: <span class="bk-chip bk-bcgame">bc.game</span>
+      Крипто-площадки: <span class="bk-chip bk-onewin">1win</span>
+      <span class="bk-chip bk-bcgame">bc.game</span>
       <span class="bk-chip bk-roobet">Roobet</span>
-      <span class="bk-chip bk-onewin">1win</span>
+      <span class="bk-chip bk-rainbet">Rainbet</span>
+      <span class="bk-chip bk-500">500.casino</span>
       <span class="bk-chip bk-stake bk-chip-off"
             title="Stake закрыт Cloudflare для адресов дата-центров: линия подключится, как только у сервера появится резидентный прокси">Stake</span>
-      <span class="muted">· bc.game и Roobet — одна платформа BetBy, между собой в вилку не сшиваются;
-        1win — своя линия, с ними сшивается</span>
+      <span class="muted">· bc.game, Roobet, Rainbet и 500.casino — одна платформа BetBy, между собой в вилку не сшиваются;
+        1win — своя линия, с каждой из них сшивается</span>
     </span>
     · БК включаются, выключаются и перезапускаются в <a href="/admin">админке</a>
   </footer>

@@ -237,6 +237,9 @@ def state() -> dict:
         "rate_source": rate_source(),
         "rate_updated_at": rate_updated_at(),
         "crypto_bookmakers": sorted(config.CRYPTO_BOOKMAKERS),
+        # крипто и рубли разведены по страницам: главная показывает только
+        # рублёвые БК, /crypto — только крипто (см. CRYPTO_SEPARATE)
+        "crypto_separate": bool(config.CRYPTO_SEPARATE),
         "currencies": [
             {"code": c["code"], "symbol": c["symbol"], "name": c["name"]}
             for c in CURRENCIES.values()

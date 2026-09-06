@@ -6,17 +6,24 @@
 const POLL_INTERVAL_MS = 10_000;      // прематч — раз в 10 с
 const LIVE_POLL_INTERVAL_MS = 5_000;  // лайв обновляем чаще
 
-/* Страница «Крипто» (/crypto) — та же разметка и тот же опрос, но в списке
- * остаются только вилки, у которых ВСЕ плечи стоят на крипто-площадках
- * (bc.game, Roobet, 1win, Stake — список присылает сервер вместе с
- * валютой, см. CRYPTO_BOOKMAKERS). Настройки страниц хранятся раздельно:
- * фильтр «Fonbet» с общей страницы на крипто-странице бессмыслен. */
+/* Две страницы одного сканера. «Крипто» (/crypto) — та же разметка и тот
+ * же опрос, но в списке остаются только вилки, у которых ВСЕ плечи стоят на
+ * крипто-площадках (bc.game, Roobet, 1win, Rainbet, 500.casino, Stake —
+ * список присылает сервер вместе с валютой, см. CRYPTO_BOOKMAKERS).
+ * Главная — зеркально: только рублёвые БК; крипто-площадки на ней не
+ * показываются вовсе (сервер их с рублёвыми и не сшивает, CRYPTO_SEPARATE).
+ * Настройки страниц хранятся раздельно: фильтр «Fonbet» с главной на
+ * крипто-странице бессмыслен. */
 const CRYPTO_PAGE = location.pathname.replace(/\/+$/, "") === "/crypto";
 const STORE_KEY = CRYPTO_PAGE ? "arb-scanner-ui-crypto" : "arb-scanner-ui";
 document.documentElement.dataset.page = CRYPTO_PAGE ? "crypto" : "all";
 // пока сервер не ответил — набор по умолчанию, тот же, что в config.py
-let cryptoBks = new Set(["bc.game", "roobet", "1win", "stake"]);
+let cryptoBks = new Set(["bc.game", "roobet", "1win", "rainbet", "500.casino", "stake"]);
+// разведены ли миры (CRYPTO_SEPARATE); при 0 главная показывает все БК
+let cryptoSeparate = true;
 const isCryptoBk = (bk) => cryptoBks.has(String(bk || "").trim().toLowerCase());
+// Своя ли эта БК для текущей страницы
+const isPageBk = (bk) => CRYPTO_PAGE ? isCryptoBk(bk) : !(cryptoSeparate && isCryptoBk(bk));
 
 const els = {
   body: document.getElementById("arbs-body"),
@@ -174,6 +181,8 @@ const BK_CLASS = {
   "Roobet": "bk-roobet",       // бирюзовый
   "1win": "bk-onewin",         // лаймовый
   "Stake": "bk-stake",         // светло-синий
+  "Rainbet": "bk-rainbet",     // индиго
+  "500.casino": "bk-500",      // золотой
   "LeonBet": "bk-leon",        // жёлтый
   "Betcity": "bk-betcity",     // голубой (циан)
   "Melbet": "bk-melbet",       // розовый
@@ -340,33 +349,34 @@ function rowBookmakers(r) {
   return [r.k1_bookmaker, r.kx_bookmaker, r.k2_bookmaker].filter(Boolean);
 }
 
-/* ---------- страница «Крипто»: только крипто-площадки ---------- */
+/* ---------- страница видит только СВОИ БК ---------- */
 
-/* Вилка годится для крипто-страницы, когда КАЖДОЕ её плечо — на
- * крипто-площадке: вилка «bc.game + Fonbet» здесь не нужна, за ней идут
- * на общую страницу. */
-const allLegsCrypto = (a) => rowBookmakers(a).every(isCryptoBk);
+/* Вилка годится для страницы, когда КАЖДОЕ её плечо — на своей БК: на
+ * крипто-странице — на крипто-площадке, на главной — на рублёвой. Сервер
+ * смешанных вилок и не считает (CRYPTO_SEPARATE), фильтр здесь — на случай
+ * выключенного разделения и старых записей истории. */
+const allLegsOnPage = (a) => rowBookmakers(a).every(isPageBk);
 
-// Матч в списке крипто-страницы — если его котирует хотя бы одна
-// крипто-площадка; чужие БК из его строки убираются.
-function cryptoMatches(rows) {
+// Матч в списке страницы — если его котирует хотя бы одна своя БК; чужие
+// БК из его строки убираются.
+function pageMatches(rows) {
   return rows
-    .filter((m) => (m.bookmakers || []).some(isCryptoBk))
-    .map((m) => ({ ...m, bookmakers: (m.bookmakers || []).filter(isCryptoBk) }));
+    .filter((m) => (m.bookmakers || []).some(isPageBk))
+    .map((m) => ({ ...m, bookmakers: (m.bookmakers || []).filter(isPageBk) }));
 }
 
-// Роспись матча: остаются кэфы только крипто-площадок (и рынки, где они есть)
-function cryptoDetail(d) {
+// Роспись матча: остаются кэфы только своих БК (и рынки, где они есть)
+function pageDetail(d) {
   if (!d) return d;
   const markets = (d.markets || [])
-    .map((m) => ({ ...m, quotes: (m.quotes || []).filter((q) => isCryptoBk(q.bookmaker)) }))
+    .map((m) => ({ ...m, quotes: (m.quotes || []).filter((q) => isPageBk(q.bookmaker)) }))
     .filter((m) => m.quotes.length);
-  return { ...d, markets, bookmakers: (d.bookmakers || []).filter(isCryptoBk) };
+  return { ...d, markets, bookmakers: (d.bookmakers || []).filter(isPageBk) };
 }
 
-function cryptoBookmakerStatus(bookmakers) {
+function pageBookmakerStatus(bookmakers) {
   return Object.fromEntries(
-    Object.entries(bookmakers || {}).filter(([bk]) => isCryptoBk(bk)));
+    Object.entries(bookmakers || {}).filter(([bk]) => isPageBk(bk)));
 }
 
 function applyFilters(rows) {
@@ -499,7 +509,7 @@ function renderMatches() {
 }
 
 function renderDetail() {
-  const d = CRYPTO_PAGE ? cryptoDetail(lastDetail) : lastDetail;
+  const d = pageDetail(lastDetail);
   if (!d) {
     els.detailTitle.textContent = "Матч не найден";
     els.detailMeta.textContent = "Возможно, матч уже начался или котировки устарели.";
@@ -692,7 +702,8 @@ function toggleCardBlur(key) {
 
 const EMPTY_ARBS = CRYPTO_PAGE
   ? "Крипто-вилок нет — ждём следующего обновления… (в вилку идут только " +
-    "пары bc.game/Roobet + 1win: площадки одной платформы между собой не сшиваются)"
+    "пары «1win + bc.game/Roobet/Rainbet/500.casino»: площадки одной " +
+    "платформы BetBy между собой не сшиваются)"
   : "Вилок нет — ждём следующего обновления…";
 
 /* Одна карточка вилки: двух- или трёхплечевой (legs — исход, кэф, БК,
@@ -1408,13 +1419,15 @@ async function poll() {
       cryptoBks = new Set(data.currency.crypto_bookmakers.map(
         (b) => String(b).trim().toLowerCase()));
     }
-    // Крипто-страница: остаются вилки, у которых все плечи на
-    // крипто-площадках, и в шапке — только эти площадки
-    if (CRYPTO_PAGE) {
-      data.arbs = (data.arbs || []).filter(allLegsCrypto);
-      data.arbs_1x2 = (data.arbs_1x2 || []).filter(allLegsCrypto);
-      data.bookmakers = cryptoBookmakerStatus(data.bookmakers);
+    if (data.currency && "crypto_separate" in data.currency) {
+      cryptoSeparate = !!data.currency.crypto_separate;
+      applyPageLabels();
     }
+    // Каждая страница видит только своё: вилки, у которых все плечи на
+    // своих БК, и в шапке — только эти БК
+    data.arbs = (data.arbs || []).filter(allLegsOnPage);
+    data.arbs_1x2 = (data.arbs_1x2 || []).filter(allLegsOnPage);
+    data.bookmakers = pageBookmakerStatus(data.bookmakers);
     els.soundThreshold.textContent = soundAlertProfit;
     els.interval.textContent = data.scan_interval;
 
@@ -1465,7 +1478,7 @@ async function poll() {
       const resp = await fetch(`/api/rejected?min_profit=${minProfit}`);
       const data = await resp.json();
       lastRejected = [...(data.rejected || []), ...(data.rejected_1x2 || [])]
-        .filter((a) => !CRYPTO_PAGE || allLegsCrypto(a))
+        .filter(allLegsOnPage)
         .sort((a, b) => b.profit_pct - a.profit_pct);
     } catch (err) { /* статус уже показан выше */ }
   }
@@ -1478,7 +1491,7 @@ async function poll() {
       try {
         const resp = await fetch(url);
         const data = await resp.json();
-        lastMatches = CRYPTO_PAGE ? cryptoMatches(data.matches) : data.matches;
+        lastMatches = pageMatches(data.matches || []);
       } catch (err) { /* статус уже показан выше */ }
     }
   }
@@ -1673,12 +1686,29 @@ els.viewTabs.querySelectorAll("button").forEach(
 // Раздел сайта: подсветка в шапке, подзаголовок, состав источников в подвале
 els.pageNav.querySelectorAll("a").forEach((a) => a.classList.toggle(
   "active", a.dataset.page === (CRYPTO_PAGE ? "crypto" : "all")));
-if (CRYPTO_PAGE) {
-  els.modeSub.textContent = "крипто-вилки";
-  document.title = "Крипто-вилки — bc.game, Roobet, 1win, Stake";
-  els.sourcesAll.hidden = true;
-  els.sourcesCrypto.hidden = false;
+/* Подписи разделов зависят от того, разведены ли миры: при CRYPTO_SEPARATE
+ * главная — «Рублёвые БК» (крипто-площадок на ней нет), иначе — «Все БК». */
+function applyPageLabels() {
+  const allLink = els.pageNav.querySelector('a[data-page="all"]');
+  if (allLink) allLink.textContent = cryptoSeparate ? "₽ Рублёвые БК" : "Все БК";
+  if (CRYPTO_PAGE) {
+    els.modeSub.textContent = "крипто-вилки";
+    document.title = "Крипто-вилки — 1win, bc.game, Roobet, Rainbet, 500.casino";
+    els.sourcesAll.hidden = true;
+    els.sourcesCrypto.hidden = false;
+  } else {
+    els.modeSub.textContent = cryptoSeparate ? "рублёвые БК: прематч и лайв" : "прематч и лайв";
+    els.sourcesAll.hidden = false;
+    els.sourcesCrypto.hidden = true;
+    // на главной крипто-площадки в подвале не перечисляем, когда миры разведены
+    els.sourcesAll.querySelectorAll(".bk-chip").forEach((chip) => {
+      chip.hidden = cryptoSeparate && isCryptoBk(chip.textContent);
+    });
+    const note = document.getElementById("crypto-note");
+    if (note) note.hidden = !cryptoSeparate;
+  }
 }
+applyPageLabels();
 updateVisibility();
 
 loadProfile();
