@@ -13,10 +13,20 @@ import threading
 from urllib.parse import urlsplit
 
 from ..config import LIGASTAVOK_PROXY, USE_SELENIUM
+from ..proxy_relay import browser_proxy, has_credentials
 
 log = logging.getLogger("parsers.selenium")
 
 _warned = False
+
+
+def _mask(proxy_url: str) -> str:
+    """Адрес прокси для лога без пароля."""
+    u = urlsplit(proxy_url)
+    if not u.hostname:
+        return proxy_url
+    user = f"{u.username}:***@" if u.username else ""
+    return f"{u.scheme}://{user}{u.hostname}:{u.port}"
 
 # Все парсеры делят ОДИН браузер, страницы рендерятся строго по одной.
 # Несколько Chrome на слабом VPS (1–2 vCPU) не могут даже стартовать
@@ -146,34 +156,26 @@ def _make_driver(proxy: str | None = None):
     # до формы входа, точно как Qrator у Лиги Ставок — без резидентного/
     # мобильного российского прокси личный кабинет с VPS не открыть.
     #
-    # Chrome НЕ умеет логин/пароль в --proxy-server — работает только
-    # авторизация по IP сервера. ПРОВЕРЕНО двумя способами, оба не работают
-    # в этой среде: (1) расширение chrome.webRequest.onAuthRequired —
-    # branded google-chrome прямо игнорирует `--load-extension` («is not
-    # allowed in Google Chrome»); (2) перехват через CDP
-    # Fetch.authRequired — событие вообще не срабатывает для авторизации
-    # НА ПРОКСИ (только для WWW-Authenticate самого сайта), проверено на
-    # локальном тестовом HTTP-прокси с basic-auth — запрос виснет на
-    # ProxyAuthenticationFailed, событие в CDP не приходит. Поэтому у
-    # прокси-провайдера нужно включать именно авторизацию по IP (у VPS он
-    # статический — большинство провайдеров это поддерживают), а не
-    # логин/пароль.
+    # Chrome НЕ умеет логин/пароль в --proxy-server (ни расширением — branded
+    # google-chrome игнорирует `--load-extension`, ни через CDP —
+    # Fetch.authRequired на авторизацию у прокси не срабатывает; оба пути
+    # проверены). Прокси с логином поэтому идёт через локальный
+    # ретранслятор (app/proxy_relay.py): браузеру отдаётся 127.0.0.1:порт
+    # без авторизации, а логин/пароль подставляет ретранслятор.
     effective_proxy = LIGASTAVOK_PROXY if proxy is None else proxy
     if effective_proxy:
-        u = urlsplit(effective_proxy)
-        if u.hostname and u.port:
-            scheme = u.scheme or "http"
-            options.add_argument(
-                f"--proxy-server={scheme}://{u.hostname}:{u.port}")
-            if u.username:
-                log.warning(
-                    "Selenium: у прокси задан логин/пароль — браузер их "
-                    "НЕ передаст (ограничение Chrome, актуально и для "
-                    "расширений, и для CDP — проверено). Включите у "
-                    "прокси-провайдера авторизацию по IP сервера (у VPS "
-                    "он статический), иначе анти-бот-челлендж не "
-                    "пройдёт (HTTP-API парсера при этом работает с "
-                    "логином/паролем как обычно).")
+        try:
+            server = browser_proxy(effective_proxy)
+        except Exception as exc:  # noqa: BLE001 — кривой адрес/нет порта
+            log.warning("Selenium: прокси %s не подключить: %s",
+                        _mask(effective_proxy), exc)
+            server = None
+        if server:
+            options.add_argument(f"--proxy-server={server}")
+            if has_credentials(effective_proxy):
+                log.info("Selenium: прокси с логином — браузер идёт через "
+                         "ретранслятор %s → %s", server,
+                         _mask(effective_proxy))
     # Живые страницы БК грузятся «бесконечно» (websocket, лента ставок) —
     # не ждём полной загрузки, забираем DOM после паузы. Иначе на слабом
     # VPS driver.get() падает с «Timed out receiving message from renderer».

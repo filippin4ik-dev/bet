@@ -15,9 +15,17 @@ selenium>=4.21
 # только клиент websocket.
 websocket-client>=1.7
 
-# SOCKS-прокси для requests (LIGASTAVOK_PROXY=socks5://...):
-# Qrator Лиги Ставок блокирует IP дата-центров, нужен резидентный прокси.
+# SOCKS-прокси для requests (LIGASTAVOK_PROXY / STAKE_PROXY=socks5://...):
+# Qrator Лиги Ставок и Cloudflare Stake блокируют IP дата-центров, нужен
+# резидентный прокси. Он же нужен локальному ретранслятору прокси для
+# браузера (app/proxy_relay.py).
 pysocks>=1.7
+
+# Stake: челлендж Cloudflare (Turnstile) проходит только «настоящий»
+# Chrome без следов автоматизации — обычный chromedriver Cloudflare
+# распознаёт и галочку не засчитывает (проверено). Нужен Chrome и экран
+# (DISPLAY или Xvfb — парсер поднимет Xvfb сам, если он установлен).
+undetected-chromedriver>=3.5
 
 # Шифрование логинов/паролей аккаунтов БК в базе (админка) и подпись
 # сессионных cookie.

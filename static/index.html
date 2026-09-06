@@ -436,8 +436,9 @@
       <span class="bk-chip bk-roobet">Roobet</span>
       <span class="bk-chip bk-rainbet">Rainbet</span>
       <span class="bk-chip bk-500">500.casino</span>
-      <span class="bk-chip bk-stake bk-chip-off"
-            title="Stake закрыт Cloudflare для адресов дата-центров: линия подключится, как только у сервера появится резидентный прокси">Stake</span>
+      <!-- app.js снимает bk-chip-off, как только Stake появится в статусе БК -->
+      <span class="bk-chip bk-stake bk-chip-off" id="chip-stake"
+            title="Stake закрыт Cloudflare для адресов дата-центров и РКН в России: линия подключается через резидентный прокси не из России (STAKE_PROXY, см. README)">Stake</span>
       <span class="muted">· bc.game, Roobet, Rainbet и 500.casino — одна платформа BetBy, между собой в вилку не сшиваются;
         1win — своя линия, с каждой из них сшивается</span>
     </span>

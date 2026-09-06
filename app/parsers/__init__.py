@@ -6,7 +6,7 @@ import logging
 
 from ..config import (BCGAME_ENABLED, BOOKMAKERS_ONLY, FIVEHUNDRED_ENABLED,
                       LIGASTAVOK_ENABLED, MELBET_ENABLED, ONEWIN_ENABLED,
-                      RAINBET_ENABLED, ROOBET_ENABLED)
+                      RAINBET_ENABLED, ROOBET_ENABLED, STAKE_ENABLED)
 from .base import BaseParser
 from .bcgame import BCGameParser
 from .betboom import BetBoomParser
@@ -19,6 +19,7 @@ from .melbet import MelbetParser
 from .onewin import OneWinParser
 from .rainbet import RainbetParser
 from .roobet import RoobetParser
+from .stake import StakeParser
 from .winline import WinlineParser
 
 log = logging.getLogger("parsers")
@@ -36,6 +37,7 @@ BOOKMAKERS = [b for b in
               (["1win"] if ONEWIN_ENABLED else []) +
               (["Rainbet"] if RAINBET_ENABLED else []) +
               (["500.casino"] if FIVEHUNDRED_ENABLED else []) +
+              (["Stake"] if STAKE_ENABLED else []) +
               (["Liga Stavok"] if LIGASTAVOK_ENABLED else [])
               if _wanted(b)]
 
@@ -46,12 +48,13 @@ _rb_notice_shown = False
 _ow_notice_shown = False
 _rain_notice_shown = False
 _fh_notice_shown = False
+_stk_notice_shown = False
 
 
 def get_parsers() -> list[BaseParser]:
     global _ls_notice_shown, _bc_notice_shown, _mb_notice_shown
     global _rb_notice_shown, _ow_notice_shown, _rain_notice_shown
-    global _fh_notice_shown
+    global _fh_notice_shown, _stk_notice_shown
     parsers: list[BaseParser] = [WinlineParser(), BetBoomParser(),
                                  FonbetParser(), LeonParser(),
                                  BetcityParser()]
@@ -104,6 +107,15 @@ def get_parsers() -> list[BaseParser]:
             "платформе BetBy (в вилку сшивается с 1win). "
             "FIVEHUNDRED_ENABLED=1 — включить обратно.")
         _fh_notice_shown = True
+    if STAKE_ENABLED:
+        parsers.append(StakeParser())
+    elif not _stk_notice_shown:
+        log.info(
+            "Stake отключена: сайт закрыт Cloudflare для адресов "
+            "дата-центров, а в России — РКН. Нужен резидентный прокси НЕ из "
+            "России с липкой сессией: задайте STAKE_PROXY (включится "
+            "автоматически) или STAKE_ENABLED=1 (см. README).")
+        _stk_notice_shown = True
     if LIGASTAVOK_ENABLED:
         parsers.append(LigaStavokParser())
     elif not _ls_notice_shown:

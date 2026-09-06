@@ -626,6 +626,68 @@ ONEWIN_MIN_REFRESH = float(os.getenv("ONEWIN_MIN_REFRESH", "60"))
 ONEWIN_ENABLED = os.getenv("ONEWIN_ENABLED", "1") not in (
     "0", "false", "no", "")
 
+# ---- Stake: собственная линия (Betradar) за GraphQL под Cloudflare ----
+# stake.com/ru/sports — свой спортбук на данных Betradar: GraphQL
+# {STAKE_SITE_URL}/_api/graphql без авторизации отдаёт турниры, матчи и
+# ВСЕ рынки с русскими названиями (заголовок x-language: ru). Но сайт
+# закрыт Cloudflare: адресам дата-центров он показывает JS-челлендж с
+# галочкой Turnstile, а cookie cf_clearance после неё привязана к IP и
+# User-Agent. Поэтому парсер:
+#   1) ходит через резидентный прокси STAKE_PROXY (НЕ российский: в России
+#      stake.com блокирует РКН — TLS-рукопожатие рвётся на DPI, проверено
+#      с московского выхода; из Германии/Финляндии/Бразилии сайт открыт);
+#   2) при первом обходе и при каждом новом 403 проходит челлендж настоящим
+#      Chrome (undetected-chromedriver, окно на экране/Xvfb — headless
+#      Turnstile не пропускает) и кликает галочку через CDP — ~15 с;
+#   3) дальше всё берёт обычными HTTP-запросами с cookie cf_clearance и тем
+#      же User-Agent через тот же прокси (проверено: 200 на GraphQL).
+# У прокси должен быть ЛИПКИЙ выход — IP между запросами меняться не
+# должен, иначе cf_clearance протухает на каждом запросе. У большинства
+# провайдеров липкая сессия задаётся в логине, напр.
+#   socks5://user_country-DE_session-arb1:pass@host:port
+# (без `_session-…` выход у proxxxymiron ротируется на каждое соединение).
+# Пароль в адресе — нормально: HTTP-запросы идут с ним напрямую, а браузер —
+# через локальный ретранслятор (app/proxy_relay.py).
+STAKE_PROXY = os.getenv("STAKE_PROXY", "").strip()
+STAKE_SITE_URL = os.getenv("STAKE_SITE_URL", "https://stake.com").rstrip("/")
+STAKE_LANG = os.getenv("STAKE_LANG", "ru")
+# Какие виды спорта обходить (slug'и Stake через запятую). Пусто — все,
+# что вернёт sportList, кроме «специальных» (politics-entertainment).
+STAKE_SPORTS = tuple(
+    s.strip().lower() for s in os.getenv("STAKE_SPORTS", "").split(",")
+    if s.strip())
+# Сколько турниров одного вида спорта запрашивать за один GraphQL-запрос
+# и сколько матчей брать из каждого турнира (полная роспись каждого матча
+# приходит в том же ответе, поэтому страница — сотни КБ).
+STAKE_TOURNAMENTS_PER_PAGE = int(os.getenv("STAKE_TOURNAMENTS_PER_PAGE", "25"))
+STAKE_FIXTURES_PER_TOURNAMENT = int(os.getenv("STAKE_FIXTURES_PER_TOURNAMENT",
+                                              "50"))
+# Сколько страниц турниров максимум листать на один вид спорта.
+STAKE_MAX_PAGES = int(os.getenv("STAKE_MAX_PAGES", "12"))
+# Сколько секунд максимум тратить на сбор всей линии за обход.
+STAKE_FEED_TIMEOUT = float(os.getenv("STAKE_FEED_TIMEOUT", "120"))
+# Минимальная пауза между обходами прематча, сек.
+STAKE_MIN_REFRESH = float(os.getenv("STAKE_MIN_REFRESH", "60"))
+# Челлендж Cloudflare: сколько секунд ждать прохода и как часто разрешено
+# его перепроходить (после каждого проваленного — пауза, чтобы не гонять
+# браузер в цикле, пока прокси лежит).
+STAKE_SOLVE_TIMEOUT = float(os.getenv("STAKE_SOLVE_TIMEOUT", "60"))
+STAKE_SOLVE_COOLDOWN = float(os.getenv("STAKE_SOLVE_COOLDOWN", "180"))
+# Файл, куда парсер кладёт пройденную cookie cf_clearance с User-Agent, —
+# после перезапуска сканера челлендж не проходится заново.
+STAKE_SESSION_FILE = os.getenv("STAKE_SESSION_FILE", ".stake_session.json")
+# Включён ли Stake. АВТО: работает, только если задан STAKE_PROXY (без
+# прокси с адреса дата-центра челлендж не пройти, а каждый обход впустую
+# гонял бы браузер). Явно: STAKE_ENABLED=1 — включить всегда (например,
+# сервер сам на «жилом» IP вне России), 0 — выключить.
+_STK_RAW = os.getenv("STAKE_ENABLED", "").strip().lower()
+if _STK_RAW in ("1", "true", "yes"):
+    STAKE_ENABLED = True
+elif _STK_RAW in ("0", "false", "no"):
+    STAKE_ENABLED = False
+else:
+    STAKE_ENABLED = bool(STAKE_PROXY)
+
 # ---- LeonBet: публичный JSON-фид линии ----
 # Leon отдаёт всю линию (прематч+лайв) одним JSON-снимком без авторизации:
 # GET {LEON_API_HOST}/api-2/betline/changes/all?ctag=ru-RU&vtag=&flags=...

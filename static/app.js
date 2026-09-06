@@ -558,6 +558,14 @@ function renderDetail() {
 }
 
 function renderBkCounts(bookmakers) {
+  // Stake в футере нарисован «пунктиром» (нет прокси — нет линии); как
+  // только сервер начал её опрашивать, чип становится обычным.
+  const stakeChip = document.getElementById("chip-stake");
+  if (stakeChip) {
+    const on = Object.keys(bookmakers || {}).some((bk) => bk.toLowerCase() === "stake");
+    stakeChip.classList.toggle("bk-chip-off", !on);
+    if (on) stakeChip.title = "Stake — своя линия (Betradar) через резидентный прокси; сшивается с 1win и площадками BetBy";
+  }
   const age = (s) => {
     if (s == null) return "";
     if (s < 90) return "только что";
